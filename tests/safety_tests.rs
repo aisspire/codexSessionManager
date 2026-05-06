@@ -18,6 +18,21 @@ fn detects_codex_desktop_cli_and_app_server_processes() {
 }
 
 #[test]
+fn detects_windows_codex_desktop_cli_and_app_server_processes() {
+    let processes = detect_codex_processes_from_lines(&[
+        r"C:\Windows\System32\notepad.exe".to_string(),
+        r"C:\Users\me\AppData\Local\Programs\Codex\Codex.exe".to_string(),
+        r"C:\Users\me\AppData\Roaming\npm\codex.cmd".to_string(),
+        r"C:\Users\me\AppData\Roaming\npm\codex.cmd app-server --port 12345".to_string(),
+    ]);
+
+    assert_eq!(processes.len(), 3);
+    assert!(processes.iter().any(|process| process.kind == "desktop"));
+    assert!(processes.iter().any(|process| process.kind == "cli"));
+    assert!(processes.iter().any(|process| process.kind == "app-server"));
+}
+
+#[test]
 fn blocks_writes_when_codex_is_running() {
     let result = ensure_codex_not_running_with(|| {
         Ok(detect_codex_processes_from_lines(&[

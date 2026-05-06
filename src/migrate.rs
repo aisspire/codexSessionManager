@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::backup;
 use crate::path_map::apply_first_path_map;
@@ -26,7 +27,7 @@ impl Default for ApplyOptions {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MutationReport {
     pub action: String,
     pub applied: bool,

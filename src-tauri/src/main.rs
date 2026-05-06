@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use codex_session_manager::app_server::{self, HttpAppServerTransport};
 use codex_session_manager::backup;
+use codex_session_manager::migrate::{self, ApplyOptions};
 use codex_session_manager::path_map::PathMap;
 use codex_session_manager::profile::CodexProfile;
 use codex_session_manager::restore;
@@ -65,6 +66,33 @@ fn delete_sessions(
 }
 
 #[tauri::command]
+fn migrate_provider(
+    profile: ProfileInput,
+    from: String,
+    to: String,
+    apply: bool,
+) -> Result<migrate::MutationReport, String> {
+    let from = from.trim();
+    let to = to.trim();
+    if from.is_empty() || to.is_empty() {
+        return Err("provider migration requires both source and target providers".to_string());
+    }
+
+    let profile = build_profile(profile)?;
+    migrate::migrate_provider(
+        &profile,
+        from,
+        to,
+        &ApplyOptions {
+            apply,
+            backup: true,
+            include_sessions_backup: false,
+        },
+    )
+    .map_err(format_error)
+}
+
+#[tauri::command]
 fn create_backup(profile: ProfileInput, include_sessions: bool) -> Result<BackupResponse, String> {
     let profile = build_profile(profile)?;
     let backup = backup::create_backup(&profile, include_sessions).map_err(format_error)?;
@@ -91,8 +119,8 @@ fn app_server_probe(
     endpoint: String,
 ) -> Result<app_server::AppServerProbeReport, String> {
     let profile = build_profile(profile)?;
-    let sessions =
-        session_list::list_sessions(&profile, &SessionListFilter::default()).map_err(format_error)?;
+    let sessions = session_list::list_sessions(&profile, &SessionListFilter::default())
+        .map_err(format_error)?;
     let transport = HttpAppServerTransport::new(endpoint);
     app_server::probe_app_server(&transport, &sessions).map_err(format_error)
 }
@@ -132,6 +160,7 @@ fn main() {
             archive_sessions,
             restore_sessions,
             delete_sessions,
+            migrate_provider,
             create_backup,
             restore_manifest,
             app_server_probe

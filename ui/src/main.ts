@@ -43,6 +43,15 @@ interface SessionListFilter {
   search?: string;
 }
 
+interface MutationReport {
+  action: string;
+  applied: boolean;
+  backup_dir?: string;
+  sqlite_rows: number;
+  jsonl_files: number;
+  index_entries: number;
+}
+
 const tableColumns: TableColumn[] = [
   { key: "select", label: "", width: 42, minWidth: 42, resizable: false },
   { key: "session", label: "会话", width: 280, minWidth: 180, resizable: true },
@@ -61,6 +70,10 @@ const state = {
   filter: {
     archived: "all",
   } as SessionListFilter,
+  providerMigration: {
+    from: "codex-auto-review",
+    to: "cm",
+  },
   sessions: [] as SessionSummary[],
   selectedIds: new Set<string>(),
   activeId: "",
@@ -90,6 +103,15 @@ function render() {
           ${archivedButton("archived", "已归档")}
         </div>
         <button id="refresh" class="primary">刷新</button>
+        <div class="migration-panel">
+          <div class="migration-title">迁移提供方</div>
+          <label>从<input id="provider-from" value="${escapeHtml(state.providerMigration.from)}" /></label>
+          <label>到<input id="provider-to" value="${escapeHtml(state.providerMigration.to)}" /></label>
+          <div class="migration-actions">
+            <button id="preview-provider-migration">预览</button>
+            <button id="apply-provider-migration" class="primary">应用</button>
+          </div>
+        </div>
       </aside>
       <section class="workbench">
         <div class="toolbar">
@@ -173,7 +195,11 @@ function bindEvents() {
   bindInput("model", (value) => (state.filter.model = emptyToUndefined(value)));
   bindInput("source", (value) => (state.filter.source = emptyToUndefined(value)));
   bindInput("search", (value) => (state.filter.search = emptyToUndefined(value)));
+  bindInput("provider-from", (value) => (state.providerMigration.from = value));
+  bindInput("provider-to", (value) => (state.providerMigration.to = value));
   document.querySelector("#refresh")?.addEventListener("click", refresh);
+  document.querySelector("#preview-provider-migration")?.addEventListener("click", () => migrateProvider(false));
+  document.querySelector("#apply-provider-migration")?.addEventListener("click", () => migrateProvider(true));
   document.querySelector("#archive")?.addEventListener("click", () => mutateSelected("archive_sessions"));
   document.querySelector("#restore")?.addEventListener("click", () => mutateSelected("restore_sessions"));
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
@@ -240,6 +266,37 @@ async function mutateIds(command: string, ids: string[]) {
   });
 }
 
+async function migrateProvider(apply: boolean) {
+  const from = state.providerMigration.from.trim();
+  const to = state.providerMigration.to.trim();
+  if (!from || !to) {
+    state.status = "请填写来源和目标提供方";
+    render();
+    return;
+  }
+  if (apply && !window.confirm(`将 ${from} 迁移为 ${to}，并在写入前创建备份。继续？`)) {
+    return;
+  }
+
+  await run(async () => {
+    const report = await invoke<MutationReport>("migrate_provider", {
+      profile: state.profile,
+      from,
+      to,
+      apply,
+    });
+    if (apply) {
+      state.sessions = await invoke<SessionSummary[]>("list_sessions", {
+        profile: state.profile,
+        filter: state.filter,
+      });
+      state.selectedIds.clear();
+      state.activeId = state.sessions[0]?.id || "";
+    }
+    state.status = formatMutationReport(report);
+  });
+}
+
 async function createBackup() {
   await run(async () => {
     const report = await invoke("create_backup", { profile: state.profile, includeSessions: false });
@@ -266,6 +323,11 @@ async function run(task: () => Promise<void>) {
   } finally {
     render();
   }
+}
+
+function formatMutationReport(report: MutationReport) {
+  const backup = report.backup_dir ? ` · 备份 ${report.backup_dir}` : "";
+  return `${report.action} · ${report.applied ? "已应用" : "预览"} · SQLite ${report.sqlite_rows} 行 · JSONL ${report.jsonl_files} 个${backup}`;
 }
 
 function tableSizingStyle() {

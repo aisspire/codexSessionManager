@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -32,14 +33,15 @@ where
 }
 
 pub fn detect_codex_processes() -> Result<Vec<CodexProcess>> {
-    detect_codex_processes_from_proc(Path::new("/proc"))
+    let proc_dir = Path::new("/proc");
+    if proc_dir.exists() {
+        return detect_codex_processes_from_proc(proc_dir);
+    }
+
+    detect_codex_processes_from_command()
 }
 
 fn detect_codex_processes_from_proc(proc_dir: &Path) -> Result<Vec<CodexProcess>> {
-    if !proc_dir.exists() {
-        bail!("cannot inspect running processes on this platform");
-    }
-
     let mut lines = Vec::new();
     for entry in fs::read_dir(proc_dir).context("failed to read /proc")? {
         let entry = entry?;
@@ -70,6 +72,44 @@ fn detect_codex_processes_from_proc(proc_dir: &Path) -> Result<Vec<CodexProcess>
     Ok(detect_codex_processes_from_lines(&lines))
 }
 
+fn detect_codex_processes_from_command() -> Result<Vec<CodexProcess>> {
+    let output = process_list_command()
+        .output()
+        .context("failed to inspect running processes")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("failed to inspect running processes: {stderr}");
+    }
+
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Ok(detect_codex_processes_from_lines(&lines))
+}
+
+#[cfg(target_os = "windows")]
+fn process_list_command() -> Command {
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }",
+    ]);
+    command
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_list_command() -> Command {
+    let mut command = Command::new("ps");
+    command.args(["-eo", "args="]);
+    command
+}
+
 pub fn detect_codex_processes_from_lines(lines: &[String]) -> Vec<CodexProcess> {
     lines
         .iter()
@@ -79,7 +119,11 @@ pub fn detect_codex_processes_from_lines(lines: &[String]) -> Vec<CodexProcess> 
 
 fn detect_codex_process(line: &str) -> Option<CodexProcess> {
     let lower = line.to_ascii_lowercase();
-    let kind = if lower.contains("codex desktop") || lower.contains("/codex/codex") {
+    let kind = if lower.contains("codex desktop")
+        || lower.contains("/codex/codex")
+        || lower.contains("\\codex\\codex")
+        || lower.ends_with("\\codex.exe")
+    {
         "desktop"
     } else if lower.contains("app-server") && lower.contains("codex") {
         "app-server"
@@ -98,6 +142,9 @@ fn detect_codex_process(line: &str) -> Option<CodexProcess> {
 fn is_codex_cli(lower: &str) -> bool {
     lower == "codex"
         || lower.ends_with("/codex")
+        || lower.ends_with("\\codex")
+        || lower.ends_with("\\codex.cmd")
         || lower.contains(" codex ")
         || lower.contains("/.npm/bin/codex")
+        || lower.contains("\\npm\\codex.cmd")
 }
