@@ -1,13 +1,17 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
+use crate::app_server::{self, HttpAppServerTransport};
 use crate::backup;
 use crate::migrate::{self, ApplyOptions};
 use crate::path_map::PathMap;
 use crate::profile::CodexProfile;
+use crate::restore;
 use crate::scan;
+use crate::session_list::{self, ArchivedFilter, SessionListFilter};
+use crate::session_ops::{self, SessionApplyOptions};
 use crate::validate;
 
 #[derive(Debug, Parser)]
@@ -52,6 +56,22 @@ pub enum Command {
     /// Validate SQLite integrity and JSONL/thread consistency.
     Validate,
 
+    /// List sessions by project, provider, model, and archive state.
+    List {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long, default_value = "all")]
+        archived: ArchivedArg,
+        #[arg(long)]
+        search: Option<String>,
+    },
+
     /// Migrate SQLite and JSONL session metadata provider values.
     MigrateProvider {
         #[arg(long)]
@@ -91,6 +111,46 @@ pub enum Command {
         #[arg(long)]
         no_backup: bool,
     },
+
+    /// Archive selected sessions.
+    Archive {
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        no_backup: bool,
+    },
+
+    /// Restore selected sessions from archived state.
+    Restore {
+        #[arg(long = "id")]
+        ids: Vec<String>,
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        #[arg(long = "file")]
+        files: Vec<String>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        no_backup: bool,
+    },
+
+    /// Move selected sessions to this tool's trash and archive their threads.
+    Delete {
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        no_backup: bool,
+    },
+
+    /// Call Codex app-server thread/list and thread/read for black-box validation.
+    AppServerProbe {
+        #[arg(long)]
+        endpoint: String,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -113,6 +173,27 @@ pub fn run() -> Result<()> {
             if !report.is_ok() {
                 std::process::exit(2);
             }
+        }
+        Command::List {
+            project,
+            provider,
+            model,
+            source,
+            archived,
+            search,
+        } => {
+            let sessions = session_list::list_sessions(
+                &profile,
+                &SessionListFilter {
+                    project: project.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    source: source.clone(),
+                    archived: (*archived).into(),
+                    search: search.clone(),
+                },
+            )?;
+            print_session_list(&sessions);
         }
         Command::MigrateProvider {
             from,
@@ -170,9 +251,109 @@ pub fn run() -> Result<()> {
             )?;
             println!("{}", report.to_text());
         }
+        Command::Archive {
+            ids,
+            apply,
+            no_backup,
+        } => {
+            let report = session_ops::archive_sessions(
+                &profile,
+                ids,
+                &SessionApplyOptions {
+                    apply: *apply,
+                    backup: !no_backup,
+                    include_sessions_backup: false,
+                },
+            )?;
+            println!("{}", report.to_text());
+        }
+        Command::Restore {
+            ids,
+            manifest,
+            files,
+            apply,
+            no_backup,
+        } => {
+            if let Some(manifest) = manifest {
+                let report = restore::restore_from_manifest(manifest, files, *apply)?;
+                println!("{}", report.to_text());
+            } else {
+                if ids.is_empty() {
+                    bail!(
+                        "restore requires --id for session restore or --manifest for file restore"
+                    );
+                }
+                let report = session_ops::restore_sessions(
+                    &profile,
+                    ids,
+                    &SessionApplyOptions {
+                        apply: *apply,
+                        backup: !no_backup,
+                        include_sessions_backup: false,
+                    },
+                )?;
+                println!("{}", report.to_text());
+            }
+        }
+        Command::Delete {
+            ids,
+            apply,
+            no_backup,
+        } => {
+            let report = session_ops::delete_sessions(
+                &profile,
+                ids,
+                &SessionApplyOptions {
+                    apply: *apply,
+                    backup: !no_backup,
+                    include_sessions_backup: false,
+                },
+            )?;
+            println!("{}", report.to_text());
+        }
+        Command::AppServerProbe { endpoint } => {
+            let sessions = session_list::list_sessions(&profile, &SessionListFilter::default())?;
+            let transport = HttpAppServerTransport::new(endpoint);
+            let report = app_server::probe_app_server(&transport, &sessions)?;
+            println!("{}", report.to_text());
+        }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ArchivedArg {
+    Active,
+    Archived,
+    All,
+}
+
+impl From<ArchivedArg> for ArchivedFilter {
+    fn from(value: ArchivedArg) -> Self {
+        match value {
+            ArchivedArg::Active => ArchivedFilter::Active,
+            ArchivedArg::Archived => ArchivedFilter::Archived,
+            ArchivedArg::All => ArchivedFilter::All,
+        }
+    }
+}
+
+fn print_session_list(sessions: &[session_list::SessionSummary]) {
+    println!("sessions: {}", sessions.len());
+    println!("updated_at\tarchived\tprovider\tmodel\tproject\ttitle\tid");
+    for session in sessions {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            session.updated_at.as_deref().unwrap_or(""),
+            session.archived,
+            session.provider.as_deref().unwrap_or(""),
+            session.model.as_deref().unwrap_or(""),
+            session.project.as_deref().unwrap_or(""),
+            session.title.as_deref().unwrap_or(""),
+            session.id
+        );
+    }
 }
 
 fn build_profile(cli: &Cli) -> Result<CodexProfile> {

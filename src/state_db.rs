@@ -161,6 +161,31 @@ impl StateDb {
         Ok(changed)
     }
 
+    pub fn set_archived(&mut self, ids: &[String], archived: bool) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        for id in ids {
+            changed += tx.execute(
+                r#"
+                UPDATE threads
+                SET archived = :archived
+                WHERE id = :id
+                  AND COALESCE(archived, 0) != :archived
+                "#,
+                named_params! {
+                    ":id": id,
+                    ":archived": if archived { 1 } else { 0 },
+                },
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn integrity_check(&self) -> Result<String> {
         self.conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))

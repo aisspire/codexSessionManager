@@ -76,8 +76,14 @@ fn reads_threads_with_integer_timestamps_from_current_schema() {
 
     assert_eq!(threads.len(), 1);
     assert_eq!(threads[0].id, "thread-1");
-    assert_eq!(threads[0].created_at.as_deref(), Some("2026-02-11T06:08:35Z"));
-    assert_eq!(threads[0].updated_at.as_deref(), Some("2026-02-11T07:13:49Z"));
+    assert_eq!(
+        threads[0].created_at.as_deref(),
+        Some("2026-02-11T06:08:35Z")
+    );
+    assert_eq!(
+        threads[0].updated_at.as_deref(),
+        Some("2026-02-11T07:13:49Z")
+    );
     assert_eq!(threads[0].created_at_ms, Some(1770790115043));
     assert_eq!(threads[0].updated_at_ms, Some(1770794029123));
 }

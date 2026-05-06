@@ -27,7 +27,7 @@ impl CodexProfile {
         path_maps: Vec<PathMap>,
     ) -> Result<Self> {
         let name = name.into();
-        let codex_home = codex_home.into();
+        let codex_home = expand_home(codex_home.into());
 
         if name.trim().is_empty() {
             bail!("profile name cannot be empty");
@@ -64,4 +64,23 @@ impl CodexProfile {
     pub fn sessions_dir(&self) -> PathBuf {
         self.codex_home.join("sessions")
     }
+}
+
+fn expand_home(path: PathBuf) -> PathBuf {
+    let Some(value) = path.to_str() else {
+        return path;
+    };
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        return path;
+    };
+    let home = PathBuf::from(home);
+
+    if value == "~" {
+        return home;
+    }
+    if let Some(rest) = value.strip_prefix("~/").or_else(|| value.strip_prefix("~\\")) {
+        return home.join(rest);
+    }
+
+    path
 }
