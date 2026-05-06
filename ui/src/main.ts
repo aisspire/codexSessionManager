@@ -52,6 +52,17 @@ interface MutationReport {
   index_entries: number;
 }
 
+type DetailEditField = "title" | "project" | "provider";
+
+interface DetailEditState {
+  editingField: DetailEditField | "";
+  draft: string;
+  pendingId: string;
+  pendingTitle: string;
+  pendingProject: string;
+  pendingProvider: string;
+}
+
 const tableColumns: TableColumn[] = [
   { key: "select", label: "", width: 42, minWidth: 42, resizable: false },
   { key: "session", label: "会话", width: 280, minWidth: 180, resizable: true },
@@ -75,12 +86,14 @@ const state = {
     project: "",
     titlePrefix: "",
   },
-  detailRename: {
-    editing: false,
+  detailEdit: {
+    editingField: "" as DetailEditField | "",
     draft: "",
     pendingId: "",
     pendingTitle: "",
-  },
+    pendingProject: "",
+    pendingProvider: "",
+  } satisfies DetailEditState,
   sessions: [] as SessionSummary[],
   selectedIds: new Set<string>(),
   activeId: "",
@@ -196,20 +209,20 @@ function sessionRow(session: SessionSummary) {
 
 function detailPanel(session: SessionSummary) {
   const currentTitle = sessionTitle(session);
-  const pendingTitle = detailPendingTitle(session);
-  const dirty = detailRenameDirty(session);
+  const pendingTitle = detailPendingValue(session, "title");
+  const dirty = detailEditDirty(session);
   return `
     <div class="detail-title-row">
       ${
-        state.detailRename.editing && state.detailRename.pendingId === session.id
-          ? `<input id="detail-title-input" class="detail-title-input" value="${escapeHtml(state.detailRename.draft)}" />`
-          : `<h2>${escapeHtml(pendingTitle || currentTitle)}</h2><button id="edit-detail-title" class="icon-button" title="重命名会话">✎</button>`
+        state.detailEdit.editingField === "title" && state.detailEdit.pendingId === session.id
+          ? `<input id="detail-edit-input" class="detail-title-input" value="${escapeHtml(state.detailEdit.draft)}" />`
+          : `<h2>${escapeHtml(pendingTitle || currentTitle)}</h2><button data-detail-edit="title" class="icon-button" title="重命名会话">✎</button>`
       }
     </div>
     <dl>
       <dt>ID</dt><dd>${escapeHtml(session.id)}</dd>
-      <dt>项目</dt><dd>${escapeHtml(session.project || "")}</dd>
-      <dt>提供方</dt><dd>${escapeHtml(session.provider || "")}</dd>
+      ${detailEditableRow(session, "项目", "project")}
+      ${detailEditableRow(session, "提供方", "provider")}
       <dt>模型</dt><dd>${escapeHtml(session.model || "")}</dd>
       <dt>来源</dt><dd>${escapeHtml(session.source || "")}</dd>
       <dt>会话文件</dt><dd>${escapeHtml(session.rollout_path || "")}</dd>
@@ -255,23 +268,25 @@ function bindEvents() {
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
   document.querySelector("#backup")?.addEventListener("click", createBackup);
   document.querySelector("#probe")?.addEventListener("click", probe);
-  document.querySelector("#edit-detail-title")?.addEventListener("click", startDetailRename);
-  document.querySelector("#save-detail-title")?.addEventListener("click", saveDetailRename);
-  const detailTitleInput = document.querySelector<HTMLInputElement>("#detail-title-input");
-  if (detailTitleInput) {
-    detailTitleInput.focus();
-    detailTitleInput.select();
-    detailTitleInput.addEventListener("input", () => {
-      state.detailRename.draft = detailTitleInput.value;
+  document.querySelectorAll<HTMLElement>("[data-detail-edit]").forEach((button) => {
+    button.addEventListener("click", () => startDetailEdit(button.dataset.detailEdit as DetailEditField));
+  });
+  document.querySelector("#save-detail-title")?.addEventListener("click", saveDetailEdits);
+  const detailEditInput = document.querySelector<HTMLInputElement>("#detail-edit-input");
+  if (detailEditInput) {
+    detailEditInput.focus();
+    detailEditInput.select();
+    detailEditInput.addEventListener("input", () => {
+      state.detailEdit.draft = detailEditInput.value;
     });
-    detailTitleInput.addEventListener("keydown", (event) => {
+    detailEditInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
-        commitDetailRenameDraft();
+        commitDetailEditDraft();
         render({ preserveTableScroll: true });
       }
     });
-    detailTitleInput.addEventListener("blur", () => {
-      commitDetailRenameDraft();
+    detailEditInput.addEventListener("blur", () => {
+      commitDetailEditDraft();
       window.setTimeout(() => render({ preserveTableScroll: true }), 0);
     });
   }
@@ -378,36 +393,56 @@ async function editSelected(apply: boolean) {
   });
 }
 
-function startDetailRename() {
+function detailEditableRow(session: SessionSummary, label: string, field: DetailEditField) {
+  const editing = state.detailEdit.editingField === field && state.detailEdit.pendingId === session.id;
+  const value = editing ? state.detailEdit.draft : detailDisplayValue(session, field);
+  return `
+    <dt>${escapeHtml(label)}</dt>
+    <dd class="detail-editable-value">
+      ${
+        editing
+          ? `<input id="detail-edit-input" class="detail-inline-input" value="${escapeHtml(value)}" />`
+          : `<span>${escapeHtml(value)}</span><button data-detail-edit="${field}" class="icon-button" title="修改${escapeHtml(label)}">✎</button>`
+      }
+    </dd>
+  `;
+}
+
+function startDetailEdit(field: DetailEditField) {
   const active = state.sessions.find((session) => session.id === state.activeId);
   if (!active) return;
-  state.detailRename = {
-    editing: true,
-    draft: detailPendingTitle(active) || sessionTitle(active),
+  state.detailEdit = {
+    ...state.detailEdit,
+    editingField: field,
+    draft: detailPendingValue(active, field) || detailCurrentValue(active, field),
     pendingId: active.id,
-    pendingTitle: detailPendingTitle(active),
   };
   render({ preserveTableScroll: true });
 }
 
-function commitDetailRenameDraft() {
+function commitDetailEditDraft() {
   const active = state.sessions.find((session) => session.id === state.activeId);
-  if (!active || state.detailRename.pendingId !== active.id) return;
-  const title = state.detailRename.draft.trim();
-  state.detailRename.editing = false;
-  state.detailRename.pendingTitle = title || sessionTitle(active);
+  const field = state.detailEdit.editingField;
+  if (!active || !field || state.detailEdit.pendingId !== active.id) return;
+  const value = state.detailEdit.draft.trim() || detailCurrentValue(active, field);
+  state.detailEdit.editingField = "";
+  setDetailPendingValue(field, value);
 }
 
-async function saveDetailRename() {
+async function saveDetailEdits() {
   const active = state.sessions.find((session) => session.id === state.activeId);
-  if (!active || !detailRenameDirty(active)) return;
-  const title = detailPendingTitle(active);
+  if (!active || !detailEditDirty(active)) return;
+  const title = detailPendingValue(active, "title");
+  const project = detailPendingValue(active, "project");
+  const provider = detailPendingValue(active, "provider");
   await run(async () => {
     const report = await invoke<MutationReport>("edit_selected_sessions", {
       profile: state.profile,
       ids: [active.id],
       edit: {
-        title,
+        title: title || null,
+        project: project || null,
+        provider: provider || null,
       },
       apply: true,
     });
@@ -419,12 +454,14 @@ async function saveDetailRename() {
     state.activeId = state.sessions.some((session) => session.id === activeId)
       ? activeId
       : state.sessions[0]?.id || "";
-    state.detailRename = {
-      editing: false,
+    state.detailEdit = {
+      editingField: "" as DetailEditField | "",
       draft: "",
       pendingId: "",
       pendingTitle: "",
-    };
+      pendingProject: "",
+      pendingProvider: "",
+    } satisfies DetailEditState;
     state.status = formatMutationReport(report);
   });
 }
@@ -433,13 +470,38 @@ function sessionTitle(session: SessionSummary) {
   return session.title || session.first_user_message || session.id;
 }
 
-function detailPendingTitle(session: SessionSummary) {
-  return state.detailRename.pendingId === session.id ? state.detailRename.pendingTitle.trim() : "";
+function detailCurrentValue(session: SessionSummary, field: DetailEditField) {
+  if (field === "title") return sessionTitle(session);
+  if (field === "project") return session.project || "";
+  return session.provider || "";
 }
 
-function detailRenameDirty(session: SessionSummary) {
-  const pendingTitle = detailPendingTitle(session);
-  return pendingTitle.length > 0 && pendingTitle !== sessionTitle(session);
+function detailDisplayValue(session: SessionSummary, field: DetailEditField) {
+  return detailPendingValue(session, field) || detailCurrentValue(session, field);
+}
+
+function detailPendingValue(session: SessionSummary, field: DetailEditField) {
+  if (state.detailEdit.pendingId !== session.id) return "";
+  if (field === "title") return state.detailEdit.pendingTitle.trim();
+  if (field === "project") return state.detailEdit.pendingProject.trim();
+  return state.detailEdit.pendingProvider.trim();
+}
+
+function setDetailPendingValue(field: DetailEditField, value: string) {
+  if (field === "title") {
+    state.detailEdit.pendingTitle = value;
+  } else if (field === "project") {
+    state.detailEdit.pendingProject = value;
+  } else {
+    state.detailEdit.pendingProvider = value;
+  }
+}
+
+function detailEditDirty(session: SessionSummary) {
+  return (["title", "project", "provider"] as DetailEditField[]).some((field) => {
+    const pending = detailPendingValue(session, field);
+    return pending.length > 0 && pending !== detailCurrentValue(session, field);
+  });
 }
 
 async function createBackup() {

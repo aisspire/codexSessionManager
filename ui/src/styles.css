@@ -308,6 +308,23 @@ dd {
   color: #1c2430;
 }
 
+.detail-editable-value {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail-editable-value span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.detail-inline-input {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
 .detail-actions {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
