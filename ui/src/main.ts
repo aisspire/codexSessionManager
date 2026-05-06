@@ -150,12 +150,22 @@ function archivedButton(value: ArchivedFilter, label: string) {
 
 function tableHeader() {
   const cells = tableColumns
-    .map((column, index) => `
+    .map((column, index) => {
+      if (column.key === "select") {
+        return `
+      <span class="header-cell select-header-cell">
+        <input id="select-all" type="checkbox" aria-label="全选当前列表" ${allVisibleSessionsSelected() ? "checked" : ""} />
+      </span>
+    `;
+      }
+
+      return `
       <span class="header-cell">
         <span class="header-label">${escapeHtml(column.label)}</span>
         ${column.resizable ? `<span class="resize-handle" data-resize-column="${index}" role="separator" aria-label="调整${escapeHtml(column.label)}列宽"></span>` : ""}
       </span>
-    `)
+    `;
+    })
     .join("");
   return `<div class="row header">${cells}</div>`;
 }
@@ -206,6 +216,19 @@ function bindEvents() {
   bindInput("edit-provider", (value) => (state.selectedEdit.provider = value));
   bindInput("edit-project", (value) => (state.selectedEdit.project = value));
   document.querySelector("#refresh")?.addEventListener("click", refresh);
+  const selectAll = document.querySelector<HTMLInputElement>("#select-all");
+  if (selectAll) {
+    selectAll.indeterminate = someVisibleSessionsSelected() && !allVisibleSessionsSelected();
+    selectAll.addEventListener("click", (event) => event.stopPropagation());
+    selectAll.addEventListener("change", () => {
+      if (selectAll.checked) {
+        state.sessions.forEach((session) => state.selectedIds.add(session.id));
+      } else {
+        state.sessions.forEach((session) => state.selectedIds.delete(session.id));
+      }
+      render({ preserveTableScroll: true });
+    });
+  }
   document.querySelector("#preview-selected-edit")?.addEventListener("click", () => editSelected(false));
   document.querySelector("#apply-selected-edit")?.addEventListener("click", () => editSelected(true));
   document.querySelector("#archive")?.addEventListener("click", () => mutateSelected("archive_sessions"));
@@ -360,6 +383,14 @@ function applyTableSizing() {
   const width = state.columnWidths.reduce((total, columnWidth) => total + columnWidth, 0);
   table.style.setProperty("--session-grid", grid);
   table.style.setProperty("--session-table-width", `${width}px`);
+}
+
+function allVisibleSessionsSelected() {
+  return state.sessions.length > 0 && state.sessions.every((session) => state.selectedIds.has(session.id));
+}
+
+function someVisibleSessionsSelected() {
+  return state.sessions.some((session) => state.selectedIds.has(session.id));
 }
 
 function readTableScroll() {

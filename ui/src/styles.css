@@ -198,6 +198,11 @@ button:hover {
   padding-right: 16px;
 }
 
+.select-header-cell {
+  justify-content: center;
+  padding-right: 12px;
+}
+
 .header-label {
   min-width: 0;
   overflow: hidden;
