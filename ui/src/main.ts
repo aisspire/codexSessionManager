@@ -2,6 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import "./styles.css";
 
 type ArchivedFilter = "active" | "archived" | "all";
+type TableColumnKey = "select" | "session" | "project" | "provider" | "model" | "state" | "updated";
+
+interface TableColumn {
+  key: TableColumnKey;
+  label: string;
+  width: number;
+  minWidth: number;
+  resizable: boolean;
+}
 
 interface ProfileInput {
   codex_home: string;
@@ -34,6 +43,16 @@ interface SessionListFilter {
   search?: string;
 }
 
+const tableColumns: TableColumn[] = [
+  { key: "select", label: "", width: 42, minWidth: 42, resizable: false },
+  { key: "session", label: "会话", width: 280, minWidth: 180, resizable: true },
+  { key: "project", label: "项目", width: 220, minWidth: 140, resizable: true },
+  { key: "provider", label: "提供方", width: 120, minWidth: 90, resizable: true },
+  { key: "model", label: "模型", width: 150, minWidth: 100, resizable: true },
+  { key: "state", label: "状态", width: 110, minWidth: 86, resizable: true },
+  { key: "updated", label: "更新时间", width: 190, minWidth: 140, resizable: true },
+];
+
 const state = {
   profile: {
     codex_home: "~/.codex",
@@ -41,54 +60,54 @@ const state = {
   } satisfies ProfileInput,
   filter: {
     archived: "all",
-  } satisfies SessionListFilter,
+  } as SessionListFilter,
   sessions: [] as SessionSummary[],
   selectedIds: new Set<string>(),
   activeId: "",
-  status: "Ready",
+  status: "就绪",
+  columnWidths: tableColumns.map((column) => column.width),
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("missing app root");
+const appRoot = app;
 
 function render() {
   const active = state.sessions.find((session) => session.id === state.activeId);
-  app.innerHTML = `
+  appRoot.innerHTML = `
     <main class="shell">
       <aside class="filters">
-        <div class="brand">Codex Sessions</div>
-        <label>Codex home<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
-        <label>Project<input id="project" value="${escapeHtml(state.filter.project ?? "")}" /></label>
-        <label>Provider<input id="provider" value="${escapeHtml(state.filter.provider ?? "")}" /></label>
-        <label>Model<input id="model" value="${escapeHtml(state.filter.model ?? "")}" /></label>
-        <label>Source<input id="source" value="${escapeHtml(state.filter.source ?? "")}" /></label>
-        <label>Search<input id="search" value="${escapeHtml(state.filter.search ?? "")}" /></label>
+        <div class="brand">Codex 会话管理</div>
+        <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
+        <label>项目<input id="project" value="${escapeHtml(state.filter.project ?? "")}" /></label>
+        <label>提供方<input id="provider" value="${escapeHtml(state.filter.provider ?? "")}" /></label>
+        <label>模型<input id="model" value="${escapeHtml(state.filter.model ?? "")}" /></label>
+        <label>来源<input id="source" value="${escapeHtml(state.filter.source ?? "")}" /></label>
+        <label>搜索<input id="search" value="${escapeHtml(state.filter.search ?? "")}" /></label>
         <div class="segmented" role="group">
-          ${archivedButton("all", "All")}
-          ${archivedButton("active", "Active")}
-          ${archivedButton("archived", "Archived")}
+          ${archivedButton("all", "全部")}
+          ${archivedButton("active", "活动")}
+          ${archivedButton("archived", "已归档")}
         </div>
-        <button id="refresh" class="primary">Refresh</button>
+        <button id="refresh" class="primary">刷新</button>
       </aside>
       <section class="workbench">
         <div class="toolbar">
-          <div>${state.sessions.length} sessions · ${state.selectedIds.size} selected</div>
-          <button id="probe" title="Run app-server probe">Probe</button>
-          <button id="backup" title="Create backup">Backup</button>
-          <button id="archive" title="Archive selected">Archive</button>
-          <button id="restore" title="Restore selected">Restore</button>
-          <button id="delete" class="danger" title="Move selected sessions to trash">Delete</button>
+          <div>${state.sessions.length} 个会话 · 已选 ${state.selectedIds.size} 个</div>
+          <button id="probe" title="探测 app-server">探测</button>
+          <button id="backup" title="创建备份">备份</button>
+          <button id="archive" title="归档已选会话">归档</button>
+          <button id="restore" title="恢复已选会话">恢复</button>
+          <button id="delete" class="danger" title="将已选会话移入回收站">删除</button>
         </div>
-        <div class="table">
-          <div class="row header">
-            <span></span><span>Session</span><span>Project</span><span>Provider</span><span>Model</span><span>State</span><span>Updated</span>
-          </div>
+        <div class="table" style="${tableSizingStyle()}">
+          ${tableHeader()}
           ${state.sessions.map(sessionRow).join("")}
         </div>
         <div class="status">${escapeHtml(state.status)}</div>
       </section>
       <aside class="details">
-        ${active ? detailPanel(active) : "<div class=\"empty\">Select a session</div>"}
+        ${active ? detailPanel(active) : "<div class=\"empty\">请选择一个会话</div>"}
       </aside>
     </main>
   `;
@@ -97,6 +116,18 @@ function render() {
 
 function archivedButton(value: ArchivedFilter, label: string) {
   return `<button data-archived="${value}" class="${state.filter.archived === value ? "selected" : ""}">${label}</button>`;
+}
+
+function tableHeader() {
+  const cells = tableColumns
+    .map((column, index) => `
+      <span class="header-cell">
+        <span class="header-label">${escapeHtml(column.label)}</span>
+        ${column.resizable ? `<span class="resize-handle" data-resize-column="${index}" role="separator" aria-label="调整${escapeHtml(column.label)}列宽"></span>` : ""}
+      </span>
+    `)
+    .join("");
+  return `<div class="row header">${cells}</div>`;
 }
 
 function sessionRow(session: SessionSummary) {
@@ -109,7 +140,7 @@ function sessionRow(session: SessionSummary) {
       <span>${escapeHtml(session.project || "")}</span>
       <span>${escapeHtml(session.provider || "")}</span>
       <span>${escapeHtml(session.model || "")}</span>
-      <span>${session.archived ? "Archived" : "Active"}</span>
+      <span>${session.archived ? "已归档" : "活动"}</span>
       <span>${escapeHtml(session.updated_at || "")}</span>
     </button>
   `;
@@ -120,17 +151,17 @@ function detailPanel(session: SessionSummary) {
     <h2>${escapeHtml(session.title || session.id)}</h2>
     <dl>
       <dt>ID</dt><dd>${escapeHtml(session.id)}</dd>
-      <dt>Project</dt><dd>${escapeHtml(session.project || "")}</dd>
-      <dt>Provider</dt><dd>${escapeHtml(session.provider || "")}</dd>
-      <dt>Model</dt><dd>${escapeHtml(session.model || "")}</dd>
-      <dt>Source</dt><dd>${escapeHtml(session.source || "")}</dd>
-      <dt>Rollout</dt><dd>${escapeHtml(session.rollout_path || "")}</dd>
-      <dt>Session index</dt><dd>${session.in_session_index ? "Present" : "Missing"}</dd>
+      <dt>项目</dt><dd>${escapeHtml(session.project || "")}</dd>
+      <dt>提供方</dt><dd>${escapeHtml(session.provider || "")}</dd>
+      <dt>模型</dt><dd>${escapeHtml(session.model || "")}</dd>
+      <dt>来源</dt><dd>${escapeHtml(session.source || "")}</dd>
+      <dt>会话文件</dt><dd>${escapeHtml(session.rollout_path || "")}</dd>
+      <dt>会话索引</dt><dd>${session.in_session_index ? "存在" : "缺失"}</dd>
     </dl>
     <div class="detail-actions">
-      <button data-single="archive">Archive</button>
-      <button data-single="restore">Restore</button>
-      <button data-single="delete" class="danger">Delete</button>
+      <button data-single="archive">归档</button>
+      <button data-single="restore">恢复</button>
+      <button data-single="delete" class="danger">删除</button>
     </div>
   `;
 }
@@ -171,6 +202,7 @@ function bindEvents() {
   document.querySelectorAll<HTMLElement>("[data-single]").forEach((button) => {
     button.addEventListener("click", () => mutateIds(`${button.dataset.single}_sessions`, [state.activeId]));
   });
+  bindColumnResize();
 }
 
 function bindInput(id: string, update: (value: string) => void) {
@@ -187,7 +219,7 @@ async function refresh() {
     });
     state.selectedIds.clear();
     state.activeId = state.sessions[0]?.id || "";
-    state.status = "Loaded sessions";
+    state.status = "已加载会话";
   });
 }
 
@@ -197,7 +229,7 @@ async function mutateSelected(command: string) {
 
 async function mutateIds(command: string, ids: string[]) {
   if (ids.length === 0) {
-    state.status = "Select at least one session";
+    state.status = "请至少选择一个会话";
     render();
     return;
   }
@@ -216,7 +248,7 @@ async function createBackup() {
 }
 
 async function probe() {
-  const endpoint = window.prompt("App-server endpoint", "http://127.0.0.1:0");
+  const endpoint = window.prompt("App-server 端点", "http://127.0.0.1:0");
   if (!endpoint) return;
   await run(async () => {
     const report = await invoke("app_server_probe", { profile: state.profile, endpoint });
@@ -226,7 +258,7 @@ async function probe() {
 
 async function run(task: () => Promise<void>) {
   try {
-    state.status = "Working...";
+    state.status = "正在处理...";
     render();
     await task();
   } catch (error) {
@@ -234,6 +266,53 @@ async function run(task: () => Promise<void>) {
   } finally {
     render();
   }
+}
+
+function tableSizingStyle() {
+  const grid = state.columnWidths.map((width) => `${width}px`).join(" ");
+  const width = state.columnWidths.reduce((total, columnWidth) => total + columnWidth, 0);
+  return `--session-grid: ${grid}; --session-table-width: ${width}px;`;
+}
+
+function applyTableSizing() {
+  const table = document.querySelector<HTMLElement>(".table");
+  if (!table) return;
+  const grid = state.columnWidths.map((width) => `${width}px`).join(" ");
+  const width = state.columnWidths.reduce((total, columnWidth) => total + columnWidth, 0);
+  table.style.setProperty("--session-grid", grid);
+  table.style.setProperty("--session-table-width", `${width}px`);
+}
+
+function bindColumnResize() {
+  document.querySelectorAll<HTMLElement>("[data-resize-column]").forEach((handle) => {
+    handle.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      const columnIndex = Number(handle.dataset.resizeColumn);
+      const column = tableColumns[columnIndex];
+      if (!column) return;
+
+      const startX = event.clientX;
+      const startWidth = state.columnWidths[columnIndex];
+      document.body.classList.add("resizing-column");
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        const nextWidth = Math.max(column.minWidth, startWidth + moveEvent.clientX - startX);
+        state.columnWidths[columnIndex] = Math.round(nextWidth);
+        applyTableSizing();
+      };
+
+      const onPointerUp = () => {
+        document.body.classList.remove("resizing-column");
+        document.removeEventListener("pointermove", onPointerMove);
+        document.removeEventListener("pointerup", onPointerUp);
+        document.removeEventListener("pointercancel", onPointerUp);
+      };
+
+      document.addEventListener("pointermove", onPointerMove);
+      document.addEventListener("pointerup", onPointerUp);
+      document.addEventListener("pointercancel", onPointerUp);
+    });
+  });
 }
 
 function emptyToUndefined(value: string) {

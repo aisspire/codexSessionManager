@@ -10,6 +10,7 @@
 
 body {
   margin: 0;
+  overflow: hidden;
 }
 
 button,
@@ -20,8 +21,10 @@ input {
 .shell {
   display: grid;
   grid-template-columns: 260px minmax(520px, 1fr) 340px;
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   background: #f4f1ea;
+  overflow: hidden;
 }
 
 .filters,
@@ -29,6 +32,8 @@ input {
   padding: 18px;
   background: #fbfaf7;
   border-right: 1px solid #d8d3ca;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .details {
@@ -101,10 +106,13 @@ button:hover {
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   min-height: 58px;
@@ -115,18 +123,21 @@ button:hover {
 
 .toolbar > div {
   flex: 1;
+  min-width: 180px;
   font-weight: 700;
 }
 
 .table {
+  min-height: 0;
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .row {
   display: grid;
-  grid-template-columns: 34px minmax(180px, 1.4fr) minmax(160px, 1fr) 90px 120px 90px 160px;
+  grid-template-columns: var(--session-grid);
   align-items: center;
-  width: 100%;
+  width: max(100%, var(--session-table-width));
   min-height: 42px;
   border: 0;
   border-bottom: 1px solid #e0dbd2;
@@ -137,6 +148,7 @@ button:hover {
 }
 
 .row span {
+  min-width: 0;
   overflow: hidden;
   padding-right: 12px;
   text-overflow: ellipsis;
@@ -152,6 +164,52 @@ button:hover {
   font-size: 12px;
   font-weight: 800;
   background: #e8ded0;
+}
+
+.header-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding-right: 16px;
+}
+
+.header-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 10px;
+  height: 100%;
+  padding: 0;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resize-handle::after {
+  position: absolute;
+  top: 9px;
+  right: 4px;
+  width: 1px;
+  height: 20px;
+  background: #a99f91;
+  content: "";
+}
+
+.resize-handle:hover::after,
+.resizing-column .resize-handle::after {
+  background: #215e6d;
+}
+
+.resizing-column {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .row.active {
