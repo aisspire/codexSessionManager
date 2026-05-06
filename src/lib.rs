@@ -1,0 +1,15 @@
+//! Library entry point for the Codex session manager.
+//!
+//! The binary is intentionally thin. Most behavior lives in modules here so the
+//! migration rules can be tested without invoking a command line process.
+
+pub mod backup;
+pub mod cli;
+pub mod migrate;
+pub mod path_map;
+pub mod profile;
+pub mod rollout;
+pub mod scan;
+pub mod session_index;
+pub mod state_db;
+pub mod validate;

@@ -1,0 +1,8 @@
+/target/
+/.idea/
+/.vscode/
+*.tmp
+.agents/
+docs/
+/*.md
+test/
