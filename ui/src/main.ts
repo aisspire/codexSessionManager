@@ -85,7 +85,12 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("missing app root");
 const appRoot = app;
 
-function render() {
+interface RenderOptions {
+  preserveTableScroll?: boolean;
+}
+
+function render(options: RenderOptions = {}) {
+  const tableScroll = options.preserveTableScroll ? readTableScroll() : undefined;
   const active = state.sessions.find((session) => session.id === state.activeId);
   appRoot.innerHTML = `
     <main class="shell">
@@ -134,6 +139,9 @@ function render() {
     </main>
   `;
   bindEvents();
+  if (tableScroll) {
+    restoreTableScroll(tableScroll);
+  }
 }
 
 function archivedButton(value: ArchivedFilter, label: string) {
@@ -214,7 +222,7 @@ function bindEvents() {
   document.querySelectorAll<HTMLElement>("[data-open]").forEach((row) => {
     row.addEventListener("click", () => {
       state.activeId = row.dataset.open || "";
-      render();
+      render({ preserveTableScroll: true });
     });
   });
   document.querySelectorAll<HTMLInputElement>("[data-select]").forEach((checkbox) => {
@@ -222,7 +230,7 @@ function bindEvents() {
       event.stopPropagation();
       const id = checkbox.dataset.select || "";
       checkbox.checked ? state.selectedIds.add(id) : state.selectedIds.delete(id);
-      render();
+      render({ preserveTableScroll: true });
     });
   });
   document.querySelectorAll<HTMLElement>("[data-single]").forEach((button) => {
@@ -343,6 +351,21 @@ function applyTableSizing() {
   const width = state.columnWidths.reduce((total, columnWidth) => total + columnWidth, 0);
   table.style.setProperty("--session-grid", grid);
   table.style.setProperty("--session-table-width", `${width}px`);
+}
+
+function readTableScroll() {
+  const table = document.querySelector<HTMLElement>(".table");
+  return {
+    left: table?.scrollLeft ?? 0,
+    top: table?.scrollTop ?? 0,
+  };
+}
+
+function restoreTableScroll(scroll: { left: number; top: number }) {
+  const table = document.querySelector<HTMLElement>(".table");
+  if (!table) return;
+  table.scrollLeft = scroll.left;
+  table.scrollTop = scroll.top;
 }
 
 function bindColumnResize() {
