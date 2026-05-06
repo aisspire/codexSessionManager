@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::backup;
 use crate::path_map::apply_first_path_map;
@@ -37,6 +38,12 @@ pub struct MutationReport {
     pub index_entries: usize,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionEdit {
+    pub provider: Option<String>,
+    pub project: Option<String>,
+}
+
 impl MutationReport {
     pub fn to_text(&self) -> String {
         let mut lines = vec![
@@ -53,6 +60,90 @@ impl MutationReport {
 
         lines.join("\n")
     }
+}
+
+pub fn edit_selected_sessions(
+    profile: &CodexProfile,
+    ids: &[String],
+    edit: &SessionEdit,
+    options: &ApplyOptions,
+) -> Result<MutationReport> {
+    let provider = edit
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let project = edit
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut report = MutationReport {
+        action: "edit selected sessions".to_string(),
+        applied: options.apply,
+        ..MutationReport::default()
+    };
+
+    if ids.is_empty() || (provider.is_none() && project.is_none()) {
+        return Ok(report);
+    }
+
+    let id_set = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut db = StateDb::open(&profile.state_db_path())?;
+    let threads = db.read_threads()?;
+    let metas = read_all_rollout_meta(&profile.sessions_dir())?;
+
+    report.sqlite_rows = threads
+        .iter()
+        .filter(|thread| id_set.contains(thread.id.as_str()))
+        .filter(|thread| {
+            provider.is_some_and(|value| thread.model_provider.as_deref() != Some(value))
+                || project.is_some_and(|value| thread.cwd.as_deref() != Some(value))
+        })
+        .count();
+    report.jsonl_files = metas
+        .iter()
+        .filter(|meta| meta.id.as_deref().is_some_and(|id| id_set.contains(id)))
+        .filter(|meta| {
+            provider.is_some_and(|value| meta.model_provider.as_deref() != Some(value))
+                || project.is_some_and(|value| meta.cwd.as_deref() != Some(value))
+        })
+        .count();
+
+    if !options.apply {
+        return Ok(report);
+    }
+
+    report.backup_dir = maybe_backup(profile, options)?;
+    report.sqlite_rows = db.update_selected_session_fields(ids, provider, project)?;
+
+    let mut jsonl_files = 0;
+    for meta in metas {
+        if !meta.id.as_deref().is_some_and(|id| id_set.contains(id)) {
+            continue;
+        }
+        let changed = rewrite_session_meta(&meta.path, |payload| {
+            let mut changed = false;
+            if let Some(provider) = provider {
+                if payload.model_provider.as_deref() != Some(provider) {
+                    payload.model_provider = Some(provider.to_string());
+                    changed = true;
+                }
+            }
+            if let Some(project) = project {
+                if payload.cwd.as_deref() != Some(project) {
+                    payload.cwd = Some(project.to_string());
+                    changed = true;
+                }
+            }
+            changed
+        })?;
+        if changed {
+            jsonl_files += 1;
+        }
+    }
+    report.jsonl_files = jsonl_files;
+    Ok(report)
 }
 
 pub fn migrate_provider(

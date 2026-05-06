@@ -101,6 +101,42 @@ impl StateDb {
         Ok(changed)
     }
 
+    pub fn update_selected_session_fields(
+        &mut self,
+        ids: &[String],
+        provider: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<usize> {
+        if ids.is_empty() || (provider.is_none() && cwd.is_none()) {
+            return Ok(0);
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        for id in ids {
+            changed += tx.execute(
+                r#"
+                UPDATE threads
+                SET
+                    model_provider = COALESCE(:provider, model_provider),
+                    cwd = COALESCE(:cwd, cwd)
+                WHERE id = :id
+                  AND (
+                    (:provider IS NOT NULL AND COALESCE(model_provider, '') != :provider)
+                    OR (:cwd IS NOT NULL AND COALESCE(cwd, '') != :cwd)
+                  )
+                "#,
+                named_params! {
+                    ":id": id,
+                    ":provider": provider,
+                    ":cwd": cwd,
+                },
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn update_paths(&mut self, maps: &[PathMap]) -> Result<usize> {
         let threads = self.read_threads()?;
         let tx = self.conn.transaction()?;

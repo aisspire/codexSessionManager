@@ -102,7 +102,7 @@ button:hover {
   margin: 14px 0;
 }
 
-.migration-panel {
+.edit-panel {
   display: grid;
   gap: 10px;
   margin-top: 18px;
@@ -110,17 +110,17 @@ button:hover {
   border-top: 1px solid #d8d3ca;
 }
 
-.migration-title {
+.edit-title {
   color: #182f39;
   font-size: 13px;
   font-weight: 800;
 }
 
-.migration-panel label {
+.edit-panel label {
   margin-bottom: 0;
 }
 
-.migration-actions {
+.edit-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;

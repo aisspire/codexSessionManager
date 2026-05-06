@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use codex_session_manager::app_server::{self, HttpAppServerTransport};
 use codex_session_manager::backup;
-use codex_session_manager::migrate::{self, ApplyOptions};
+use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
 use codex_session_manager::path_map::PathMap;
 use codex_session_manager::profile::CodexProfile;
 use codex_session_manager::restore;
@@ -66,23 +66,32 @@ fn delete_sessions(
 }
 
 #[tauri::command]
-fn migrate_provider(
+fn edit_selected_sessions(
     profile: ProfileInput,
-    from: String,
-    to: String,
+    ids: Vec<String>,
+    edit: SessionEdit,
     apply: bool,
 ) -> Result<migrate::MutationReport, String> {
-    let from = from.trim();
-    let to = to.trim();
-    if from.is_empty() || to.is_empty() {
-        return Err("provider migration requires both source and target providers".to_string());
+    if ids.is_empty() {
+        return Err("please select at least one session".to_string());
+    }
+    if edit
+        .project
+        .as_deref()
+        .map_or(true, |value| value.trim().is_empty())
+        && edit
+            .provider
+            .as_deref()
+            .map_or(true, |value| value.trim().is_empty())
+    {
+        return Err("please enter a provider or project value to edit".to_string());
     }
 
     let profile = build_profile(profile)?;
-    migrate::migrate_provider(
+    migrate::edit_selected_sessions(
         &profile,
-        from,
-        to,
+        &ids,
+        &edit,
         &ApplyOptions {
             apply,
             backup: true,
@@ -160,7 +169,7 @@ fn main() {
             archive_sessions,
             restore_sessions,
             delete_sessions,
-            migrate_provider,
+            edit_selected_sessions,
             create_backup,
             restore_manifest,
             app_server_probe

@@ -70,9 +70,9 @@ const state = {
   filter: {
     archived: "all",
   } as SessionListFilter,
-  providerMigration: {
-    from: "codex-auto-review",
-    to: "cm",
+  selectedEdit: {
+    provider: "",
+    project: "",
   },
   sessions: [] as SessionSummary[],
   selectedIds: new Set<string>(),
@@ -108,13 +108,13 @@ function render(options: RenderOptions = {}) {
           ${archivedButton("archived", "已归档")}
         </div>
         <button id="refresh" class="primary">刷新</button>
-        <div class="migration-panel">
-          <div class="migration-title">迁移提供方</div>
-          <label>从<input id="provider-from" value="${escapeHtml(state.providerMigration.from)}" /></label>
-          <label>到<input id="provider-to" value="${escapeHtml(state.providerMigration.to)}" /></label>
-          <div class="migration-actions">
-            <button id="preview-provider-migration">预览</button>
-            <button id="apply-provider-migration" class="primary">应用</button>
+        <div class="edit-panel">
+          <div class="edit-title">修改已选</div>
+          <label>提供方<input id="edit-provider" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.provider)}" /></label>
+          <label>项目路径<input id="edit-project" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.project)}" /></label>
+          <div class="edit-actions">
+            <button id="preview-selected-edit">预览</button>
+            <button id="apply-selected-edit" class="primary">应用</button>
           </div>
         </div>
       </aside>
@@ -203,11 +203,11 @@ function bindEvents() {
   bindInput("model", (value) => (state.filter.model = emptyToUndefined(value)));
   bindInput("source", (value) => (state.filter.source = emptyToUndefined(value)));
   bindInput("search", (value) => (state.filter.search = emptyToUndefined(value)));
-  bindInput("provider-from", (value) => (state.providerMigration.from = value));
-  bindInput("provider-to", (value) => (state.providerMigration.to = value));
+  bindInput("edit-provider", (value) => (state.selectedEdit.provider = value));
+  bindInput("edit-project", (value) => (state.selectedEdit.project = value));
   document.querySelector("#refresh")?.addEventListener("click", refresh);
-  document.querySelector("#preview-provider-migration")?.addEventListener("click", () => migrateProvider(false));
-  document.querySelector("#apply-provider-migration")?.addEventListener("click", () => migrateProvider(true));
+  document.querySelector("#preview-selected-edit")?.addEventListener("click", () => editSelected(false));
+  document.querySelector("#apply-selected-edit")?.addEventListener("click", () => editSelected(true));
   document.querySelector("#archive")?.addEventListener("click", () => mutateSelected("archive_sessions"));
   document.querySelector("#restore")?.addEventListener("click", () => mutateSelected("restore_sessions"));
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
@@ -274,23 +274,32 @@ async function mutateIds(command: string, ids: string[]) {
   });
 }
 
-async function migrateProvider(apply: boolean) {
-  const from = state.providerMigration.from.trim();
-  const to = state.providerMigration.to.trim();
-  if (!from || !to) {
-    state.status = "请填写来源和目标提供方";
+async function editSelected(apply: boolean) {
+  const ids = [...state.selectedIds];
+  const provider = state.selectedEdit.provider.trim();
+  const project = state.selectedEdit.project.trim();
+  if (ids.length === 0) {
+    state.status = "请至少选择一个会话";
     render();
     return;
   }
-  if (apply && !window.confirm(`将 ${from} 迁移为 ${to}，并在写入前创建备份。继续？`)) {
+  if (!provider && !project) {
+    state.status = "请填写提供方或项目路径";
+    render({ preserveTableScroll: true });
+    return;
+  }
+  if (apply && !window.confirm(`将修改 ${ids.length} 个已选会话，并在写入前创建备份。继续？`)) {
     return;
   }
 
   await run(async () => {
-    const report = await invoke<MutationReport>("migrate_provider", {
+    const report = await invoke<MutationReport>("edit_selected_sessions", {
       profile: state.profile,
-      from,
-      to,
+      ids,
+      edit: {
+        provider: provider || null,
+        project: project || null,
+      },
       apply,
     });
     if (apply) {
