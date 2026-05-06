@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -55,6 +56,79 @@ pub fn append_session_index_entries(path: &Path, entries: &[SessionIndexEntry]) 
     }
     file.sync_all()?;
     Ok(())
+}
+
+pub fn update_session_index_thread_names(
+    path: &Path,
+    renames: &[(String, String, Option<String>)],
+) -> Result<usize> {
+    if renames.is_empty() {
+        return Ok(0);
+    }
+
+    let mut by_id = renames
+        .iter()
+        .map(|(id, title, updated_at)| (id.as_str(), (title.as_str(), updated_at.as_deref())))
+        .collect::<HashMap<_, _>>();
+    let mut values = Vec::new();
+    let mut changed = 0;
+
+    if path.exists() {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("failed to read session index {}", path.display()))?;
+        for (line_number, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut value: serde_json::Value = serde_json::from_str(line).with_context(|| {
+                format!(
+                    "failed to parse {} line {}",
+                    path.display(),
+                    line_number + 1
+                )
+            })?;
+            let Some(id) = value
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+            else {
+                values.push(value);
+                continue;
+            };
+            if let Some((title, _)) = by_id.remove(id.as_str()) {
+                if value.get("thread_name").and_then(|name| name.as_str()) != Some(title) {
+                    value["thread_name"] = serde_json::Value::String(title.to_string());
+                    changed += 1;
+                }
+            }
+            values.push(value);
+        }
+    }
+
+    for (id, (title, updated_at)) in by_id {
+        let mut value = serde_json::json!({
+            "id": id,
+            "thread_name": title,
+        });
+        if let Some(updated_at) = updated_at {
+            value["updated_at"] = serde_json::Value::String(updated_at.to_string());
+        }
+        values.push(value);
+        changed += 1;
+    }
+
+    if changed == 0 {
+        return Ok(0);
+    }
+
+    let text = values
+        .into_iter()
+        .map(|value| serde_json::to_string(&value))
+        .collect::<serde_json::Result<Vec<_>>>()?
+        .join("\n");
+    fs::write(path, format!("{text}\n"))
+        .with_context(|| format!("failed to write session index {}", path.display()))?;
+    Ok(changed)
 }
 
 pub fn missing_user_index_entries(

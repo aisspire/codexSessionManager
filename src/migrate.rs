@@ -8,6 +8,7 @@ use crate::profile::CodexProfile;
 use crate::rollout::{read_all_rollout_meta, rewrite_session_meta};
 use crate::session_index::{
     append_session_index_entries, missing_user_index_entries, read_session_index,
+    update_session_index_thread_names,
 };
 use crate::state_db::StateDb;
 
@@ -39,9 +40,12 @@ pub struct MutationReport {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionEdit {
     pub provider: Option<String>,
     pub project: Option<String>,
+    pub title: Option<String>,
+    pub title_prefix: Option<String>,
 }
 
 impl MutationReport {
@@ -78,13 +82,25 @@ pub fn edit_selected_sessions(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let title = edit
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let title_prefix = edit
+        .title_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let mut report = MutationReport {
         action: "edit selected sessions".to_string(),
         applied: options.apply,
         ..MutationReport::default()
     };
 
-    if ids.is_empty() || (provider.is_none() && project.is_none()) {
+    if ids.is_empty()
+        || (provider.is_none() && project.is_none() && title.is_none() && title_prefix.is_none())
+    {
         return Ok(report);
     }
 
@@ -92,6 +108,7 @@ pub fn edit_selected_sessions(
     let mut db = StateDb::open(&profile.state_db_path())?;
     let threads = db.read_threads()?;
     let metas = read_all_rollout_meta(&profile.sessions_dir())?;
+    let renames = build_session_renames(&threads, ids, title, title_prefix);
 
     report.sqlite_rows = threads
         .iter()
@@ -99,6 +116,9 @@ pub fn edit_selected_sessions(
         .filter(|thread| {
             provider.is_some_and(|value| thread.model_provider.as_deref() != Some(value))
                 || project.is_some_and(|value| thread.cwd.as_deref() != Some(value))
+                || renames.iter().any(|(id, new_title, _)| {
+                    id == &thread.id && thread.title.as_deref() != Some(new_title)
+                })
         })
         .count();
     report.jsonl_files = metas
@@ -109,13 +129,24 @@ pub fn edit_selected_sessions(
                 || project.is_some_and(|value| meta.cwd.as_deref() != Some(value))
         })
         .count();
+    report.index_entries = renames.len();
 
     if !options.apply {
         return Ok(report);
     }
 
+    let sqlite_rows = report.sqlite_rows;
     report.backup_dir = maybe_backup(profile, options)?;
-    report.sqlite_rows = db.update_selected_session_fields(ids, provider, project)?;
+    db.update_selected_session_fields(ids, provider, project)?;
+    db.update_session_titles(
+        &renames
+            .iter()
+            .map(|(id, title, _)| (id.clone(), title.clone()))
+            .collect::<Vec<_>>(),
+    )?;
+    report.sqlite_rows = sqlite_rows;
+    report.index_entries =
+        update_session_index_thread_names(&profile.session_index_path(), &renames)?;
 
     let mut jsonl_files = 0;
     for meta in metas {
@@ -144,6 +175,58 @@ pub fn edit_selected_sessions(
     }
     report.jsonl_files = jsonl_files;
     Ok(report)
+}
+
+fn build_session_renames(
+    threads: &[crate::state_db::ThreadRecord],
+    ids: &[String],
+    title: Option<&str>,
+    title_prefix: Option<&str>,
+) -> Vec<(String, String, Option<String>)> {
+    let id_set = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    if let Some(title) = title {
+        return threads
+            .iter()
+            .filter(|thread| id_set.contains(thread.id.as_str()))
+            .map(|thread| {
+                (
+                    thread.id.clone(),
+                    title.to_string(),
+                    thread.updated_at.clone(),
+                )
+            })
+            .collect();
+    }
+
+    let Some(title_prefix) = title_prefix else {
+        return Vec::new();
+    };
+
+    let mut selected = threads
+        .iter()
+        .enumerate()
+        .filter(|(_, thread)| id_set.contains(thread.id.as_str()))
+        .collect::<Vec<_>>();
+    selected.sort_by(|(left_index, left), (right_index, right)| {
+        left.updated_at_ms
+            .cmp(&right.updated_at_ms)
+            .then(left.updated_at.cmp(&right.updated_at))
+            .then(left.created_at_ms.cmp(&right.created_at_ms))
+            .then(left.created_at.cmp(&right.created_at))
+            .then(left_index.cmp(right_index))
+    });
+
+    selected
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, thread))| {
+            (
+                thread.id.clone(),
+                format!("{title_prefix}({})", index + 1),
+                thread.updated_at.clone(),
+            )
+        })
+        .collect()
 }
 
 pub fn migrate_provider(

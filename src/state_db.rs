@@ -137,6 +137,31 @@ impl StateDb {
         Ok(changed)
     }
 
+    pub fn update_session_titles(&mut self, renames: &[(String, String)]) -> Result<usize> {
+        if renames.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        for (id, title) in renames {
+            changed += tx.execute(
+                r#"
+                UPDATE threads
+                SET title = :title
+                WHERE id = :id
+                  AND COALESCE(title, '') != :title
+                "#,
+                named_params! {
+                    ":id": id,
+                    ":title": title,
+                },
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn update_paths(&mut self, maps: &[PathMap]) -> Result<usize> {
         let threads = self.read_threads()?;
         let tx = self.conn.transaction()?;

@@ -82,6 +82,13 @@ button:hover {
   border-color: #537a8a;
 }
 
+button:disabled {
+  border-color: #c8c1b4;
+  color: #8c959e;
+  background: #e7e3dc;
+  cursor: default;
+}
+
 .primary,
 .selected {
   border-color: #215e6d;
@@ -260,9 +267,27 @@ button:hover {
 }
 
 h2 {
-  margin: 0 0 14px;
+  margin: 0;
   color: #182f39;
   font-size: 18px;
+}
+
+.detail-title-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.detail-title-input {
+  min-width: 0;
+}
+
+.icon-button {
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
 }
 
 dl {

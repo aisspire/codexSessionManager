@@ -73,6 +73,13 @@ const state = {
   selectedEdit: {
     provider: "",
     project: "",
+    titlePrefix: "",
+  },
+  detailRename: {
+    editing: false,
+    draft: "",
+    pendingId: "",
+    pendingTitle: "",
   },
   sessions: [] as SessionSummary[],
   selectedIds: new Set<string>(),
@@ -110,6 +117,7 @@ function render(options: RenderOptions = {}) {
         <button id="refresh" class="primary">刷新</button>
         <div class="edit-panel">
           <div class="edit-title">修改已选</div>
+          <label>会话名前缀<input id="edit-title-prefix" placeholder="多选时生成 前缀(1)" value="${escapeHtml(state.selectedEdit.titlePrefix)}" /></label>
           <label>提供方<input id="edit-provider" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.provider)}" /></label>
           <label>项目路径<input id="edit-project" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.project)}" /></label>
           <div class="edit-actions">
@@ -187,8 +195,17 @@ function sessionRow(session: SessionSummary) {
 }
 
 function detailPanel(session: SessionSummary) {
+  const currentTitle = sessionTitle(session);
+  const pendingTitle = detailPendingTitle(session);
+  const dirty = detailRenameDirty(session);
   return `
-    <h2>${escapeHtml(session.title || session.id)}</h2>
+    <div class="detail-title-row">
+      ${
+        state.detailRename.editing && state.detailRename.pendingId === session.id
+          ? `<input id="detail-title-input" class="detail-title-input" value="${escapeHtml(state.detailRename.draft)}" />`
+          : `<h2>${escapeHtml(pendingTitle || currentTitle)}</h2><button id="edit-detail-title" class="icon-button" title="重命名会话">✎</button>`
+      }
+    </div>
     <dl>
       <dt>ID</dt><dd>${escapeHtml(session.id)}</dd>
       <dt>项目</dt><dd>${escapeHtml(session.project || "")}</dd>
@@ -199,6 +216,7 @@ function detailPanel(session: SessionSummary) {
       <dt>会话索引</dt><dd>${session.in_session_index ? "存在" : "缺失"}</dd>
     </dl>
     <div class="detail-actions">
+      <button id="save-detail-title" class="primary" ${dirty ? "" : "disabled"}>保存</button>
       <button data-single="archive">归档</button>
       <button data-single="restore">恢复</button>
       <button data-single="delete" class="danger">删除</button>
@@ -213,6 +231,7 @@ function bindEvents() {
   bindInput("model", (value) => (state.filter.model = emptyToUndefined(value)));
   bindInput("source", (value) => (state.filter.source = emptyToUndefined(value)));
   bindInput("search", (value) => (state.filter.search = emptyToUndefined(value)));
+  bindInput("edit-title-prefix", (value) => (state.selectedEdit.titlePrefix = value));
   bindInput("edit-provider", (value) => (state.selectedEdit.provider = value));
   bindInput("edit-project", (value) => (state.selectedEdit.project = value));
   document.querySelector("#refresh")?.addEventListener("click", refresh);
@@ -236,6 +255,26 @@ function bindEvents() {
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
   document.querySelector("#backup")?.addEventListener("click", createBackup);
   document.querySelector("#probe")?.addEventListener("click", probe);
+  document.querySelector("#edit-detail-title")?.addEventListener("click", startDetailRename);
+  document.querySelector("#save-detail-title")?.addEventListener("click", saveDetailRename);
+  const detailTitleInput = document.querySelector<HTMLInputElement>("#detail-title-input");
+  if (detailTitleInput) {
+    detailTitleInput.focus();
+    detailTitleInput.select();
+    detailTitleInput.addEventListener("input", () => {
+      state.detailRename.draft = detailTitleInput.value;
+    });
+    detailTitleInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        commitDetailRenameDraft();
+        render({ preserveTableScroll: true });
+      }
+    });
+    detailTitleInput.addEventListener("blur", () => {
+      commitDetailRenameDraft();
+      window.setTimeout(() => render({ preserveTableScroll: true }), 0);
+    });
+  }
   document.querySelectorAll<HTMLElement>("[data-archived]").forEach((button) => {
     button.addEventListener("click", () => {
       state.filter.archived = button.dataset.archived as ArchivedFilter;
@@ -301,13 +340,14 @@ async function editSelected(apply: boolean) {
   const ids = [...state.selectedIds];
   const provider = state.selectedEdit.provider.trim();
   const project = state.selectedEdit.project.trim();
+  const titlePrefix = state.selectedEdit.titlePrefix.trim();
   if (ids.length === 0) {
     state.status = "请至少选择一个会话";
     render();
     return;
   }
-  if (!provider && !project) {
-    state.status = "请填写提供方或项目路径";
+  if (!provider && !project && !titlePrefix) {
+    state.status = "请填写会话名前缀、提供方或项目路径";
     render({ preserveTableScroll: true });
     return;
   }
@@ -322,6 +362,7 @@ async function editSelected(apply: boolean) {
       edit: {
         provider: provider || null,
         project: project || null,
+        titlePrefix: titlePrefix || null,
       },
       apply,
     });
@@ -335,6 +376,70 @@ async function editSelected(apply: boolean) {
     }
     state.status = formatMutationReport(report);
   });
+}
+
+function startDetailRename() {
+  const active = state.sessions.find((session) => session.id === state.activeId);
+  if (!active) return;
+  state.detailRename = {
+    editing: true,
+    draft: detailPendingTitle(active) || sessionTitle(active),
+    pendingId: active.id,
+    pendingTitle: detailPendingTitle(active),
+  };
+  render({ preserveTableScroll: true });
+}
+
+function commitDetailRenameDraft() {
+  const active = state.sessions.find((session) => session.id === state.activeId);
+  if (!active || state.detailRename.pendingId !== active.id) return;
+  const title = state.detailRename.draft.trim();
+  state.detailRename.editing = false;
+  state.detailRename.pendingTitle = title || sessionTitle(active);
+}
+
+async function saveDetailRename() {
+  const active = state.sessions.find((session) => session.id === state.activeId);
+  if (!active || !detailRenameDirty(active)) return;
+  const title = detailPendingTitle(active);
+  await run(async () => {
+    const report = await invoke<MutationReport>("edit_selected_sessions", {
+      profile: state.profile,
+      ids: [active.id],
+      edit: {
+        title,
+      },
+      apply: true,
+    });
+    const activeId = active.id;
+    state.sessions = await invoke<SessionSummary[]>("list_sessions", {
+      profile: state.profile,
+      filter: state.filter,
+    });
+    state.activeId = state.sessions.some((session) => session.id === activeId)
+      ? activeId
+      : state.sessions[0]?.id || "";
+    state.detailRename = {
+      editing: false,
+      draft: "",
+      pendingId: "",
+      pendingTitle: "",
+    };
+    state.status = formatMutationReport(report);
+  });
+}
+
+function sessionTitle(session: SessionSummary) {
+  return session.title || session.first_user_message || session.id;
+}
+
+function detailPendingTitle(session: SessionSummary) {
+  return state.detailRename.pendingId === session.id ? state.detailRename.pendingTitle.trim() : "";
+}
+
+function detailRenameDirty(session: SessionSummary) {
+  const pendingTitle = detailPendingTitle(session);
+  return pendingTitle.length > 0 && pendingTitle !== sessionTitle(session);
 }
 
 async function createBackup() {

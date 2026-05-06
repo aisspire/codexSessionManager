@@ -83,8 +83,16 @@ fn edit_selected_sessions(
             .provider
             .as_deref()
             .map_or(true, |value| value.trim().is_empty())
+        && edit
+            .title
+            .as_deref()
+            .map_or(true, |value| value.trim().is_empty())
+        && edit
+            .title_prefix
+            .as_deref()
+            .map_or(true, |value| value.trim().is_empty())
     {
-        return Err("please enter a provider or project value to edit".to_string());
+        return Err("please enter a provider, project, title, or title prefix to edit".to_string());
     }
 
     let profile = build_profile(profile)?;

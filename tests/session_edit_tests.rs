@@ -2,6 +2,7 @@ use std::fs;
 
 use codex_session_manager::migrate::{edit_selected_sessions, ApplyOptions, SessionEdit};
 use codex_session_manager::profile::CodexProfile;
+use codex_session_manager::session_index::read_session_index;
 use rusqlite::Connection;
 use tempfile::tempdir;
 
@@ -23,6 +24,8 @@ fn edits_provider_and_project_for_selected_sessions_only() {
         &SessionEdit {
             provider: Some("cm".to_string()),
             project: Some("/tmp/new".to_string()),
+            title: None,
+            title_prefix: None,
         },
         &ApplyOptions {
             apply: true,
@@ -51,6 +54,92 @@ fn edits_provider_and_project_for_selected_sessions_only() {
     assert!(fs::read_to_string(&untouched_path)
         .unwrap()
         .contains(r#""model_provider":"codex-auto-review""#));
+}
+
+#[test]
+fn renames_single_selected_session_in_sqlite_and_session_index() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    fs::write(
+        profile.session_index_path(),
+        "{\"id\":\"thread-1\",\"thread_name\":\"Old index title\",\"updated_at\":\"2026-05-06T00:00:00Z\"}\n",
+    )
+    .unwrap();
+
+    let report = edit_selected_sessions(
+        &profile,
+        &["thread-1".to_string()],
+        &SessionEdit {
+            provider: None,
+            project: None,
+            title: Some("New title".to_string()),
+            title_prefix: None,
+        },
+        &ApplyOptions {
+            apply: true,
+            backup: false,
+            include_sessions_backup: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.sqlite_rows, 1);
+    assert_eq!(report.index_entries, 1);
+    assert_eq!(
+        read_title(&profile.state_db_path(), "thread-1"),
+        "New title"
+    );
+    let entries = read_session_index(&profile.session_index_path()).unwrap();
+    assert_eq!(entries[0].thread_name.as_deref(), Some("New title"));
+}
+
+#[test]
+fn renames_multiple_selected_sessions_with_numbered_prefix_by_created_time() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    fs::write(
+        profile.session_index_path(),
+        "{\"id\":\"thread-2\",\"thread_name\":\"Old thread 2\",\"updated_at\":\"2026-05-06T00:00:00Z\"}\n",
+    )
+    .unwrap();
+
+    let report = edit_selected_sessions(
+        &profile,
+        &["thread-1".to_string(), "thread-2".to_string()],
+        &SessionEdit {
+            provider: None,
+            project: None,
+            title: None,
+            title_prefix: Some("Review".to_string()),
+        },
+        &ApplyOptions {
+            apply: true,
+            backup: false,
+            include_sessions_backup: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.sqlite_rows, 2);
+    assert_eq!(report.index_entries, 2);
+    assert_eq!(
+        read_title(&profile.state_db_path(), "thread-2"),
+        "Review(1)"
+    );
+    assert_eq!(
+        read_title(&profile.state_db_path(), "thread-1"),
+        "Review(2)"
+    );
+    let entries = read_session_index(&profile.session_index_path()).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries
+        .iter()
+        .any(|entry| entry.id == "thread-2" && entry.thread_name.as_deref() == Some("Review(1)")));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.id == "thread-1" && entry.thread_name.as_deref() == Some("Review(2)")));
 }
 
 fn write_rollout(path: &std::path::Path, id: &str, provider: &str, cwd: &str) {
@@ -117,5 +206,13 @@ fn read_thread(path: &std::path::Path, id: &str) -> (String, String) {
         [id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
+    .unwrap()
+}
+
+fn read_title(path: &std::path::Path, id: &str) -> String {
+    let conn = Connection::open(path).unwrap();
+    conn.query_row("SELECT title FROM threads WHERE id = ?1", [id], |row| {
+        row.get(0)
+    })
     .unwrap()
 }
