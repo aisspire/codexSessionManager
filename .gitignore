@@ -8,3 +8,5 @@ docs/
 test/
 node_modules/
 .codex/
+!README.md
+!使用说明.md
