@@ -66,6 +66,17 @@ fn delete_sessions(
 }
 
 #[tauri::command]
+fn refresh_session_updated_at(
+    profile: ProfileInput,
+    ids: Vec<String>,
+    apply: bool,
+) -> Result<SessionMutationReport, String> {
+    let profile = build_profile(profile)?;
+    session_ops::refresh_session_updated_at(&profile, &ids, &apply_options(apply))
+        .map_err(format_error)
+}
+
+#[tauri::command]
 fn edit_selected_sessions(
     profile: ProfileInput,
     ids: Vec<String>,
@@ -177,6 +188,7 @@ fn main() {
             archive_sessions,
             restore_sessions,
             delete_sessions,
+            refresh_session_updated_at,
             edit_selected_sessions,
             create_backup,
             restore_manifest,

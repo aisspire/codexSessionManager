@@ -162,6 +162,42 @@ impl StateDb {
         Ok(changed)
     }
 
+    pub fn update_selected_session_updated_at(
+        &mut self,
+        ids: &[String],
+        updated_at: &str,
+        updated_at_ms: i64,
+    ) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        for id in ids {
+            changed += tx.execute(
+                r#"
+                UPDATE threads
+                SET
+                    updated_at = :updated_at,
+                    updated_at_ms = :updated_at_ms
+                WHERE id = :id
+                  AND (
+                    COALESCE(CAST(updated_at AS TEXT), '') != :updated_at
+                    OR COALESCE(updated_at_ms, -1) != :updated_at_ms
+                  )
+                "#,
+                named_params! {
+                    ":id": id,
+                    ":updated_at": updated_at,
+                    ":updated_at_ms": updated_at_ms,
+                },
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn update_paths(&mut self, maps: &[PathMap]) -> Result<usize> {
         let threads = self.read_threads()?;
         let tx = self.conn.transaction()?;

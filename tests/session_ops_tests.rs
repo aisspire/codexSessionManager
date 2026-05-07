@@ -1,6 +1,9 @@
+use std::fs;
+
 use codex_session_manager::profile::CodexProfile;
 use codex_session_manager::session_ops::{
-    archive_sessions_with_guard, restore_sessions_with_guard, SessionApplyOptions,
+    archive_sessions_with_guard, refresh_session_updated_at_with_guard,
+    restore_sessions_with_guard, SessionApplyOptions,
 };
 use rusqlite::Connection;
 use tempfile::tempdir;
@@ -46,6 +49,58 @@ fn refuses_to_archive_when_codex_is_running() {
 
     assert!(result.is_err());
     assert_archived(&profile.state_db_path(), "thread-1", false);
+}
+
+#[test]
+fn refreshes_selected_session_updated_at_and_session_index() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    fs::write(
+        profile.session_index_path(),
+        "{\"id\":\"thread-1\",\"thread_name\":\"Old title\",\"updated_at\":\"2026-01-01T00:00:00Z\"}\n",
+    )
+    .unwrap();
+    let ids = vec!["thread-1".to_string(), "thread-2".to_string()];
+    let options = SessionApplyOptions {
+        apply: true,
+        backup: false,
+        include_sessions_backup: false,
+    };
+
+    let report = refresh_session_updated_at_with_guard(
+        &profile,
+        &ids,
+        "2026-05-06T12:34:56Z",
+        1778070896123,
+        &options,
+        || Ok(()),
+    )
+    .unwrap();
+
+    assert!(report.applied);
+    assert_eq!(report.sqlite_rows, 2);
+    assert_eq!(report.index_entries, 2);
+    assert_updated_at(
+        &profile.state_db_path(),
+        "thread-1",
+        "2026-05-06T12:34:56Z",
+        1778070896123,
+    );
+    assert_updated_at(
+        &profile.state_db_path(),
+        "thread-2",
+        "2026-05-06T12:34:56Z",
+        1778070896123,
+    );
+
+    let index = fs::read_to_string(profile.session_index_path()).unwrap();
+    assert!(index.contains(
+        r#""id":"thread-1","thread_name":"Old title","updated_at":"2026-05-06T12:34:56Z""#
+    ));
+    assert!(index.contains(
+        r#""id":"thread-2","thread_name":"Thread 2","updated_at":"2026-05-06T12:34:56Z""#
+    ));
 }
 
 fn create_state_db(path: &std::path::Path) {
@@ -101,4 +156,17 @@ fn assert_archived(path: &std::path::Path, id: &str, expected: bool) {
         })
         .unwrap();
     assert_eq!(archived != 0, expected);
+}
+
+fn assert_updated_at(path: &std::path::Path, id: &str, expected: &str, expected_ms: i64) {
+    let conn = Connection::open(path).unwrap();
+    let (updated_at, updated_at_ms): (String, i64) = conn
+        .query_row(
+            "SELECT updated_at, updated_at_ms FROM threads WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(updated_at, expected);
+    assert_eq!(updated_at_ms, expected_ms);
 }

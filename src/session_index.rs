@@ -131,6 +131,83 @@ pub fn update_session_index_thread_names(
     Ok(changed)
 }
 
+pub fn update_session_index_updated_at(
+    path: &Path,
+    threads: &[ThreadRecord],
+    ids: &[String],
+    updated_at: &str,
+) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let selected_ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut indexed_ids = HashSet::new();
+    let mut values = Vec::new();
+    let mut changed = 0;
+
+    if path.exists() {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("failed to read session index {}", path.display()))?;
+        for (line_number, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut value: serde_json::Value = serde_json::from_str(line).with_context(|| {
+                format!(
+                    "failed to parse {} line {}",
+                    path.display(),
+                    line_number + 1
+                )
+            })?;
+            let Some(id) = value
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+            else {
+                values.push(value);
+                continue;
+            };
+            if selected_ids.contains(id.as_str()) {
+                indexed_ids.insert(id.clone());
+                if value.get("updated_at").and_then(|time| time.as_str()) != Some(updated_at) {
+                    value["updated_at"] = serde_json::Value::String(updated_at.to_string());
+                    changed += 1;
+                }
+            }
+            values.push(value);
+        }
+    }
+
+    for thread in threads {
+        if !selected_ids.contains(thread.id.as_str())
+            || indexed_ids.contains(thread.id.as_str())
+            || !is_visible_user_thread(thread)
+        {
+            continue;
+        }
+        values.push(serde_json::json!({
+            "id": thread.id.clone(),
+            "thread_name": thread.title.clone().or_else(|| thread.first_user_message.clone()),
+            "updated_at": updated_at,
+        }));
+        changed += 1;
+    }
+
+    if changed == 0 {
+        return Ok(0);
+    }
+
+    let text = values
+        .into_iter()
+        .map(|value| serde_json::to_string(&value))
+        .collect::<serde_json::Result<Vec<_>>>()?
+        .join("\n");
+    fs::write(path, format!("{text}\n"))
+        .with_context(|| format!("failed to write session index {}", path.display()))?;
+    Ok(changed)
+}
+
 pub fn missing_user_index_entries(
     threads: &[ThreadRecord],
     existing: &[SessionIndexEntry],

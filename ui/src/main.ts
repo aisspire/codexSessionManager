@@ -146,6 +146,7 @@ function render(options: RenderOptions = {}) {
           <button id="backup" title="创建备份">备份</button>
           <button id="archive" title="归档已选会话">归档</button>
           <button id="restore" title="恢复已选会话">恢复</button>
+          <button id="refresh-time" title="将已选会话更新时间改为当前时间">置顶</button>
           <button id="delete" class="danger" title="将已选会话移入回收站">删除</button>
         </div>
         <div class="table" style="${tableSizingStyle()}">
@@ -230,6 +231,7 @@ function detailPanel(session: SessionSummary) {
     </dl>
     <div class="detail-actions">
       <button id="save-detail-title" class="primary" ${dirty ? "" : "disabled"}>保存</button>
+      <button data-single-command="refresh_session_updated_at">置顶</button>
       <button data-single="archive">归档</button>
       <button data-single="restore">恢复</button>
       <button data-single="delete" class="danger">删除</button>
@@ -265,6 +267,7 @@ function bindEvents() {
   document.querySelector("#apply-selected-edit")?.addEventListener("click", () => editSelected(true));
   document.querySelector("#archive")?.addEventListener("click", () => mutateSelected("archive_sessions"));
   document.querySelector("#restore")?.addEventListener("click", () => mutateSelected("restore_sessions"));
+  document.querySelector("#refresh-time")?.addEventListener("click", () => mutateSelected("refresh_session_updated_at"));
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
   document.querySelector("#backup")?.addEventListener("click", createBackup);
   document.querySelector("#probe")?.addEventListener("click", probe);
@@ -310,8 +313,9 @@ function bindEvents() {
       render({ preserveTableScroll: true });
     });
   });
-  document.querySelectorAll<HTMLElement>("[data-single]").forEach((button) => {
-    button.addEventListener("click", () => mutateIds(`${button.dataset.single}_sessions`, [state.activeId]));
+  document.querySelectorAll<HTMLElement>("[data-single], [data-single-command]").forEach((button) => {
+    const command = button.dataset.singleCommand || `${button.dataset.single}_sessions`;
+    button.addEventListener("click", () => mutateIds(command, [state.activeId]));
   });
   bindColumnResize();
 }
