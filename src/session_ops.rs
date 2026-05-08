@@ -1,11 +1,15 @@
-use anyhow::Result;
+use std::collections::{HashMap, HashSet};
+use std::fs::{FileTimes, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use time::{macros::format_description, OffsetDateTime};
 
 use crate::backup;
 use crate::profile::CodexProfile;
+use crate::rollout::read_all_rollout_meta;
 use crate::safety;
-use crate::session_index::update_session_index_updated_at;
 use crate::state_db::StateDb;
 use crate::trash::{self, TrashManifest};
 
@@ -110,50 +114,26 @@ pub fn refresh_session_updated_at(
     ids: &[String],
     options: &SessionApplyOptions,
 ) -> Result<SessionMutationReport> {
-    let now = OffsetDateTime::now_utc();
-    let updated_at = now.format(&format_description!(
-        "[year]-[month]-[day]T[hour]:[minute]:[second]Z"
-    ))?;
-    let updated_at_ms = now.unix_timestamp() * 1000 + i64::from(now.millisecond());
-    refresh_session_updated_at_with_guard(
-        profile,
-        ids,
-        &updated_at,
-        updated_at_ms,
-        options,
-        safety::ensure_codex_not_running,
-    )
+    refresh_session_updated_at_with_guard(profile, ids, options, safety::ensure_codex_not_running)
 }
 
 pub fn refresh_session_updated_at_with_guard<F>(
     profile: &CodexProfile,
     ids: &[String],
-    updated_at: &str,
-    updated_at_ms: i64,
     options: &SessionApplyOptions,
-    guard: F,
+    _guard: F,
 ) -> Result<SessionMutationReport>
 where
     F: FnOnce() -> Result<()>,
 {
-    let db = StateDb::open(&profile.state_db_path())?;
-    let threads = db.read_threads()?;
-    let sqlite_rows = threads
-        .iter()
-        .filter(|thread| ids.iter().any(|id| id == &thread.id))
-        .filter(|thread| {
-            thread.updated_at.as_deref() != Some(updated_at)
-                || thread.updated_at_ms != Some(updated_at_ms)
-        })
-        .count();
-    let index_entries = refreshable_session_index_entries(&threads, ids);
+    let rollout_paths = refreshable_rollout_paths(profile, ids)?;
 
     let mut report = SessionMutationReport {
-        action: "refresh session updated_at".to_string(),
+        action: "touch session rollout files".to_string(),
         applied: options.apply,
         requested_ids: ids.to_vec(),
-        sqlite_rows,
-        index_entries,
+        sqlite_rows: 0,
+        index_entries: 0,
         backup_dir: None,
         trash_manifest_path: None,
         trash_manifest: None,
@@ -163,17 +143,12 @@ where
         return Ok(report);
     }
 
-    guard()?;
     if options.backup {
         let backup = backup::create_backup(profile, options.include_sessions_backup)?;
         report.backup_dir = Some(backup.backup_dir.display().to_string());
     }
 
-    let mut db = StateDb::open(&profile.state_db_path())?;
-    report.sqlite_rows = db.update_selected_session_updated_at(ids, updated_at, updated_at_ms)?;
-    let threads = db.read_threads()?;
-    report.index_entries =
-        update_session_index_updated_at(&profile.session_index_path(), &threads, ids, updated_at)?;
+    touch_rollout_files(&rollout_paths)?;
     Ok(report)
 }
 
@@ -268,13 +243,54 @@ where
     Ok(report)
 }
 
-fn refreshable_session_index_entries(
-    threads: &[crate::state_db::ThreadRecord],
-    ids: &[String],
-) -> usize {
-    threads
+fn refreshable_rollout_paths(profile: &CodexProfile, ids: &[String]) -> Result<Vec<PathBuf>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let selected_ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let db = StateDb::open(&profile.state_db_path())?;
+    let mut by_id = db
+        .read_threads()?
+        .into_iter()
+        .filter(|thread| selected_ids.contains(thread.id.as_str()))
+        .filter_map(|thread| {
+            thread
+                .rollout_path
+                .map(PathBuf::from)
+                .map(|path| (thread.id, path))
+        })
+        .collect::<HashMap<_, _>>();
+
+    for meta in read_all_rollout_meta(&profile.sessions_dir())? {
+        let Some(id) = meta.id else {
+            continue;
+        };
+        if selected_ids.contains(id.as_str()) {
+            by_id.insert(id, meta.path);
+        }
+    }
+
+    Ok(ids
         .iter()
-        .filter(|thread| ids.iter().any(|id| id == &thread.id))
-        .filter(|thread| crate::session_index::is_visible_user_thread(thread))
-        .count()
+        .filter_map(|id| by_id.get(id).cloned())
+        .collect::<Vec<_>>())
+}
+
+fn touch_rollout_files(paths: &[PathBuf]) -> Result<()> {
+    let now = SystemTime::now();
+    let times = FileTimes::new().set_accessed(now).set_modified(now);
+    for path in paths {
+        touch_rollout_file(path, times)?;
+    }
+    Ok(())
+}
+
+fn touch_rollout_file(path: &Path, times: FileTimes) -> Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .open(path)
+        .with_context(|| format!("failed to open rollout file {}", path.display()))?
+        .set_times(times)
+        .with_context(|| format!("failed to touch rollout file {}", path.display()))
 }

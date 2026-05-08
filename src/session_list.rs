@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,10 @@ pub fn list_sessions(
         .map(|entry| (entry.id.clone(), entry))
         .collect::<HashMap<_, _>>();
 
+    let thread_ids = threads
+        .iter()
+        .map(|thread| thread.id.clone())
+        .collect::<HashSet<_>>();
     let mut sessions = threads
         .into_iter()
         .map(|thread| {
@@ -88,6 +92,32 @@ pub fn list_sessions(
                 in_session_index: index.is_some(),
             }
         })
+        .chain(
+            metas_by_id
+                .values()
+                .filter(|meta| {
+                    meta.id
+                        .as_deref()
+                        .is_some_and(|id| !thread_ids.contains(id))
+                })
+                .map(|meta| {
+                    let id = meta.id.clone().unwrap_or_default();
+                    let index = index_by_id.get(&id);
+                    SessionSummary {
+                        id,
+                        title: index.and_then(|entry| entry.thread_name.clone()),
+                        first_user_message: None,
+                        project: meta.cwd.clone(),
+                        provider: meta.model_provider.clone(),
+                        model: None,
+                        source: meta.source.clone(),
+                        archived: false,
+                        updated_at: index.and_then(|entry| entry.updated_at.clone()),
+                        rollout_path: Some(meta.path.display().to_string()),
+                        in_session_index: index.is_some(),
+                    }
+                }),
+        )
         .filter(|session| matches_filter(session, filter))
         .collect::<Vec<_>>();
 

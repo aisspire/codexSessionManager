@@ -1,11 +1,12 @@
-use std::fs;
+use std::fs::{self, FileTimes, OpenOptions};
+use std::time::{Duration, SystemTime};
 
 use codex_session_manager::profile::CodexProfile;
 use codex_session_manager::session_ops::{
     archive_sessions_with_guard, refresh_session_updated_at_with_guard,
     restore_sessions_with_guard, SessionApplyOptions,
 };
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use tempfile::tempdir;
 
 #[test]
@@ -52,13 +53,39 @@ fn refuses_to_archive_when_codex_is_running() {
 }
 
 #[test]
-fn refreshes_selected_session_updated_at_and_session_index() {
+fn refreshes_selected_session_rollout_files_without_rewriting_indexes() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
+    let rollout_1 = profile.sessions_dir().join("thread-1.jsonl");
+    let rollout_2 = profile.sessions_dir().join("thread-2.jsonl");
+    fs::create_dir_all(profile.sessions_dir()).unwrap();
+    write_rollout(&rollout_1, "thread-1");
+    write_rollout(&rollout_2, "thread-2");
+    set_rollout_path(&profile.state_db_path(), "thread-1", &rollout_1);
+    set_rollout_path(&profile.state_db_path(), "thread-2", &rollout_2);
+    let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_770_790_000);
+    let old_times = FileTimes::new()
+        .set_accessed(old_time)
+        .set_modified(old_time);
+    OpenOptions::new()
+        .write(true)
+        .open(&rollout_1)
+        .unwrap()
+        .set_times(old_times)
+        .unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&rollout_2)
+        .unwrap()
+        .set_times(old_times)
+        .unwrap();
     fs::write(
         profile.session_index_path(),
-        "{\"id\":\"thread-1\",\"thread_name\":\"Old title\",\"updated_at\":\"2026-01-01T00:00:00Z\"}\n",
+        concat!(
+            "{\"id\":\"thread-1\",\"thread_name\":\"Old title\",\"updated_at\":\"2026-01-01T00:00:00Z\"}\n",
+            "{\"id\":\"other\",\"thread_name\":\"Other\",\"updated_at\":\"2026-01-02T00:00:00Z\"}\n",
+        ),
     )
     .unwrap();
     let ids = vec!["thread-1".to_string(), "thread-2".to_string()];
@@ -68,39 +95,79 @@ fn refreshes_selected_session_updated_at_and_session_index() {
         include_sessions_backup: false,
     };
 
-    let report = refresh_session_updated_at_with_guard(
-        &profile,
-        &ids,
-        "2026-05-06T12:34:56Z",
-        1778070896123,
-        &options,
-        || Ok(()),
-    )
-    .unwrap();
+    let report =
+        refresh_session_updated_at_with_guard(&profile, &ids, &options, || Ok(())).unwrap();
 
     assert!(report.applied);
-    assert_eq!(report.sqlite_rows, 2);
-    assert_eq!(report.index_entries, 2);
+    assert_eq!(report.sqlite_rows, 0);
+    assert_eq!(report.index_entries, 0);
+    assert!(rollout_1.metadata().unwrap().modified().unwrap() > old_time);
+    assert!(rollout_2.metadata().unwrap().modified().unwrap() > old_time);
     assert_updated_at(
         &profile.state_db_path(),
         "thread-1",
-        "2026-05-06T12:34:56Z",
-        1778070896123,
+        1770790115,
+        1770794029,
+        1770790115043,
+        1770794029123,
     );
     assert_updated_at(
         &profile.state_db_path(),
         "thread-2",
-        "2026-05-06T12:34:56Z",
-        1778070896123,
+        1770790115,
+        1770794029,
+        1770790115043,
+        1770794029122,
     );
 
     let index = fs::read_to_string(profile.session_index_path()).unwrap();
-    assert!(index.contains(
-        r#""id":"thread-1","thread_name":"Old title","updated_at":"2026-05-06T12:34:56Z""#
-    ));
-    assert!(index.contains(
-        r#""id":"thread-2","thread_name":"Thread 2","updated_at":"2026-05-06T12:34:56Z""#
-    ));
+    let lines = index.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        lines[0],
+        r#"{"id":"thread-1","thread_name":"Old title","updated_at":"2026-01-01T00:00:00Z"}"#
+    );
+    assert_eq!(
+        lines[1],
+        r#"{"id":"other","thread_name":"Other","updated_at":"2026-01-02T00:00:00Z"}"#
+    );
+}
+
+#[test]
+fn refreshes_session_rollout_files_while_codex_is_running() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let rollout_path = profile.sessions_dir().join("thread-1.jsonl");
+    fs::create_dir_all(profile.sessions_dir()).unwrap();
+    write_rollout(&rollout_path, "thread-1");
+    set_rollout_path(&profile.state_db_path(), "thread-1", &rollout_path);
+    let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_770_790_000);
+    let old_times = FileTimes::new()
+        .set_accessed(old_time)
+        .set_modified(old_time);
+    OpenOptions::new()
+        .write(true)
+        .open(&rollout_path)
+        .unwrap()
+        .set_times(old_times)
+        .unwrap();
+    let options = SessionApplyOptions {
+        apply: true,
+        backup: false,
+        include_sessions_backup: false,
+    };
+
+    let report = refresh_session_updated_at_with_guard(
+        &profile,
+        &["thread-1".to_string()],
+        &options,
+        || anyhow::bail!("Codex appears to be running"),
+    )
+    .unwrap();
+
+    assert!(report.applied);
+    assert!(rollout_path.metadata().unwrap().modified().unwrap() > old_time);
 }
 
 fn create_state_db(path: &std::path::Path) {
@@ -148,6 +215,25 @@ fn create_state_db(path: &std::path::Path) {
     .unwrap();
 }
 
+fn write_rollout(path: &std::path::Path, id: &str) {
+    fs::write(
+        path,
+        format!(
+            r#"{{"type":"session_meta","payload":{{"id":"{id}","cwd":"/mnt/e/code/project-a","source":"cli","model_provider":"cm"}}}}"#
+        ),
+    )
+    .unwrap();
+}
+
+fn set_rollout_path(path: &std::path::Path, id: &str, rollout_path: &std::path::Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute(
+        "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
+        params![rollout_path.display().to_string(), id],
+    )
+    .unwrap();
+}
+
 fn assert_archived(path: &std::path::Path, id: &str, expected: bool) {
     let conn = Connection::open(path).unwrap();
     let archived: i64 = conn
@@ -158,15 +244,24 @@ fn assert_archived(path: &std::path::Path, id: &str, expected: bool) {
     assert_eq!(archived != 0, expected);
 }
 
-fn assert_updated_at(path: &std::path::Path, id: &str, expected: &str, expected_ms: i64) {
+fn assert_updated_at(
+    path: &std::path::Path,
+    id: &str,
+    expected_created_at: i64,
+    expected_updated_at: i64,
+    expected_created_at_ms: i64,
+    expected_updated_at_ms: i64,
+) {
     let conn = Connection::open(path).unwrap();
-    let (updated_at, updated_at_ms): (String, i64) = conn
+    let (created_at, updated_at, created_at_ms, updated_at_ms): (i64, i64, i64, i64) = conn
         .query_row(
-            "SELECT updated_at, updated_at_ms FROM threads WHERE id = ?1",
+            "SELECT created_at, updated_at, created_at_ms, updated_at_ms FROM threads WHERE id = ?1",
             [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(updated_at, expected);
-    assert_eq!(updated_at_ms, expected_ms);
+    assert_eq!(created_at, expected_created_at);
+    assert_eq!(updated_at, expected_updated_at);
+    assert_eq!(created_at_ms, expected_created_at_ms);
+    assert_eq!(updated_at_ms, expected_updated_at_ms);
 }

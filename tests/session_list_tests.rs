@@ -63,6 +63,56 @@ fn lists_sessions_filtered_by_project_provider_model_and_archived_state() {
     assert_eq!(all.len(), 2);
 }
 
+#[test]
+fn lists_sessions_present_only_in_rollout_and_session_index() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let rollout_path = profile
+        .sessions_dir()
+        .join("2026")
+        .join("05")
+        .join("08")
+        .join("rollout-2026-05-08T00-56-06-index-only.jsonl");
+    create_rollout(&rollout_path, "index-only", "/mnt/e/code/jsonl-only", "cm");
+    fs::write(
+        profile.session_index_path(),
+        concat!(
+            r#"{"id":"active-1","thread_name":"Active session","updated_at":"2026-05-06T00:00:00Z"}"#,
+            "\n",
+            r#"{"id":"index-only","thread_name":"Index only session","updated_at":"2026-05-08T00:56:06Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let sessions = list_sessions(
+        &profile,
+        &SessionListFilter {
+            search: Some("jsonl-only".to_string()),
+            archived: ArchivedFilter::All,
+            ..SessionListFilter::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "index-only");
+    assert_eq!(sessions[0].title.as_deref(), Some("Index only session"));
+    assert_eq!(
+        sessions[0].project.as_deref(),
+        Some("/mnt/e/code/jsonl-only")
+    );
+    assert_eq!(sessions[0].provider.as_deref(), Some("cm"));
+    assert_eq!(sessions[0].source.as_deref(), Some("cli"));
+    assert_eq!(
+        sessions[0].rollout_path.as_deref(),
+        Some(rollout_path.to_str().unwrap())
+    );
+    assert!(sessions[0].in_session_index);
+    assert!(!sessions[0].archived);
+}
+
 fn create_state_db(path: &std::path::Path) {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch(
