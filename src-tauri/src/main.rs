@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use codex_session_manager::app_server::{self, HttpAppServerTransport};
 use codex_session_manager::backup;
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
 use codex_session_manager::path_map::PathMap;
@@ -141,18 +140,6 @@ fn restore_manifest(
         .map_err(format_error)
 }
 
-#[tauri::command]
-fn app_server_probe(
-    profile: ProfileInput,
-    endpoint: String,
-) -> Result<app_server::AppServerProbeReport, String> {
-    let profile = build_profile(profile)?;
-    let sessions = session_list::list_sessions(&profile, &SessionListFilter::default())
-        .map_err(format_error)?;
-    let transport = HttpAppServerTransport::new(endpoint);
-    app_server::probe_app_server(&transport, &sessions).map_err(format_error)
-}
-
 fn build_profile(input: ProfileInput) -> Result<CodexProfile, String> {
     let path_maps = input
         .path_maps
@@ -191,8 +178,7 @@ fn main() {
             refresh_session_updated_at,
             edit_selected_sessions,
             create_backup,
-            restore_manifest,
-            app_server_probe
+            restore_manifest
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Codex Session Manager");

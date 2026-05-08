@@ -142,7 +142,6 @@ function render(options: RenderOptions = {}) {
       <section class="workbench">
         <div class="toolbar">
           <div>${state.sessions.length} 个会话 · 已选 ${state.selectedIds.size} 个</div>
-          <button id="probe" title="探测 app-server">探测</button>
           <button id="backup" title="创建备份">备份</button>
           <button id="archive" title="归档已选会话">归档</button>
           <button id="restore" title="恢复已选会话">恢复</button>
@@ -270,7 +269,6 @@ function bindEvents() {
   document.querySelector("#refresh-time")?.addEventListener("click", () => mutateSelected("refresh_session_updated_at"));
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
   document.querySelector("#backup")?.addEventListener("click", createBackup);
-  document.querySelector("#probe")?.addEventListener("click", probe);
   document.querySelectorAll<HTMLElement>("[data-detail-edit]").forEach((button) => {
     button.addEventListener("click", () => startDetailEdit(button.dataset.detailEdit as DetailEditField));
   });
@@ -511,15 +509,6 @@ function detailEditDirty(session: SessionSummary) {
 async function createBackup() {
   await run(async () => {
     const report = await invoke("create_backup", { profile: state.profile, includeSessions: false });
-    state.status = JSON.stringify(report);
-  });
-}
-
-async function probe() {
-  const endpoint = window.prompt("App-server 端点", "http://127.0.0.1:0");
-  if (!endpoint) return;
-  await run(async () => {
-    const report = await invoke("app_server_probe", { profile: state.profile, endpoint });
     state.status = JSON.stringify(report);
   });
 }

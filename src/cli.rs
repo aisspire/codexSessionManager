@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use crate::app_server::{self, HttpAppServerTransport};
 use crate::backup;
 use crate::migrate::{self, ApplyOptions};
 use crate::path_map::PathMap;
@@ -146,11 +145,6 @@ pub enum Command {
         no_backup: bool,
     },
 
-    /// Call Codex app-server thread/list and thread/read for black-box validation.
-    AppServerProbe {
-        #[arg(long)]
-        endpoint: String,
-    },
 }
 
 pub fn run() -> Result<()> {
@@ -309,12 +303,6 @@ pub fn run() -> Result<()> {
                     include_sessions_backup: false,
                 },
             )?;
-            println!("{}", report.to_text());
-        }
-        Command::AppServerProbe { endpoint } => {
-            let sessions = session_list::list_sessions(&profile, &SessionListFilter::default())?;
-            let transport = HttpAppServerTransport::new(endpoint);
-            let report = app_server::probe_app_server(&transport, &sessions)?;
             println!("{}", report.to_text());
         }
     }

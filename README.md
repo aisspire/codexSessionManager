@@ -45,7 +45,6 @@ repair-has-user-event 修复普通 cli/vscode 会话的 has_user_event
 archive               归档选定会话
 restore               恢复选定会话，或从 backup manifest 恢复文件
 delete                移动选定会话到本工具 trash，并标记为归档
-app-server-probe      调用 Codex app-server thread/list 和 thread/read 做黑盒验证
 ```
 
 ## 安全规范
@@ -326,16 +325,6 @@ cargo run -- \
 
 并写入 `manifest.json`。SQLite 中对应线程会被标记为 archived，不会直接永久删除数据库行。
 
-### App-server 黑盒验证
-
-```bash
-cargo run -- \
-  --codex-home /mnt/c/Users/14139/.codex \
-  app-server-probe --endpoint http://127.0.0.1:<port>
-```
-
-该命令会调用 `thread/list`，并对返回的线程逐个调用 `thread/read`，然后和本地 SQLite 列表做数量及 ID 对比。
-
 ## 桌面软件
 
 仓库包含一个 Tauri 桌面壳：
@@ -345,7 +334,7 @@ src-tauri/   Tauri command bridge
 ui/          Vite + TypeScript 前端
 ```
 
-桌面端第一屏就是会话管理器，包含筛选栏、会话表格、详情面板和批量工具栏。单个会话和批量会话都可以执行归档、恢复、删除到 trash、备份和 app-server probe。
+桌面端第一屏就是会话管理器，包含筛选栏、会话表格、详情面板和批量工具栏。单个会话和批量会话都可以执行归档、恢复、删除到 trash 和备份。
 
 桌面端调用同一套 Rust 核心库，所以写入前同样会检测 Codex 是否正在运行；运行中会拒绝执行归档、恢复、删除、manifest restore 等写操作。
 
@@ -440,9 +429,8 @@ src/validate.rs        迁移后校验
 第一版稳定后，可以继续加：
 
 - `list`：按项目、provider、模型、归档状态列出会话。
-- `archive`：通过 SQLite 或 app-server 归档会话。
+- `archive`：通过 SQLite 归档会话。
 - `restore`：从 backup manifest 恢复。
 - `delete`：移动到工具自己的 trash，而不是直接永久删除。
-- `app-server-probe`：调用 Codex app-server 的 `thread/list` 和 `thread/read` 做黑盒验证。
 - `tui`：用终端界面预览迁移计划。
 - `tauri`：把核心库包装成桌面软件。

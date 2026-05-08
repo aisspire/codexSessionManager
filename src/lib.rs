@@ -3,7 +3,6 @@
 //! The binary is intentionally thin. Most behavior lives in modules here so the
 //! migration rules can be tested without invoking a command line process.
 
-pub mod app_server;
 pub mod backup;
 pub mod cli;
 pub mod migrate;
