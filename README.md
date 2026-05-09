@@ -62,6 +62,7 @@ npm run tauri -- build
 
 本项目通过 GitHub Actions 和官方 `tauri-apps/tauri-action` 在推送版本标签时自动构建桌面安装包。
 发布 workflow 位于 `.github/workflows/release.yml`，触发条件是推送 `v*` 格式的 Git tag，例如 `v0.2.0`。
+不要从 GitHub Releases 页面手动创建正式发布作为第一步；手动创建的 Release 不会自动带上安装包。正确入口是在本地推送 tag，让 Actions 先构建并生成草稿 Release。
 
 当前发布会构建：
 
@@ -102,12 +103,20 @@ npm --prefix ui run tauri -- build
 
 Windows 本地打包时，如果出现无法删除 `src-tauri\target\...\codex-session-manager-desktop.exe` 或 `拒绝访问`，通常是旧应用进程、杀毒软件或系统仍占用该 exe。关闭正在运行的桌面应用后再重试。
 
-确认版本文件和构建检查没问题后，提交版本变更：
+确认版本文件和构建检查没问题后，先创建一个干净的发布提交，再给这个提交打 tag。
+如果版本脚本实际修改了文件，提交这些版本变更：
 
 ```powershell
 git status
 git add Cargo.toml Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json ui/package.json ui/package-lock.json
 git commit -m "chore(release): 准备 v0.2.0"
+git push origin main
+```
+
+如果当前版本号本来就是目标版本，`git status` 没有任何版本文件变化，也仍然建议创建一个空的发布提交，让 tag 指向清晰的 release commit：
+
+```powershell
+git commit --allow-empty -m "chore(release): 准备 v0.2.0"
 git push origin main
 ```
 
@@ -120,6 +129,7 @@ git push origin v0.2.0
 
 推送 tag 后，GitHub Actions 会自动执行 Release workflow，并把各平台构建产物上传到同一个 GitHub Release。
 当前 workflow 设置为 `releaseDraft: true`，因此生成的是草稿 Release。Actions 全部通过后，到 GitHub Releases 页面检查标题、说明和附件，确认无误后手动发布。
+如果 Release 页面没有安装包，先检查 Actions 页面里这个 tag 对应的 Release workflow 是否已经跑完并通过；没有 workflow 运行时，通常是 tag 没有推送到远端，或 tag 是在 workflow 提交之前创建的。
 
 早期内部测试可以先不配置代码签名。未签名包仍可构建和上传，但 Windows 可能显示未知发布者或 SmartScreen 提示，macOS 也可能要求用户绕过系统安全限制。面向公开用户稳定分发前，建议再补 Windows 代码签名证书、Apple Developer ID 签名和 macOS notarization。
 
