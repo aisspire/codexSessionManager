@@ -63,6 +63,7 @@ npm run tauri -- build
 本项目通过 GitHub Actions 和官方 `tauri-apps/tauri-action` 在推送版本标签时自动构建桌面安装包。
 发布 workflow 位于 `.github/workflows/release.yml`，触发条件是推送 `v*` 格式的 Git tag，例如 `v0.2.0`。
 不要从 GitHub Releases 页面手动创建正式发布作为第一步；手动创建的 Release 不会自动带上安装包。正确入口是在本地推送 tag，让 Actions 先构建并生成草稿 Release。
+`src-tauri/tauri.conf.json` 中必须启用 `bundle.active`，否则 Tauri 只会生成裸可执行文件，`tauri-action` 上传阶段会提示 `No artifacts were found`。
 
 当前发布会构建：
 
