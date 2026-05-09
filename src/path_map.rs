@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{bail, Result};
 
 /// A one-way path rewrite rule.
@@ -88,4 +90,39 @@ pub fn normalize_path_text(value: &str) -> String {
 
 pub fn apply_first_path_map(value: &str, maps: &[PathMap]) -> Option<String> {
     maps.iter().find_map(|map| map.apply(value))
+}
+
+pub fn path_buf_for_current_os(value: &str) -> PathBuf {
+    PathBuf::from(path_text_for_current_os(value))
+}
+
+pub fn path_text_for_current_os(value: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(path) = wsl_mount_to_windows_path(value) {
+            return path;
+        }
+    }
+
+    value.to_string()
+}
+
+#[cfg(windows)]
+fn wsl_mount_to_windows_path(value: &str) -> Option<String> {
+    let text = value.trim().replace('\\', "/");
+    let rest = text.strip_prefix("/mnt/")?;
+    let (drive, remainder) = rest.split_once('/').unwrap_or((rest, ""));
+    if drive.len() != 1 {
+        return None;
+    }
+    let drive = drive.chars().next()?.to_ascii_uppercase();
+    if !drive.is_ascii_alphabetic() {
+        return None;
+    }
+
+    if remainder.is_empty() {
+        return Some(format!("{drive}:\\"));
+    }
+
+    Some(format!("{drive}:\\{}", remainder.replace('/', "\\")))
 }

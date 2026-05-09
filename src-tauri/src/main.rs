@@ -1,13 +1,11 @@
-use std::{path::PathBuf, process::Command};
+use std::process::Command;
 
-use codex_session_manager::backup;
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
 use codex_session_manager::path_map::PathMap;
 use codex_session_manager::profile::CodexProfile;
-use codex_session_manager::restore;
 use codex_session_manager::session_list::{self, SessionListFilter, SessionSummary};
 use codex_session_manager::session_ops::{self, SessionApplyOptions, SessionMutationReport};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 const PROJECT_GITHUB_URL: &str = "https://github.com/aisspire/codexSessionManager";
 
@@ -18,13 +16,6 @@ struct ProfileInput {
     provider: Option<String>,
     model: Option<String>,
     path_maps: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct BackupResponse {
-    backup_dir: String,
-    manifest_path: Option<String>,
-    copied_entries: usize,
 }
 
 #[tauri::command]
@@ -47,13 +38,13 @@ fn archive_sessions(
 }
 
 #[tauri::command]
-fn restore_sessions(
+fn active_sessions(
     profile: ProfileInput,
     ids: Vec<String>,
     apply: bool,
 ) -> Result<SessionMutationReport, String> {
     let profile = build_profile(profile)?;
-    session_ops::restore_sessions(&profile, &ids, &apply_options(apply)).map_err(format_error)
+    session_ops::active_sessions(&profile, &ids, &apply_options(apply)).map_err(format_error)
 }
 
 #[tauri::command]
@@ -112,34 +103,9 @@ fn edit_selected_sessions(
         &profile,
         &ids,
         &edit,
-        &ApplyOptions {
-            apply,
-            backup: true,
-            include_sessions_backup: false,
-        },
+        &ApplyOptions { apply },
     )
     .map_err(format_error)
-}
-
-#[tauri::command]
-fn create_backup(profile: ProfileInput, include_sessions: bool) -> Result<BackupResponse, String> {
-    let profile = build_profile(profile)?;
-    let backup = backup::create_backup(&profile, include_sessions).map_err(format_error)?;
-    Ok(BackupResponse {
-        backup_dir: backup.backup_dir.display().to_string(),
-        manifest_path: backup.manifest_path.map(|path| path.display().to_string()),
-        copied_entries: backup.copied_files.len(),
-    })
-}
-
-#[tauri::command]
-fn restore_manifest(
-    manifest_path: String,
-    files: Vec<String>,
-    apply: bool,
-) -> Result<restore::RestoreReport, String> {
-    restore::restore_from_manifest(PathBuf::from(manifest_path).as_path(), &files, apply)
-        .map_err(format_error)
 }
 
 #[tauri::command]
@@ -167,11 +133,7 @@ fn build_profile(input: ProfileInput) -> Result<CodexProfile, String> {
 }
 
 fn apply_options(apply: bool) -> SessionApplyOptions {
-    SessionApplyOptions {
-        apply,
-        backup: true,
-        include_sessions_backup: false,
-    }
+    SessionApplyOptions { apply }
 }
 
 fn format_error(error: anyhow::Error) -> String {
@@ -218,12 +180,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             archive_sessions,
-            restore_sessions,
+            active_sessions,
             delete_sessions,
             refresh_session_updated_at,
             edit_selected_sessions,
-            create_backup,
-            restore_manifest,
             open_external_url
         ])
         .run(tauri::generate_context!())

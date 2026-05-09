@@ -1,4 +1,4 @@
-use codex_session_manager::path_map::PathMap;
+use codex_session_manager::path_map::{path_buf_for_current_os, PathMap};
 
 #[test]
 fn maps_windows_drive_prefix_to_wsl_prefix() {
@@ -26,4 +26,15 @@ fn leaves_unmatched_path_unchanged() {
     let map = PathMap::new(r"E:\code", "/mnt/e/code").unwrap();
 
     assert_eq!(map.apply(r"D:\other\project"), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn converts_wsl_mount_path_to_windows_path_on_windows() {
+    assert_eq!(
+        path_buf_for_current_os("/mnt/c/Users/14139/.codex/sessions/thread.jsonl")
+            .display()
+            .to_string(),
+        r"C:\Users\14139\.codex\sessions\thread.jsonl"
+    );
 }

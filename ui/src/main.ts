@@ -9,7 +9,7 @@ type ArchivedFilter = "active" | "archived" | "all";
 type TableColumnKey = "select" | "session" | "provider" | "model" | "state" | "updated";
 type SessionCommand =
   | "archive_sessions"
-  | "restore_sessions"
+  | "active_sessions"
   | "delete_sessions"
   | "refresh_session_updated_at";
 
@@ -55,7 +55,6 @@ interface SessionListFilter {
 interface MutationReport {
   action: string;
   applied: boolean;
-  backup_dir?: string;
   sqlite_rows: number;
   jsonl_files: number;
   index_entries: number;
@@ -205,7 +204,7 @@ function pageHeader() {
   const description =
     state.activePage === "batch-edit"
       ? "批量修改已选会话的名称前缀、提供方和项目路径。"
-      : "备份、归档、恢复、置顶或删除已选会话。";
+      : "归档、活动、置顶或删除已选会话。";
   return `
     <header class="page-header">
       <div>
@@ -262,9 +261,8 @@ function batchEditBar() {
 function sessionManagementBar() {
   return `
     <section class="toolbar action-toolbar management-toolbar" aria-label="会话管理操作">
-      <button id="backup">备份</button>
       <button id="archive">归档</button>
-      <button id="restore">恢复</button>
+      <button id="active">活动</button>
       <button id="refresh-time">置顶</button>
       <button id="delete" class="danger">删除</button>
     </section>
@@ -391,7 +389,7 @@ function detailDrawer(session: SessionSummary) {
         <button id="save-detail-title" class="primary" ${dirty ? "" : "disabled"}>保存</button>
         <button data-single-command="refresh_session_updated_at">置顶</button>
         <button data-single="archive">归档</button>
-        <button data-single="restore">恢复</button>
+        <button data-single="active">活动</button>
         <button data-single="delete" class="danger">删除</button>
       </div>
     </aside>
@@ -413,10 +411,9 @@ function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
   document.querySelector("#preview-selected-edit")?.addEventListener("click", () => editSelected(false));
   document.querySelector("#apply-selected-edit")?.addEventListener("click", () => editSelected(true));
   document.querySelector("#archive")?.addEventListener("click", () => mutateSelected("archive_sessions"));
-  document.querySelector("#restore")?.addEventListener("click", () => mutateSelected("restore_sessions"));
+  document.querySelector("#active")?.addEventListener("click", () => mutateSelected("active_sessions"));
   document.querySelector("#refresh-time")?.addEventListener("click", () => mutateSelected("refresh_session_updated_at"));
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
-  document.querySelector("#backup")?.addEventListener("click", createBackup);
 }
 
 function bindSettingsEvents() {
@@ -627,7 +624,7 @@ async function editSelected(apply: boolean) {
     render({ preserveTableScroll: true });
     return;
   }
-  if (apply && !window.confirm(`将修改 ${ids.length} 个已选会话，并在写入前创建备份。继续？`)) {
+  if (apply && !window.confirm(`将修改 ${ids.length} 个已选会话。继续？`)) {
     return;
   }
 
@@ -760,13 +757,6 @@ function detailEditDirty(session: SessionSummary) {
   });
 }
 
-async function createBackup() {
-  await run(async () => {
-    const report = await invoke("create_backup", { profile: state.profile, includeSessions: false });
-    state.status = JSON.stringify(report);
-  });
-}
-
 async function openGithubRepository() {
   await run(async () => {
     await invoke("open_external_url", { url: GITHUB_REPOSITORY_URL });
@@ -787,8 +777,7 @@ async function run(task: () => Promise<void>) {
 }
 
 function formatMutationReport(report: MutationReport) {
-  const backup = report.backup_dir ? ` · 备份 ${report.backup_dir}` : "";
-  return `${report.action} · ${report.applied ? "已应用" : "预览"} · SQLite ${report.sqlite_rows} 行 · JSONL ${report.jsonl_files} 个 · 索引 ${report.index_entries} 条${backup}`;
+  return `${report.action} · ${report.applied ? "已应用" : "预览"} · SQLite ${report.sqlite_rows} 行 · JSONL ${report.jsonl_files} 个 · 索引 ${report.index_entries} 条`;
 }
 
 function tableSizingStyle() {

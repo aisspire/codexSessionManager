@@ -3,22 +3,20 @@ use std::time::{Duration, SystemTime};
 
 use codex_session_manager::profile::CodexProfile;
 use codex_session_manager::session_ops::{
-    archive_sessions_with_guard, refresh_session_updated_at_with_guard,
-    restore_sessions_with_guard, SessionApplyOptions,
+    active_sessions_with_guard, archive_sessions_with_guard,
+    refresh_session_updated_at_with_guard, SessionApplyOptions,
 };
 use rusqlite::{params, Connection};
 use tempfile::tempdir;
 
 #[test]
-fn archives_and_restores_selected_sessions() {
+fn archives_and_marks_selected_sessions_active() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
     let ids = vec!["thread-1".to_string()];
     let options = SessionApplyOptions {
         apply: true,
-        backup: false,
-        include_sessions_backup: false,
     };
 
     let archive = archive_sessions_with_guard(&profile, &ids, &options, || Ok(())).unwrap();
@@ -27,14 +25,15 @@ fn archives_and_restores_selected_sessions() {
     assert_archived(&profile.state_db_path(), "thread-1", true);
     assert_archived(&profile.state_db_path(), "thread-2", false);
 
-    let restore = restore_sessions_with_guard(&profile, &ids, &options, || Ok(())).unwrap();
-    assert!(restore.applied);
-    assert_eq!(restore.sqlite_rows, 1);
+    let active = active_sessions_with_guard(&profile, &ids, &options, || Ok(())).unwrap();
+    assert_eq!(active.action, "active sessions");
+    assert!(active.applied);
+    assert_eq!(active.sqlite_rows, 1);
     assert_archived(&profile.state_db_path(), "thread-1", false);
 }
 
 #[test]
-fn archives_and_restores_touch_rollout_files_to_notify_codex() {
+fn archives_and_marks_active_touch_rollout_files_to_notify_codex() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
@@ -46,8 +45,6 @@ fn archives_and_restores_touch_rollout_files_to_notify_codex() {
     let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_770_790_000);
     let options = SessionApplyOptions {
         apply: true,
-        backup: false,
-        include_sessions_backup: false,
     };
 
     set_file_times(&rollout_path, old_time);
@@ -56,13 +53,13 @@ fn archives_and_restores_touch_rollout_files_to_notify_codex() {
     assert!(archived_path.metadata().unwrap().modified().unwrap() > old_time);
 
     set_file_times(&archived_path, old_time);
-    restore_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
+    active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
         .unwrap();
     assert!(rollout_path.metadata().unwrap().modified().unwrap() > old_time);
 }
 
 #[test]
-fn archives_and_restores_move_rollout_files_between_codex_directories() {
+fn archives_and_marks_active_move_rollout_files_between_codex_directories() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
@@ -80,8 +77,6 @@ fn archives_and_restores_move_rollout_files_between_codex_directories() {
         .join("rollout-2026-05-07T21-52-45-thread-1.jsonl");
     let options = SessionApplyOptions {
         apply: true,
-        backup: false,
-        include_sessions_backup: false,
     };
 
     archive_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
@@ -91,7 +86,7 @@ fn archives_and_restores_move_rollout_files_between_codex_directories() {
     assert!(archived_path.exists());
     assert_archived(&profile.state_db_path(), "thread-1", true);
 
-    restore_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
+    active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
         .unwrap();
 
     assert!(rollout_path.exists());
@@ -100,7 +95,7 @@ fn archives_and_restores_move_rollout_files_between_codex_directories() {
 }
 
 #[test]
-fn restores_codex_archived_rollout_even_when_sqlite_is_not_archived() {
+fn marks_codex_archived_rollout_active_even_when_sqlite_is_not_archived() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
@@ -119,18 +114,47 @@ fn restores_codex_archived_rollout_even_when_sqlite_is_not_archived() {
     assert_archived(&profile.state_db_path(), "thread-1", false);
     let options = SessionApplyOptions {
         apply: true,
-        backup: false,
-        include_sessions_backup: false,
     };
 
     let report =
-        restore_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
+        active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
             .unwrap();
 
     assert_eq!(report.sqlite_rows, 0);
     assert!(restored_path.exists());
     assert!(!archived_path.exists());
     assert_archived(&profile.state_db_path(), "thread-1", false);
+}
+
+#[cfg(windows)]
+#[test]
+fn marks_active_uses_windows_path_for_wsl_mount_rollout_path() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let restored_path = profile
+        .sessions_dir()
+        .join("2026")
+        .join("05")
+        .join("06")
+        .join("rollout-2026-05-06T20-43-11-thread-1.jsonl");
+    let archived_path = profile
+        .archived_sessions_dir()
+        .join("rollout-2026-05-06T20-43-11-thread-1.jsonl");
+    fs::create_dir_all(profile.archived_sessions_dir()).unwrap();
+    write_rollout(&archived_path, "thread-1");
+    set_rollout_path_text(
+        &profile.state_db_path(),
+        "thread-1",
+        &windows_path_to_wsl_mount(&restored_path),
+    );
+    let options = SessionApplyOptions { apply: true };
+
+    active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
+        .unwrap();
+
+    assert!(restored_path.exists());
+    assert!(!archived_path.exists());
 }
 
 #[test]
@@ -140,8 +164,6 @@ fn refuses_to_archive_when_codex_is_running() {
     create_state_db(&profile.state_db_path());
     let options = SessionApplyOptions {
         apply: true,
-        backup: false,
-        include_sessions_backup: false,
     };
 
     let result = archive_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || {
@@ -191,8 +213,6 @@ fn refreshes_selected_session_rollout_files_without_rewriting_indexes() {
     let ids = vec!["thread-1".to_string(), "thread-2".to_string()];
     let options = SessionApplyOptions {
         apply: true,
-        backup: false,
-        include_sessions_backup: false,
     };
 
     let report =
@@ -254,8 +274,6 @@ fn refreshes_session_rollout_files_while_codex_is_running() {
         .unwrap();
     let options = SessionApplyOptions {
         apply: true,
-        backup: false,
-        include_sessions_backup: false,
     };
 
     let report = refresh_session_updated_at_with_guard(
@@ -326,12 +344,25 @@ fn write_rollout(path: &std::path::Path, id: &str) {
 }
 
 fn set_rollout_path(path: &std::path::Path, id: &str, rollout_path: &std::path::Path) {
+    set_rollout_path_text(path, id, &rollout_path.display().to_string());
+}
+
+fn set_rollout_path_text(path: &std::path::Path, id: &str, rollout_path: &str) {
     let conn = Connection::open(path).unwrap();
     conn.execute(
         "UPDATE threads SET rollout_path = ?1 WHERE id = ?2",
-        params![rollout_path.display().to_string(), id],
+        params![rollout_path, id],
     )
     .unwrap();
+}
+
+#[cfg(windows)]
+fn windows_path_to_wsl_mount(path: &std::path::Path) -> String {
+    let text = path.display().to_string().replace('\\', "/");
+    let Some((drive, rest)) = text.split_once(':') else {
+        panic!("test path is missing a drive letter: {text}");
+    };
+    format!("/mnt/{}/{}", drive.to_ascii_lowercase(), rest.trim_start_matches('/'))
 }
 
 fn set_file_times(path: &std::path::Path, time: SystemTime) {

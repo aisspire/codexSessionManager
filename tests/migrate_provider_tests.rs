@@ -25,8 +25,6 @@ fn migrates_provider_and_returns_serializable_report() {
         "cm",
         &ApplyOptions {
             apply: true,
-            backup: false,
-            include_sessions_backup: false,
         },
     )
     .unwrap();

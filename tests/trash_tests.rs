@@ -16,8 +16,6 @@ fn delete_moves_rollout_files_to_tool_trash_and_archives_threads() {
     create_state_db(&profile.state_db_path(), &rollout);
     let options = SessionApplyOptions {
         apply: true,
-        backup: false,
-        include_sessions_backup: false,
     };
 
     let report =

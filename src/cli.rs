@@ -1,13 +1,11 @@
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::backup;
 use crate::migrate::{self, ApplyOptions};
 use crate::path_map::PathMap;
 use crate::profile::CodexProfile;
-use crate::restore;
 use crate::scan;
 use crate::session_list::{self, ArchivedFilter, SessionListFilter};
 use crate::session_ops::{self, SessionApplyOptions};
@@ -45,13 +43,6 @@ pub enum Command {
     /// Scan Codex files and print a read-only report.
     Scan,
 
-    /// Back up key Codex state files.
-    Backup {
-        /// Include sessions/ in the backup. This can be large.
-        #[arg(long)]
-        include_sessions: bool,
-    },
-
     /// Validate SQLite integrity and JSONL/thread consistency.
     Validate,
 
@@ -79,36 +70,24 @@ pub enum Command {
         to: String,
         #[arg(long)]
         apply: bool,
-        #[arg(long)]
-        no_backup: bool,
-        #[arg(long)]
-        include_sessions_backup: bool,
     },
 
     /// Migrate rollout_path/cwd values using configured path maps.
     MigratePaths {
         #[arg(long)]
         apply: bool,
-        #[arg(long)]
-        no_backup: bool,
-        #[arg(long)]
-        include_sessions_backup: bool,
     },
 
     /// Append missing visible user sessions to session_index.jsonl.
     RepairSessionIndex {
         #[arg(long)]
         apply: bool,
-        #[arg(long)]
-        no_backup: bool,
     },
 
     /// Mark ordinary cli/vscode sessions with titles/messages as user sessions.
     RepairHasUserEvent {
         #[arg(long)]
         apply: bool,
-        #[arg(long)]
-        no_backup: bool,
     },
 
     /// Archive selected sessions.
@@ -117,22 +96,14 @@ pub enum Command {
         ids: Vec<String>,
         #[arg(long)]
         apply: bool,
-        #[arg(long)]
-        no_backup: bool,
     },
 
-    /// Restore selected sessions from archived state.
-    Restore {
-        #[arg(long = "id")]
+    /// Mark selected archived sessions as active.
+    Active {
+        #[arg(long = "id", required = true)]
         ids: Vec<String>,
         #[arg(long)]
-        manifest: Option<PathBuf>,
-        #[arg(long = "file")]
-        files: Vec<String>,
-        #[arg(long)]
         apply: bool,
-        #[arg(long)]
-        no_backup: bool,
     },
 
     /// Move selected sessions to this tool's trash and archive their threads.
@@ -141,8 +112,6 @@ pub enum Command {
         ids: Vec<String>,
         #[arg(long)]
         apply: bool,
-        #[arg(long)]
-        no_backup: bool,
     },
 
 }
@@ -155,11 +124,6 @@ pub fn run() -> Result<()> {
         Command::Scan => {
             let report = scan::scan_profile(&profile)?;
             println!("{}", report.to_text());
-        }
-        Command::Backup { include_sessions } => {
-            let result = backup::create_backup(&profile, *include_sessions)?;
-            println!("backup: {}", result.backup_dir.display());
-            println!("copied entries: {}", result.copied_files.len());
         }
         Command::Validate => {
             let report = validate::validate_profile(&profile)?;
@@ -193,115 +157,57 @@ pub fn run() -> Result<()> {
             from,
             to,
             apply,
-            no_backup,
-            include_sessions_backup,
         } => {
             let report = migrate::migrate_provider(
                 &profile,
                 from,
                 to,
-                &ApplyOptions {
-                    apply: *apply,
-                    backup: !no_backup,
-                    include_sessions_backup: *include_sessions_backup,
-                },
+                &ApplyOptions { apply: *apply },
             )?;
             println!("{}", report.to_text());
         }
-        Command::MigratePaths {
-            apply,
-            no_backup,
-            include_sessions_backup,
-        } => {
+        Command::MigratePaths { apply } => {
             let report = migrate::migrate_paths(
                 &profile,
-                &ApplyOptions {
-                    apply: *apply,
-                    backup: !no_backup,
-                    include_sessions_backup: *include_sessions_backup,
-                },
+                &ApplyOptions { apply: *apply },
             )?;
             println!("{}", report.to_text());
         }
-        Command::RepairSessionIndex { apply, no_backup } => {
+        Command::RepairSessionIndex { apply } => {
             let report = migrate::repair_session_index(
                 &profile,
-                &ApplyOptions {
-                    apply: *apply,
-                    backup: !no_backup,
-                    include_sessions_backup: false,
-                },
+                &ApplyOptions { apply: *apply },
             )?;
             println!("{}", report.to_text());
         }
-        Command::RepairHasUserEvent { apply, no_backup } => {
+        Command::RepairHasUserEvent { apply } => {
             let report = migrate::repair_has_user_event(
                 &profile,
-                &ApplyOptions {
-                    apply: *apply,
-                    backup: !no_backup,
-                    include_sessions_backup: false,
-                },
+                &ApplyOptions { apply: *apply },
             )?;
             println!("{}", report.to_text());
         }
-        Command::Archive {
-            ids,
-            apply,
-            no_backup,
-        } => {
+        Command::Archive { ids, apply } => {
             let report = session_ops::archive_sessions(
                 &profile,
                 ids,
-                &SessionApplyOptions {
-                    apply: *apply,
-                    backup: !no_backup,
-                    include_sessions_backup: false,
-                },
+                &SessionApplyOptions { apply: *apply },
             )?;
             println!("{}", report.to_text());
         }
-        Command::Restore {
-            ids,
-            manifest,
-            files,
-            apply,
-            no_backup,
-        } => {
-            if let Some(manifest) = manifest {
-                let report = restore::restore_from_manifest(manifest, files, *apply)?;
-                println!("{}", report.to_text());
-            } else {
-                if ids.is_empty() {
-                    bail!(
-                        "restore requires --id for session restore or --manifest for file restore"
-                    );
-                }
-                let report = session_ops::restore_sessions(
-                    &profile,
-                    ids,
-                    &SessionApplyOptions {
-                        apply: *apply,
-                        backup: !no_backup,
-                        include_sessions_backup: false,
-                    },
-                )?;
-                println!("{}", report.to_text());
-            }
+        Command::Active { ids, apply } => {
+            let report = session_ops::active_sessions(
+                &profile,
+                ids,
+                &SessionApplyOptions { apply: *apply },
+            )?;
+            println!("{}", report.to_text());
         }
-        Command::Delete {
-            ids,
-            apply,
-            no_backup,
-        } => {
+        Command::Delete { ids, apply } => {
             let report = session_ops::delete_sessions(
                 &profile,
                 ids,
-                &SessionApplyOptions {
-                    apply: *apply,
-                    backup: !no_backup,
-                    include_sessions_backup: false,
-                },
+                &SessionApplyOptions { apply: *apply },
             )?;
             println!("{}", report.to_text());
         }

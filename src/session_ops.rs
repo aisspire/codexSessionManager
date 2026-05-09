@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, FileTimes, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::backup;
+use crate::path_map::path_buf_for_current_os;
 use crate::profile::CodexProfile;
 use crate::rollout::read_all_rollout_meta;
 use crate::safety;
@@ -16,16 +17,12 @@ use crate::trash::{self, TrashManifest};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionApplyOptions {
     pub apply: bool,
-    pub backup: bool,
-    pub include_sessions_backup: bool,
 }
 
 impl Default for SessionApplyOptions {
     fn default() -> Self {
         Self {
             apply: false,
-            backup: true,
-            include_sessions_backup: false,
         }
     }
 }
@@ -37,7 +34,6 @@ pub struct SessionMutationReport {
     pub requested_ids: Vec<String>,
     pub sqlite_rows: usize,
     pub index_entries: usize,
-    pub backup_dir: Option<String>,
     pub trash_manifest_path: Option<String>,
     pub trash_manifest: Option<TrashManifest>,
 }
@@ -51,9 +47,6 @@ impl SessionMutationReport {
             format!("sqlite rows: {}", self.sqlite_rows),
             format!("session_index entries: {}", self.index_entries),
         ];
-        if let Some(backup_dir) = &self.backup_dir {
-            lines.push(format!("backup: {backup_dir}"));
-        }
         if let Some(trash_manifest_path) = &self.trash_manifest_path {
             lines.push(format!("trash manifest: {trash_manifest_path}"));
         }
@@ -81,15 +74,15 @@ where
     set_archived_with_guard(profile, ids, true, "archive sessions", options, guard)
 }
 
-pub fn restore_sessions(
+pub fn active_sessions(
     profile: &CodexProfile,
     ids: &[String],
     options: &SessionApplyOptions,
 ) -> Result<SessionMutationReport> {
-    restore_sessions_with_guard(profile, ids, options, safety::ensure_codex_not_running)
+    active_sessions_with_guard(profile, ids, options, safety::ensure_codex_not_running)
 }
 
-pub fn restore_sessions_with_guard<F>(
+pub fn active_sessions_with_guard<F>(
     profile: &CodexProfile,
     ids: &[String],
     options: &SessionApplyOptions,
@@ -98,7 +91,7 @@ pub fn restore_sessions_with_guard<F>(
 where
     F: FnOnce() -> Result<()>,
 {
-    set_archived_with_guard(profile, ids, false, "restore sessions", options, guard)
+    set_archived_with_guard(profile, ids, false, "active sessions", options, guard)
 }
 
 pub fn delete_sessions(
@@ -128,24 +121,18 @@ where
 {
     let rollout_paths = refreshable_rollout_paths(profile, ids)?;
 
-    let mut report = SessionMutationReport {
+    let report = SessionMutationReport {
         action: "touch session rollout files".to_string(),
         applied: options.apply,
         requested_ids: ids.to_vec(),
         sqlite_rows: 0,
         index_entries: 0,
-        backup_dir: None,
         trash_manifest_path: None,
         trash_manifest: None,
     };
 
     if !options.apply {
         return Ok(report);
-    }
-
-    if options.backup {
-        let backup = backup::create_backup(profile, options.include_sessions_backup)?;
-        report.backup_dir = Some(backup.backup_dir.display().to_string());
     }
 
     touch_rollout_files(&rollout_paths)?;
@@ -174,7 +161,6 @@ where
         requested_ids: ids.to_vec(),
         sqlite_rows: selected.iter().filter(|thread| !thread.archived).count(),
         index_entries: 0,
-        backup_dir: None,
         trash_manifest_path: None,
         trash_manifest: None,
     };
@@ -184,10 +170,6 @@ where
     }
 
     guard()?;
-    if options.backup {
-        let backup = backup::create_backup(profile, options.include_sessions_backup)?;
-        report.backup_dir = Some(backup.backup_dir.display().to_string());
-    }
 
     let trash = trash::move_threads_to_trash(profile, &selected)?;
     report.trash_manifest_path = Some(trash.manifest_path.display().to_string());
@@ -223,7 +205,6 @@ where
         requested_ids: ids.to_vec(),
         sqlite_rows,
         index_entries: 0,
-        backup_dir: None,
         trash_manifest_path: None,
         trash_manifest: None,
     };
@@ -233,10 +214,6 @@ where
     }
 
     guard()?;
-    if options.backup {
-        let backup = backup::create_backup(profile, options.include_sessions_backup)?;
-        report.backup_dir = Some(backup.backup_dir.display().to_string());
-    }
 
     let rollout_paths = move_rollout_files_for_archive_state(profile, ids, archived)?;
     let mut db = StateDb::open(&profile.state_db_path())?;
@@ -259,7 +236,7 @@ fn refreshable_rollout_paths(profile: &CodexProfile, ids: &[String]) -> Result<V
         .filter_map(|thread| {
             thread
                 .rollout_path
-                .map(PathBuf::from)
+                .map(|path| path_buf_for_current_os(&path))
                 .map(|path| (thread.id, path))
         })
         .collect::<HashMap<_, _>>();
@@ -301,7 +278,7 @@ fn move_rollout_files_to_archive(profile: &CodexProfile, ids: &[String]) -> Resu
         };
         fs::create_dir_all(profile.archived_sessions_dir())?;
         let destination = profile.archived_sessions_dir().join(file_name);
-        fs::rename(&source, &destination)?;
+        move_file(&source, &destination)?;
         moved_paths.push(destination);
     }
     Ok(moved_paths)
@@ -326,7 +303,7 @@ fn move_rollout_files_to_sessions(profile: &CodexProfile, ids: &[String]) -> Res
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::rename(&meta.path, &destination)?;
+        move_file(&meta.path, &destination)?;
         moved_paths.push(destination);
     }
 
@@ -347,7 +324,7 @@ fn session_rollout_destinations(
             thread
                 .rollout_path
                 .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
+                .map(|path| path_buf_for_current_os(&path))
                 .map(|path| (thread.id, path))
         })
         .collect())
@@ -377,6 +354,47 @@ fn restored_rollout_path(profile: &CodexProfile, archived_path: &Path) -> PathBu
     profile.sessions_dir().join(file_name)
 }
 
+fn move_file(source: &Path, destination: &Path) -> Result<()> {
+    move_file_with_rename(source, destination, |from, to| fs::rename(from, to))
+}
+
+fn move_file_with_rename<F>(source: &Path, destination: &Path, rename: F) -> Result<()>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create move dir {}", parent.display()))?;
+    }
+
+    match rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if is_cross_device_error(&error) => {
+            fs::copy(source, destination).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+            fs::remove_file(source)
+                .with_context(|| format!("failed to remove {}", source.display()))?;
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to move {} to {}",
+                source.display(),
+                destination.display()
+            )
+        }),
+    }
+}
+
+fn is_cross_device_error(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(17) | Some(18))
+}
+
 fn touch_rollout_files(paths: &[PathBuf]) -> Result<()> {
     let now = SystemTime::now();
     let times = FileTimes::new().set_accessed(now).set_modified(now);
@@ -393,4 +411,29 @@ fn touch_rollout_file(path: &Path, times: FileTimes) -> Result<()> {
         .with_context(|| format!("failed to open rollout file {}", path.display()))?
         .set_times(times)
         .with_context(|| format!("failed to touch rollout file {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn move_file_falls_back_to_copy_and_delete_when_rename_crosses_devices() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.jsonl");
+        let destination = dir.path().join("nested").join("destination.jsonl");
+        fs::write(&source, "session body").unwrap();
+
+        move_file_with_rename(&source, &destination, |_, _| {
+            Err(io::Error::from_raw_os_error(17))
+        })
+        .unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(destination).unwrap(), "session body");
+    }
 }

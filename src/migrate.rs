@@ -2,7 +2,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::backup;
 use crate::path_map::apply_first_path_map;
 use crate::profile::CodexProfile;
 use crate::rollout::{read_all_rollout_meta, rewrite_session_meta};
@@ -15,16 +14,12 @@ use crate::state_db::StateDb;
 #[derive(Debug, Clone)]
 pub struct ApplyOptions {
     pub apply: bool,
-    pub backup: bool,
-    pub include_sessions_backup: bool,
 }
 
 impl Default for ApplyOptions {
     fn default() -> Self {
         Self {
             apply: false,
-            backup: true,
-            include_sessions_backup: false,
         }
     }
 }
@@ -33,7 +28,6 @@ impl Default for ApplyOptions {
 pub struct MutationReport {
     pub action: String,
     pub applied: bool,
-    pub backup_dir: Option<String>,
     pub sqlite_rows: usize,
     pub jsonl_files: usize,
     pub index_entries: usize,
@@ -50,17 +44,13 @@ pub struct SessionEdit {
 
 impl MutationReport {
     pub fn to_text(&self) -> String {
-        let mut lines = vec![
+        let lines = vec![
             format!("action: {}", self.action),
             format!("mode: {}", if self.applied { "applied" } else { "dry-run" }),
             format!("sqlite rows: {}", self.sqlite_rows),
             format!("jsonl files: {}", self.jsonl_files),
             format!("session_index entries: {}", self.index_entries),
         ];
-
-        if let Some(backup_dir) = &self.backup_dir {
-            lines.push(format!("backup: {backup_dir}"));
-        }
 
         lines.join("\n")
     }
@@ -136,7 +126,6 @@ pub fn edit_selected_sessions(
     }
 
     let sqlite_rows = report.sqlite_rows;
-    report.backup_dir = maybe_backup(profile, options)?;
     db.update_selected_session_fields(ids, provider, project)?;
     db.update_session_titles(
         &renames
@@ -258,7 +247,6 @@ pub fn migrate_provider(
         return Ok(report);
     }
 
-    report.backup_dir = maybe_backup(profile, options)?;
     report.sqlite_rows = db.update_provider(from, to)?;
 
     let mut jsonl_files = 0;
@@ -318,7 +306,6 @@ pub fn migrate_paths(profile: &CodexProfile, options: &ApplyOptions) -> Result<M
         return Ok(report);
     }
 
-    report.backup_dir = maybe_backup(profile, options)?;
     report.sqlite_rows = db.update_paths(&profile.path_maps)?;
 
     let mut jsonl_files = 0;
@@ -361,7 +348,6 @@ pub fn repair_session_index(
         return Ok(report);
     }
 
-    report.backup_dir = maybe_backup(profile, options)?;
     append_session_index_entries(&profile.session_index_path(), &missing)?;
     Ok(report)
 }
@@ -392,16 +378,6 @@ pub fn repair_has_user_event(
         return Ok(report);
     }
 
-    report.backup_dir = maybe_backup(profile, options)?;
     report.sqlite_rows = db.repair_has_user_event()?;
     Ok(report)
-}
-
-fn maybe_backup(profile: &CodexProfile, options: &ApplyOptions) -> Result<Option<String>> {
-    if !options.backup {
-        return Ok(None);
-    }
-
-    let backup = backup::create_backup(profile, options.include_sessions_backup)?;
-    Ok(Some(backup.backup_dir.display().to_string()))
 }

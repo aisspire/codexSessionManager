@@ -29,8 +29,6 @@ fn edits_provider_and_project_for_selected_sessions_only() {
         },
         &ApplyOptions {
             apply: true,
-            backup: false,
-            include_sessions_backup: false,
         },
     )
     .unwrap();
@@ -78,8 +76,6 @@ fn renames_single_selected_session_in_sqlite_and_session_index() {
         },
         &ApplyOptions {
             apply: true,
-            backup: false,
-            include_sessions_backup: false,
         },
     )
     .unwrap();
@@ -116,8 +112,6 @@ fn renames_multiple_selected_sessions_with_numbered_prefix_by_created_time() {
         },
         &ApplyOptions {
             apply: true,
-            backup: false,
-            include_sessions_backup: false,
         },
     )
     .unwrap();
