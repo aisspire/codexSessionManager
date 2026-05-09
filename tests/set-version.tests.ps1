@@ -118,6 +118,11 @@ version = "0.1.0"
 }
 '@
 
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $TempRoot "set-version.ps1") 0.1.0
+    if ($LASTEXITCODE -ne 0) {
+        throw "set-version.ps1 exited with code $LASTEXITCODE when setting the existing version"
+    }
+
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $TempRoot "set-version.ps1") 0.2.0
     if ($LASTEXITCODE -ne 0) {
         throw "set-version.ps1 exited with code $LASTEXITCODE"

@@ -46,12 +46,12 @@ function Update-CargoPackageVersion {
         '(?ms)(^\[package\]\s*.*?^version\s*=\s*")[^"]+(")',
         [System.Text.RegularExpressions.RegexOptions]::Multiline
     )
-    $updated = $regex.Replace($text, "`${1}$Version`${2}", 1)
 
-    if ($updated -eq $text) {
+    if (-not $regex.IsMatch($text)) {
         throw "Could not find [package] version in $RelativePath"
     }
 
+    $updated = $regex.Replace($text, "`${1}$Version`${2}", 1)
     Write-TextFile -Path $path -Text $updated
 }
 
@@ -68,12 +68,12 @@ function Update-CargoLockPackageVersion {
         "(?ms)(^\[\[package\]\]\s*^name\s*=\s*`"$escapedPackageName`"\s*^version\s*=\s*`")[^`"]+(`")",
         [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::Singleline
     )
-    $updated = $regex.Replace($text, "`${1}$Version`${2}", 1)
 
-    if ($updated -eq $text) {
+    if (-not $regex.IsMatch($text)) {
         throw "Could not find $PackageName package version in $RelativePath"
     }
 
+    $updated = $regex.Replace($text, "`${1}$Version`${2}", 1)
     Write-TextFile -Path $path -Text $updated
 }
 
@@ -90,23 +90,24 @@ function Update-JsonVersion {
         '(?m)^(\s*"version"\s*:\s*")[^"]+(")',
         [System.Text.RegularExpressions.RegexOptions]::Multiline
     )
-    $updated = $topLevelVersionRegex.Replace($text, "`${1}$Version`${2}", 1)
 
-    if ($updated -eq $text) {
+    if (-not $topLevelVersionRegex.IsMatch($text)) {
         throw "Could not find top-level version in $RelativePath"
     }
+
+    $updated = $topLevelVersionRegex.Replace($text, "`${1}$Version`${2}", 1)
 
     if ($UpdatePackageLockRoot) {
         $rootPackageVersionRegex = [regex]::new(
             '(?ms)(^\s*"packages"\s*:\s*\{\s*^\s*""\s*:\s*\{.*?^\s*"version"\s*:\s*")[^"]+(")',
             [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::Singleline
         )
-        $rootUpdated = $rootPackageVersionRegex.Replace($updated, "`${1}$Version`${2}", 1)
 
-        if ($rootUpdated -eq $updated) {
+        if (-not $rootPackageVersionRegex.IsMatch($updated)) {
             throw "Could not find root package version in $RelativePath"
         }
 
+        $rootUpdated = $rootPackageVersionRegex.Replace($updated, "`${1}$Version`${2}", 1)
         $updated = $rootUpdated
     }
 
