@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::process::Command;
 
 use codex_session_manager::db_repair::{
