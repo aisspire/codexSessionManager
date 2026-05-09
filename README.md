@@ -58,6 +58,71 @@ cd ui
 npm run tauri -- build
 ```
 
+## 发布流程
+
+本项目通过 GitHub Actions 和官方 `tauri-apps/tauri-action` 在推送版本标签时自动构建桌面安装包。
+发布 workflow 位于 `.github/workflows/release.yml`，触发条件是推送 `v*` 格式的 Git tag，例如 `v0.2.0`。
+
+当前发布会构建：
+
+- Windows：`windows-latest`
+- Linux：`ubuntu-22.04`
+- macOS Apple Silicon：`aarch64-apple-darwin`
+- macOS Intel：`x86_64-apple-darwin`
+
+发布前先用版本脚本同步项目版本号。脚本参数只写纯版本号，不带 `v`：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\set-version.ps1 0.2.0
+```
+
+脚本会同步更新：
+
+- `Cargo.toml`
+- `Cargo.lock`
+- `src-tauri/Cargo.toml`
+- `src-tauri/Cargo.lock`
+- `ui/package.json`
+- `ui/package-lock.json`
+
+脚本还会移除 `src-tauri/tauri.conf.json` 中重复的 `version` 字段，让 Tauri 以 `src-tauri/Cargo.toml` 作为桌面应用版本来源。
+
+发布前建议至少执行下面两项本地检查：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\set-version.tests.ps1
+npm --prefix ui run build
+```
+
+如果要在本机额外验证 Tauri 打包，可运行：
+
+```powershell
+npm --prefix ui run tauri -- build
+```
+
+Windows 本地打包时，如果出现无法删除 `src-tauri\target\...\codex-session-manager-desktop.exe` 或 `拒绝访问`，通常是旧应用进程、杀毒软件或系统仍占用该 exe。关闭正在运行的桌面应用后再重试。
+
+确认版本文件和构建检查没问题后，提交版本变更：
+
+```powershell
+git status
+git add Cargo.toml Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json ui/package.json ui/package-lock.json
+git commit -m "chore(release): 准备 v0.2.0"
+git push origin main
+```
+
+然后创建并推送 tag：
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+推送 tag 后，GitHub Actions 会自动执行 Release workflow，并把各平台构建产物上传到同一个 GitHub Release。
+当前 workflow 设置为 `releaseDraft: true`，因此生成的是草稿 Release。Actions 全部通过后，到 GitHub Releases 页面检查标题、说明和附件，确认无误后手动发布。
+
+早期内部测试可以先不配置代码签名。未签名包仍可构建和上传，但 Windows 可能显示未知发布者或 SmartScreen 提示，macOS 也可能要求用户绕过系统安全限制。面向公开用户稳定分发前，建议再补 Windows 代码签名证书、Apple Developer ID 签名和 macOS notarization。
+
 ## 基本使用
 
 ### 1. 设置 Codex 主目录
