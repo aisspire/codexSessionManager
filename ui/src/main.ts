@@ -1,8 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
+import { buildProjectGroups, type ProjectGroup } from "./sessionGroups";
 import "./styles.css";
 
+type AppPage = "batch-edit" | "session-management";
 type ArchivedFilter = "active" | "archived" | "all";
-type TableColumnKey = "select" | "session" | "project" | "provider" | "model" | "state" | "updated";
+type TableColumnKey = "select" | "session" | "provider" | "model" | "state" | "updated";
+type SessionCommand =
+  | "archive_sessions"
+  | "restore_sessions"
+  | "delete_sessions"
+  | "refresh_session_updated_at";
 
 interface TableColumn {
   key: TableColumnKey;
@@ -63,17 +70,32 @@ interface DetailEditState {
   pendingProvider: string;
 }
 
+const pageLabels: Record<AppPage, string> = {
+  "batch-edit": "批量编辑",
+  "session-management": "会话管理",
+};
+
 const tableColumns: TableColumn[] = [
-  { key: "select", label: "", width: 42, minWidth: 42, resizable: false },
-  { key: "session", label: "会话", width: 280, minWidth: 180, resizable: true },
-  { key: "project", label: "项目", width: 220, minWidth: 140, resizable: true },
-  { key: "provider", label: "提供方", width: 120, minWidth: 90, resizable: true },
-  { key: "model", label: "模型", width: 150, minWidth: 100, resizable: true },
-  { key: "state", label: "状态", width: 110, minWidth: 86, resizable: true },
-  { key: "updated", label: "更新时间", width: 190, minWidth: 140, resizable: true },
+  { key: "select", label: "", width: 46, minWidth: 46, resizable: false },
+  { key: "session", label: "会话", width: 360, minWidth: 220, resizable: true },
+  { key: "provider", label: "提供方", width: 130, minWidth: 96, resizable: true },
+  { key: "model", label: "模型", width: 160, minWidth: 110, resizable: true },
+  { key: "state", label: "状态", width: 112, minWidth: 86, resizable: true },
+  { key: "updated", label: "更新时间", width: 200, minWidth: 150, resizable: true },
 ];
 
+const blankDetailEdit = (): DetailEditState => ({
+  editingField: "",
+  draft: "",
+  pendingId: "",
+  pendingTitle: "",
+  pendingProject: "",
+  pendingProvider: "",
+});
+
 const state = {
+  // 页面只改变“可用操作”，列表、筛选和选择状态在两个页面之间共享。
+  activePage: "batch-edit" as AppPage,
   profile: {
     codex_home: "~/.codex",
     path_maps: [],
@@ -86,19 +108,16 @@ const state = {
     project: "",
     titlePrefix: "",
   },
-  detailEdit: {
-    editingField: "" as DetailEditField | "",
-    draft: "",
-    pendingId: "",
-    pendingTitle: "",
-    pendingProject: "",
-    pendingProvider: "",
-  } satisfies DetailEditState,
+  detailEdit: blankDetailEdit(),
   sessions: [] as SessionSummary[],
   selectedIds: new Set<string>(),
   activeId: "",
+  detailOpen: false,
   status: "就绪",
   columnWidths: tableColumns.map((column) => column.width),
+  // 展开状态按项目 key 保存。首次加载时会自动展开全部项目，用户操作后保持本地状态。
+  expandedProjects: new Set<string>(),
+  hasInitializedProjectExpansion: false,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -111,62 +130,138 @@ interface RenderOptions {
 
 function render(options: RenderOptions = {}) {
   const tableScroll = options.preserveTableScroll ? readTableScroll() : undefined;
+  const groups = buildProjectGroups(state.sessions);
   const active = state.sessions.find((session) => session.id === state.activeId);
+
   appRoot.innerHTML = `
     <main class="shell">
-      <aside class="filters">
-        <div class="brand">Codex 会话管理</div>
-        <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
-        <label>项目<input id="project" value="${escapeHtml(state.filter.project ?? "")}" /></label>
-        <label>提供方<input id="provider" value="${escapeHtml(state.filter.provider ?? "")}" /></label>
-        <label>模型<input id="model" value="${escapeHtml(state.filter.model ?? "")}" /></label>
-        <label>来源<input id="source" value="${escapeHtml(state.filter.source ?? "")}" /></label>
-        <label>搜索<input id="search" value="${escapeHtml(state.filter.search ?? "")}" /></label>
-        <div class="segmented" role="group">
-          ${archivedButton("all", "全部")}
-          ${archivedButton("active", "活动")}
-          ${archivedButton("archived", "已归档")}
-        </div>
-        <button id="refresh" class="primary">刷新</button>
-        <div class="edit-panel">
-          <div class="edit-title">修改已选</div>
-          <label>会话名前缀<input id="edit-title-prefix" placeholder="多选时生成 前缀(1)" value="${escapeHtml(state.selectedEdit.titlePrefix)}" /></label>
-          <label>提供方<input id="edit-provider" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.provider)}" /></label>
-          <label>项目路径<input id="edit-project" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.project)}" /></label>
-          <div class="edit-actions">
-            <button id="preview-selected-edit">预览</button>
-            <button id="apply-selected-edit" class="primary">应用</button>
-          </div>
-        </div>
-      </aside>
-      <section class="workbench">
-        <div class="toolbar">
-          <div>${state.sessions.length} 个会话 · 已选 ${state.selectedIds.size} 个</div>
-          <button id="backup" title="创建备份">备份</button>
-          <button id="archive" title="归档已选会话">归档</button>
-          <button id="restore" title="恢复已选会话">恢复</button>
-          <button id="refresh-time" title="将已选会话更新时间改为当前时间">置顶</button>
-          <button id="delete" class="danger" title="将已选会话移入回收站">删除</button>
-        </div>
-        <div class="table" style="${tableSizingStyle()}">
-          ${tableHeader()}
-          ${state.sessions.map(sessionRow).join("")}
-        </div>
+      ${navigation()}
+      <section class="workbench" aria-label="${escapeHtml(pageLabels[state.activePage])}">
+        ${pageHeader()}
+        ${filterBar()}
+        ${actionBar()}
+        ${groupedTable(groups)}
         <div class="status">${escapeHtml(state.status)}</div>
       </section>
-      <aside class="details">
-        ${active ? detailPanel(active) : "<div class=\"empty\">请选择一个会话</div>"}
-      </aside>
+      ${active && state.detailOpen ? detailDrawer(active) : ""}
     </main>
   `;
-  bindEvents();
+  bindEvents(groups);
   if (tableScroll) {
     restoreTableScroll(tableScroll);
   }
 }
 
+function navigation() {
+  return `
+    <aside class="nav">
+      <div class="brand">
+        <span class="brand-mark">CSM</span>
+        <span>Codex 会话管理</span>
+      </div>
+      <nav class="page-nav" aria-label="功能页面">
+        ${pageNavButton("batch-edit")}
+        ${pageNavButton("session-management")}
+      </nav>
+    </aside>
+  `;
+}
+
+function pageNavButton(page: AppPage) {
+  return `
+    <button class="page-nav-button ${state.activePage === page ? "selected" : ""}" data-page="${page}">
+      ${escapeHtml(pageLabels[page])}
+    </button>
+  `;
+}
+
+function pageHeader() {
+  const description =
+    state.activePage === "batch-edit"
+      ? "批量修改已选会话的名称前缀、提供方和项目路径。"
+      : "备份、归档、恢复、置顶或删除已选会话。";
+  return `
+    <header class="page-header">
+      <div>
+        <h1>${escapeHtml(pageLabels[state.activePage])}</h1>
+        <p>${escapeHtml(description)}</p>
+      </div>
+      <div class="page-count">
+        <strong>${state.sessions.length}</strong>
+        <span>会话</span>
+        <strong>${state.selectedIds.size}</strong>
+        <span>已选</span>
+      </div>
+    </header>
+  `;
+}
+
+function filterBar() {
+  return `
+    <section class="toolbar filter-toolbar" aria-label="搜索筛选">
+      <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
+      <label>项目<input id="project" value="${escapeHtml(state.filter.project ?? "")}" /></label>
+      <label>提供方<input id="provider" value="${escapeHtml(state.filter.provider ?? "")}" /></label>
+      <label>模型<input id="model" value="${escapeHtml(state.filter.model ?? "")}" /></label>
+      <label>来源<input id="source" value="${escapeHtml(state.filter.source ?? "")}" /></label>
+      <label>搜索<input id="search" value="${escapeHtml(state.filter.search ?? "")}" /></label>
+      <div class="segmented" role="group" aria-label="归档状态">
+        ${archivedButton("all", "全部")}
+        ${archivedButton("active", "活动")}
+        ${archivedButton("archived", "已归档")}
+      </div>
+      <button id="refresh" class="primary">刷新</button>
+    </section>
+  `;
+}
+
+function actionBar() {
+  return state.activePage === "batch-edit" ? batchEditBar() : sessionManagementBar();
+}
+
+function batchEditBar() {
+  return `
+    <section class="toolbar action-toolbar" aria-label="批量编辑操作">
+      <label>会话名前缀<input id="edit-title-prefix" placeholder="多选时生成 前缀(1)" value="${escapeHtml(state.selectedEdit.titlePrefix)}" /></label>
+      <label>提供方<input id="edit-provider" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.provider)}" /></label>
+      <label>项目路径<input id="edit-project" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.project)}" /></label>
+      <div class="action-buttons">
+        <button id="preview-selected-edit">预览</button>
+        <button id="apply-selected-edit" class="primary">应用</button>
+      </div>
+    </section>
+  `;
+}
+
+function sessionManagementBar() {
+  return `
+    <section class="toolbar action-toolbar management-toolbar" aria-label="会话管理操作">
+      <button id="backup">备份</button>
+      <button id="archive">归档</button>
+      <button id="restore">恢复</button>
+      <button id="refresh-time">置顶</button>
+      <button id="delete" class="danger">删除</button>
+    </section>
+  `;
+}
+
 function archivedButton(value: ArchivedFilter, label: string) {
   return `<button data-archived="${value}" class="${state.filter.archived === value ? "selected" : ""}">${label}</button>`;
+}
+
+function groupedTable(groups: ProjectGroup<SessionSummary>[]) {
+  return `
+    <section class="table-shell" aria-label="会话列表">
+      <div class="table" style="${tableSizingStyle()}">
+        ${tableHeader()}
+        ${
+          groups.length
+            ? groups.map((group) => projectGroup(group)).join("")
+            : `<div class="empty-list">没有匹配的会话</div>`
+        }
+      </div>
+    </section>
+  `;
 }
 
 function tableHeader() {
@@ -191,14 +286,36 @@ function tableHeader() {
   return `<div class="row header">${cells}</div>`;
 }
 
+function projectGroup(group: ProjectGroup<SessionSummary>) {
+  const expanded = state.expandedProjects.has(group.key);
+  const selectedCount = group.sessions.filter((session) => state.selectedIds.has(session.id)).length;
+  const allSelected = group.sessions.length > 0 && selectedCount === group.sessions.length;
+
+  return `
+    <section class="project-group" data-project-group="${escapeHtml(group.key)}">
+      <div class="project-group-header">
+        <button class="project-toggle" data-toggle-project="${escapeHtml(group.key)}" aria-expanded="${expanded}">
+          <span class="chevron">${expanded ? "▾" : "▸"}</span>
+          <span class="project-title">${escapeHtml(group.project)}</span>
+          <span class="project-meta">${group.sessions.length} 个会话 · 已选 ${selectedCount}</span>
+        </button>
+        <label class="group-select">
+          <input type="checkbox" data-select-project="${escapeHtml(group.key)}" ${allSelected ? "checked" : ""} />
+          组内全选
+        </label>
+      </div>
+      ${expanded ? group.sessions.map(sessionRow).join("") : ""}
+    </section>
+  `;
+}
+
 function sessionRow(session: SessionSummary) {
   const selected = state.selectedIds.has(session.id);
-  const active = state.activeId === session.id;
+  const active = state.activeId === session.id && state.detailOpen;
   return `
-    <button class="row ${active ? "active" : ""}" data-open="${escapeHtml(session.id)}">
+    <button class="row session-row ${active ? "active" : ""}" data-open="${escapeHtml(session.id)}">
       <input type="checkbox" data-select="${escapeHtml(session.id)}" ${selected ? "checked" : ""} />
-      <span>${escapeHtml(session.title || session.first_user_message || session.id)}</span>
-      <span>${escapeHtml(session.project || "")}</span>
+      <span class="session-title">${escapeHtml(sessionTitle(session))}</span>
       <span>${escapeHtml(session.provider || "")}</span>
       <span>${escapeHtml(session.model || "")}</span>
       <span>${session.archived ? "已归档" : "活动"}</span>
@@ -207,61 +324,55 @@ function sessionRow(session: SessionSummary) {
   `;
 }
 
-function detailPanel(session: SessionSummary) {
+function detailDrawer(session: SessionSummary) {
   const currentTitle = sessionTitle(session);
   const pendingTitle = detailPendingValue(session, "title");
   const dirty = detailEditDirty(session);
   return `
-    <div class="detail-title-row">
-      ${
-        state.detailEdit.editingField === "title" && state.detailEdit.pendingId === session.id
-          ? `<input id="detail-edit-input" class="detail-title-input" value="${escapeHtml(state.detailEdit.draft)}" />`
-          : `<h2>${escapeHtml(pendingTitle || currentTitle)}</h2><button data-detail-edit="title" class="icon-button" title="重命名会话">✎</button>`
-      }
-    </div>
-    <dl>
-      <dt>ID</dt><dd>${escapeHtml(session.id)}</dd>
-      ${detailEditableRow(session, "项目", "project")}
-      ${detailEditableRow(session, "提供方", "provider")}
-      <dt>模型</dt><dd>${escapeHtml(session.model || "")}</dd>
-      <dt>来源</dt><dd>${escapeHtml(session.source || "")}</dd>
-      <dt>会话文件</dt><dd>${escapeHtml(session.rollout_path || "")}</dd>
-      <dt>会话索引</dt><dd>${session.in_session_index ? "存在" : "缺失"}</dd>
-    </dl>
-    <div class="detail-actions">
-      <button id="save-detail-title" class="primary" ${dirty ? "" : "disabled"}>保存</button>
-      <button data-single-command="refresh_session_updated_at">置顶</button>
-      <button data-single="archive">归档</button>
-      <button data-single="restore">恢复</button>
-      <button data-single="delete" class="danger">删除</button>
-    </div>
+    <div class="drawer-backdrop" data-close-detail></div>
+    <aside class="detail-drawer" aria-label="会话详情">
+      <div class="drawer-top">
+        <span>会话详情</span>
+        <button class="icon-button" data-close-detail title="关闭详情">×</button>
+      </div>
+      <div class="detail-title-row">
+        ${
+          state.detailEdit.editingField === "title" && state.detailEdit.pendingId === session.id
+            ? `<input id="detail-edit-input" class="detail-title-input" value="${escapeHtml(state.detailEdit.draft)}" />`
+            : `<h2>${escapeHtml(pendingTitle || currentTitle)}</h2><button data-detail-edit="title" class="icon-button" title="重命名会话">✎</button>`
+        }
+      </div>
+      <dl>
+        <dt>ID</dt><dd>${escapeHtml(session.id)}</dd>
+        ${detailEditableRow(session, "项目", "project")}
+        ${detailEditableRow(session, "提供方", "provider")}
+        <dt>模型</dt><dd>${escapeHtml(session.model || "")}</dd>
+        <dt>来源</dt><dd>${escapeHtml(session.source || "")}</dd>
+        <dt>会话文件</dt><dd>${escapeHtml(session.rollout_path || "")}</dd>
+        <dt>会话索引</dt><dd>${session.in_session_index ? "存在" : "缺失"}</dd>
+      </dl>
+      <div class="detail-actions">
+        <button id="save-detail-title" class="primary" ${dirty ? "" : "disabled"}>保存</button>
+        <button data-single-command="refresh_session_updated_at">置顶</button>
+        <button data-single="archive">归档</button>
+        <button data-single="restore">恢复</button>
+        <button data-single="delete" class="danger">删除</button>
+      </div>
+    </aside>
   `;
 }
 
-function bindEvents() {
-  bindInput("codex-home", (value) => (state.profile.codex_home = value));
-  bindInput("project", (value) => (state.filter.project = emptyToUndefined(value)));
-  bindInput("provider", (value) => (state.filter.provider = emptyToUndefined(value)));
-  bindInput("model", (value) => (state.filter.model = emptyToUndefined(value)));
-  bindInput("source", (value) => (state.filter.source = emptyToUndefined(value)));
-  bindInput("search", (value) => (state.filter.search = emptyToUndefined(value)));
-  bindInput("edit-title-prefix", (value) => (state.selectedEdit.titlePrefix = value));
-  bindInput("edit-provider", (value) => (state.selectedEdit.provider = value));
-  bindInput("edit-project", (value) => (state.selectedEdit.project = value));
+function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
+  bindPageSwitching();
+  bindFilters();
+  bindBatchEditInputs();
+  bindGlobalSelection();
+  bindGroupSelection(groups);
+  bindRowEvents();
+  bindDetailEvents();
+  bindColumnResize();
+
   document.querySelector("#refresh")?.addEventListener("click", refresh);
-  const selectAll = document.querySelector<HTMLInputElement>("#select-all");
-  if (selectAll) {
-    selectAll.indeterminate = someVisibleSessionsSelected() && !allVisibleSessionsSelected();
-    selectAll.addEventListener("click", (event) => event.stopPropagation());
-    selectAll.addEventListener("change", () => {
-      if (selectAll.checked) {
-        state.sessions.forEach((session) => state.selectedIds.add(session.id));
-      } else {
-        state.sessions.forEach((session) => state.selectedIds.delete(session.id));
-      }
-      render({ preserveTableScroll: true });
-    });
-  }
   document.querySelector("#preview-selected-edit")?.addEventListener("click", () => editSelected(false));
   document.querySelector("#apply-selected-edit")?.addEventListener("click", () => editSelected(true));
   document.querySelector("#archive")?.addEventListener("click", () => mutateSelected("archive_sessions"));
@@ -269,6 +380,106 @@ function bindEvents() {
   document.querySelector("#refresh-time")?.addEventListener("click", () => mutateSelected("refresh_session_updated_at"));
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
   document.querySelector("#backup")?.addEventListener("click", createBackup);
+}
+
+function bindPageSwitching() {
+  document.querySelectorAll<HTMLElement>("[data-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.activePage = button.dataset.page as AppPage;
+      render({ preserveTableScroll: true });
+    });
+  });
+}
+
+function bindFilters() {
+  bindInput("codex-home", (value) => (state.profile.codex_home = value));
+  bindInput("project", (value) => (state.filter.project = emptyToUndefined(value)));
+  bindInput("provider", (value) => (state.filter.provider = emptyToUndefined(value)));
+  bindInput("model", (value) => (state.filter.model = emptyToUndefined(value)));
+  bindInput("source", (value) => (state.filter.source = emptyToUndefined(value)));
+  bindInput("search", (value) => (state.filter.search = emptyToUndefined(value)));
+  document.querySelectorAll<HTMLElement>("[data-archived]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.filter.archived = button.dataset.archived as ArchivedFilter;
+      refresh();
+    });
+  });
+}
+
+function bindBatchEditInputs() {
+  bindInput("edit-title-prefix", (value) => (state.selectedEdit.titlePrefix = value));
+  bindInput("edit-provider", (value) => (state.selectedEdit.provider = value));
+  bindInput("edit-project", (value) => (state.selectedEdit.project = value));
+}
+
+function bindGlobalSelection() {
+  const selectAll = document.querySelector<HTMLInputElement>("#select-all");
+  if (!selectAll) return;
+  selectAll.indeterminate = someVisibleSessionsSelected() && !allVisibleSessionsSelected();
+  selectAll.addEventListener("click", (event) => event.stopPropagation());
+  selectAll.addEventListener("change", () => {
+    if (selectAll.checked) {
+      state.sessions.forEach((session) => state.selectedIds.add(session.id));
+    } else {
+      state.sessions.forEach((session) => state.selectedIds.delete(session.id));
+    }
+    render({ preserveTableScroll: true });
+  });
+}
+
+function bindGroupSelection(groups: ProjectGroup<SessionSummary>[]) {
+  const groupsByKey = new Map(groups.map((group) => [group.key, group]));
+
+  document.querySelectorAll<HTMLElement>("[data-toggle-project]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.toggleProject || "";
+      state.expandedProjects.has(key) ? state.expandedProjects.delete(key) : state.expandedProjects.add(key);
+      render({ preserveTableScroll: true });
+    });
+  });
+
+  document.querySelectorAll<HTMLInputElement>("[data-select-project]").forEach((checkbox) => {
+    const group = groupsByKey.get(checkbox.dataset.selectProject || "");
+    if (!group) return;
+    const selectedCount = group.sessions.filter((session) => state.selectedIds.has(session.id)).length;
+    checkbox.indeterminate = selectedCount > 0 && selectedCount < group.sessions.length;
+    checkbox.addEventListener("click", (event) => event.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      for (const session of group.sessions) {
+        checkbox.checked ? state.selectedIds.add(session.id) : state.selectedIds.delete(session.id);
+      }
+      render({ preserveTableScroll: true });
+    });
+  });
+}
+
+function bindRowEvents() {
+  document.querySelectorAll<HTMLElement>("[data-open]").forEach((row) => {
+    row.addEventListener("click", () => {
+      state.activeId = row.dataset.open || "";
+      state.detailOpen = true;
+      state.detailEdit = blankDetailEdit();
+      render({ preserveTableScroll: true });
+    });
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-select]").forEach((checkbox) => {
+    checkbox.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const id = checkbox.dataset.select || "";
+      checkbox.checked ? state.selectedIds.add(id) : state.selectedIds.delete(id);
+      render({ preserveTableScroll: true });
+    });
+  });
+}
+
+function bindDetailEvents() {
+  document.querySelectorAll<HTMLElement>("[data-close-detail]").forEach((target) => {
+    target.addEventListener("click", () => {
+      state.detailOpen = false;
+      state.detailEdit = blankDetailEdit();
+      render({ preserveTableScroll: true });
+    });
+  });
   document.querySelectorAll<HTMLElement>("[data-detail-edit]").forEach((button) => {
     button.addEventListener("click", () => startDetailEdit(button.dataset.detailEdit as DetailEditField));
   });
@@ -285,37 +496,20 @@ function bindEvents() {
         commitDetailEditDraft();
         render({ preserveTableScroll: true });
       }
+      if (event.key === "Escape") {
+        state.detailEdit.editingField = "";
+        render({ preserveTableScroll: true });
+      }
     });
     detailEditInput.addEventListener("blur", () => {
       commitDetailEditDraft();
       window.setTimeout(() => render({ preserveTableScroll: true }), 0);
     });
   }
-  document.querySelectorAll<HTMLElement>("[data-archived]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.filter.archived = button.dataset.archived as ArchivedFilter;
-      refresh();
-    });
-  });
-  document.querySelectorAll<HTMLElement>("[data-open]").forEach((row) => {
-    row.addEventListener("click", () => {
-      state.activeId = row.dataset.open || "";
-      render({ preserveTableScroll: true });
-    });
-  });
-  document.querySelectorAll<HTMLInputElement>("[data-select]").forEach((checkbox) => {
-    checkbox.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const id = checkbox.dataset.select || "";
-      checkbox.checked ? state.selectedIds.add(id) : state.selectedIds.delete(id);
-      render({ preserveTableScroll: true });
-    });
-  });
   document.querySelectorAll<HTMLElement>("[data-single], [data-single-command]").forEach((button) => {
     const command = button.dataset.singleCommand || `${button.dataset.single}_sessions`;
-    button.addEventListener("click", () => mutateIds(command, [state.activeId]));
+    button.addEventListener("click", () => mutateIds(command as SessionCommand, [state.activeId]));
   });
-  bindColumnResize();
 }
 
 function bindInput(id: string, update: (value: string) => void) {
@@ -332,15 +526,39 @@ async function refresh() {
     });
     state.selectedIds.clear();
     state.activeId = state.sessions[0]?.id || "";
+    state.detailOpen = false;
+    initializeProjectExpansion();
     state.status = "已加载会话";
   });
 }
 
-async function mutateSelected(command: string) {
+function initializeProjectExpansion() {
+  const groups = buildProjectGroups(state.sessions);
+  const visibleKeys = new Set(groups.map((group) => group.key));
+
+  if (!state.hasInitializedProjectExpansion) {
+    state.expandedProjects = visibleKeys;
+    state.hasInitializedProjectExpansion = true;
+    return;
+  }
+
+  for (const key of state.expandedProjects) {
+    if (!visibleKeys.has(key)) {
+      state.expandedProjects.delete(key);
+    }
+  }
+  for (const key of visibleKeys) {
+    if (!state.expandedProjects.has(key)) {
+      state.expandedProjects.add(key);
+    }
+  }
+}
+
+async function mutateSelected(command: SessionCommand) {
   await mutateIds(command, [...state.selectedIds]);
 }
 
-async function mutateIds(command: string, ids: string[]) {
+async function mutateIds(command: SessionCommand, ids: string[]) {
   if (ids.length === 0) {
     state.status = "请至少选择一个会话";
     render();
@@ -390,6 +608,8 @@ async function editSelected(apply: boolean) {
       });
       state.selectedIds.clear();
       state.activeId = state.sessions[0]?.id || "";
+      state.detailOpen = false;
+      initializeProjectExpansion();
     }
     state.status = formatMutationReport(report);
   });
@@ -456,14 +676,9 @@ async function saveDetailEdits() {
     state.activeId = state.sessions.some((session) => session.id === activeId)
       ? activeId
       : state.sessions[0]?.id || "";
-    state.detailEdit = {
-      editingField: "" as DetailEditField | "",
-      draft: "",
-      pendingId: "",
-      pendingTitle: "",
-      pendingProject: "",
-      pendingProvider: "",
-    } satisfies DetailEditState;
+    state.detailOpen = Boolean(state.activeId);
+    state.detailEdit = blankDetailEdit();
+    initializeProjectExpansion();
     state.status = formatMutationReport(report);
   });
 }
@@ -527,7 +742,7 @@ async function run(task: () => Promise<void>) {
 
 function formatMutationReport(report: MutationReport) {
   const backup = report.backup_dir ? ` · 备份 ${report.backup_dir}` : "";
-  return `${report.action} · ${report.applied ? "已应用" : "预览"} · SQLite ${report.sqlite_rows} 行 · JSONL ${report.jsonl_files} 个${backup}`;
+  return `${report.action} · ${report.applied ? "已应用" : "预览"} · SQLite ${report.sqlite_rows} 行 · JSONL ${report.jsonl_files} 个 · 索引 ${report.index_entries} 条${backup}`;
 }
 
 function tableSizingStyle() {
