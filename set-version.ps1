@@ -55,6 +55,28 @@ function Update-CargoPackageVersion {
     Write-TextFile -Path $path -Text $updated
 }
 
+function Update-CargoLockPackageVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$PackageName
+    )
+
+    $path = Get-ProjectPath $RelativePath
+    $text = Read-TextFile $path
+    $escapedPackageName = [regex]::Escape($PackageName)
+    $regex = [regex]::new(
+        "(?ms)(^\[\[package\]\]\s*^name\s*=\s*`"$escapedPackageName`"\s*^version\s*=\s*`")[^`"]+(`")",
+        [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    $updated = $regex.Replace($text, "`${1}$Version`${2}", 1)
+
+    if ($updated -eq $text) {
+        throw "Could not find $PackageName package version in $RelativePath"
+    }
+
+    Write-TextFile -Path $path -Text $updated
+}
+
 function Update-JsonVersion {
     param(
         [Parameter(Mandatory = $true)][string]$RelativePath,
@@ -62,32 +84,33 @@ function Update-JsonVersion {
     )
 
     $path = Get-ProjectPath $RelativePath
-    $json = Read-TextFile $path | ConvertFrom-Json
+    $text = Read-TextFile $path
 
-    if ($json.PSObject.Properties.Name -contains "version") {
-        $json.version = $Version
-    }
-    else {
+    $topLevelVersionRegex = [regex]::new(
+        '(?m)^(\s*"version"\s*:\s*")[^"]+(")',
+        [System.Text.RegularExpressions.RegexOptions]::Multiline
+    )
+    $updated = $topLevelVersionRegex.Replace($text, "`${1}$Version`${2}", 1)
+
+    if ($updated -eq $text) {
         throw "Could not find top-level version in $RelativePath"
     }
 
     if ($UpdatePackageLockRoot) {
-        $rootPackageProperty = $null
-        if ($json.PSObject.Properties.Name -contains "packages") {
-            $rootPackageProperty = $json.packages.PSObject.Properties[""]
-        }
+        $rootPackageVersionRegex = [regex]::new(
+            '(?ms)(^\s*"packages"\s*:\s*\{\s*^\s*""\s*:\s*\{.*?^\s*"version"\s*:\s*")[^"]+(")',
+            [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        $rootUpdated = $rootPackageVersionRegex.Replace($updated, "`${1}$Version`${2}", 1)
 
-        if ($null -ne $rootPackageProperty -and $rootPackageProperty.Value.PSObject.Properties.Name -contains "version") {
-            $rootPackage = $rootPackageProperty.Value
-            $rootPackage.version = $Version
-        }
-        else {
+        if ($rootUpdated -eq $updated) {
             throw "Could not find root package version in $RelativePath"
         }
+
+        $updated = $rootUpdated
     }
 
-    $updated = ($json | ConvertTo-Json -Depth 100)
-    Write-TextFile -Path $path -Text ($updated + [Environment]::NewLine)
+    Write-TextFile -Path $path -Text $updated
 }
 
 function Remove-TauriConfigVersion {
@@ -112,6 +135,9 @@ function Remove-TauriConfigVersion {
 
 Update-CargoPackageVersion "Cargo.toml"
 Update-CargoPackageVersion "src-tauri\Cargo.toml"
+Update-CargoLockPackageVersion "Cargo.lock" "codex-session-manager"
+Update-CargoLockPackageVersion "src-tauri\Cargo.lock" "codex-session-manager"
+Update-CargoLockPackageVersion "src-tauri\Cargo.lock" "codex-session-manager-desktop"
 Remove-TauriConfigVersion "src-tauri\tauri.conf.json"
 Update-JsonVersion "ui\package.json"
 Update-JsonVersion "ui\package-lock.json" -UpdatePackageLockRoot
