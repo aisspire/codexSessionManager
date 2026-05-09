@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { loadInputCache, saveInputCache } from "./inputCache";
 import { buildProjectGroups, type ProjectGroup } from "./sessionGroups";
 import "./styles.css";
 
@@ -93,20 +94,27 @@ const blankDetailEdit = (): DetailEditState => ({
   pendingProvider: "",
 });
 
+const cachedInput = loadInputCache();
+
 const state = {
   // 页面只改变“可用操作”，列表、筛选和选择状态在两个页面之间共享。
   activePage: "batch-edit" as AppPage,
   profile: {
-    codex_home: "~/.codex",
+    codex_home: cachedInput?.codexHome || "~/.codex",
     path_maps: [],
   } satisfies ProfileInput,
   filter: {
     archived: "all",
+    project: emptyToUndefined(cachedInput?.filter?.project ?? ""),
+    provider: emptyToUndefined(cachedInput?.filter?.provider ?? ""),
+    model: emptyToUndefined(cachedInput?.filter?.model ?? ""),
+    source: emptyToUndefined(cachedInput?.filter?.source ?? ""),
+    search: emptyToUndefined(cachedInput?.filter?.search ?? ""),
   } as SessionListFilter,
   selectedEdit: {
-    provider: "",
-    project: "",
-    titlePrefix: "",
+    provider: cachedInput?.selectedEdit?.provider ?? "",
+    project: cachedInput?.selectedEdit?.project ?? "",
+    titlePrefix: cachedInput?.selectedEdit?.titlePrefix ?? "",
   },
   detailEdit: blankDetailEdit(),
   sessions: [] as SessionSummary[],
@@ -513,8 +521,27 @@ function bindDetailEvents() {
 }
 
 function bindInput(id: string, update: (value: string) => void) {
-  document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("change", (event) => {
+  document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", (event) => {
     update((event.target as HTMLInputElement).value);
+    saveCurrentInputCache();
+  });
+}
+
+function saveCurrentInputCache() {
+  saveInputCache({
+    codexHome: state.profile.codex_home,
+    filter: {
+      project: state.filter.project,
+      provider: state.filter.provider,
+      model: state.filter.model,
+      source: state.filter.source,
+      search: state.filter.search,
+    },
+    selectedEdit: {
+      provider: state.selectedEdit.provider,
+      project: state.selectedEdit.project,
+      titlePrefix: state.selectedEdit.titlePrefix,
+    },
   });
 }
 

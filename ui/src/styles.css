@@ -10,6 +10,7 @@
 
 body {
   margin: 0;
+  min-width: 360px;
   overflow: hidden;
 }
 
@@ -60,8 +61,9 @@ label {
 
 .shell {
   display: grid;
-  grid-template-columns: 228px minmax(620px, 1fr);
+  grid-template-columns: minmax(180px, 16vw) minmax(0, 1fr);
   height: 100vh;
+  min-width: 360px;
   min-height: 0;
   background: #eef1f4;
   overflow: hidden;
@@ -134,10 +136,11 @@ label {
 
 .workbench {
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(220px, 1fr) auto;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .page-header {
@@ -183,23 +186,16 @@ label {
   padding: 12px 20px;
   border-bottom: 1px solid #d7dde3;
   background: #ffffff;
+  min-width: 0;
 }
 
 .filter-toolbar {
-  grid-template-columns:
-    minmax(180px, 1.2fr)
-    minmax(150px, 1fr)
-    minmax(110px, 0.7fr)
-    minmax(110px, 0.7fr)
-    minmax(100px, 0.7fr)
-    minmax(160px, 1fr)
-    230px
-    auto;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   align-items: end;
 }
 
 .action-toolbar {
-  grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(180px, 1.4fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   align-items: end;
   background: #f8fafc;
 }
@@ -214,23 +210,27 @@ label {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 6px;
+  min-width: 0;
 }
 
 .action-buttons {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+  min-width: 0;
 }
 
 .table-shell {
   min-width: 0;
-  min-height: 0;
+  min-height: 220px;
   overflow: hidden;
 }
 
 .table {
+  position: relative;
   height: 100%;
   min-height: 0;
+  min-width: 0;
   overflow: auto;
   scrollbar-gutter: stable;
   background: #ffffff;
@@ -532,19 +532,19 @@ dd {
 
 @media (max-width: 1120px) {
   .shell {
-    grid-template-columns: 196px minmax(0, 1fr);
+    grid-template-columns: minmax(168px, 22vw) minmax(0, 1fr);
   }
 
   .filter-toolbar {
-    grid-template-columns: repeat(3, minmax(130px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
   }
 
   .action-toolbar {
-    grid-template-columns: repeat(2, minmax(140px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 820px) {
   .shell {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr;
@@ -555,6 +555,7 @@ dd {
     grid-template-rows: auto;
     align-items: center;
     padding: 12px;
+    min-width: 0;
   }
 
   .page-nav {
@@ -570,6 +571,15 @@ dd {
   .filter-toolbar,
   .action-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .workbench {
+    min-height: 0;
+    grid-template-rows: auto auto auto minmax(180px, 1fr) auto;
+  }
+
+  .table-shell {
+    min-height: 180px;
   }
 
   .detail-drawer {
