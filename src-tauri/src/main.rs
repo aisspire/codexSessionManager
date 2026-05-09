@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, process::Command};
 
 use codex_session_manager::backup;
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
@@ -8,6 +8,8 @@ use codex_session_manager::restore;
 use codex_session_manager::session_list::{self, SessionListFilter, SessionSummary};
 use codex_session_manager::session_ops::{self, SessionApplyOptions, SessionMutationReport};
 use serde::{Deserialize, Serialize};
+
+const PROJECT_GITHUB_URL: &str = "https://github.com/aisspire/codexSessionManager";
 
 #[derive(Debug, Clone, Deserialize)]
 struct ProfileInput {
@@ -140,6 +142,14 @@ fn restore_manifest(
         .map_err(format_error)
 }
 
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !is_allowed_external_url(&url) {
+        return Err("external URL is not allowed".to_string());
+    }
+    open_url_in_default_browser(&url)
+}
+
 fn build_profile(input: ProfileInput) -> Result<CodexProfile, String> {
     let path_maps = input
         .path_maps
@@ -168,6 +178,41 @@ fn format_error(error: anyhow::Error) -> String {
     format!("{error:?}")
 }
 
+fn is_allowed_external_url(url: &str) -> bool {
+    url == PROJECT_GITHUB_URL
+}
+
+fn open_url_in_default_browser(url: &str) -> Result<(), String> {
+    let mut command = default_browser_command(url);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to open default browser: {error}"))
+}
+
+fn default_browser_command(url: &str) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -178,8 +223,23 @@ fn main() {
             refresh_session_updated_at,
             edit_selected_sessions,
             create_backup,
-            restore_manifest
+            restore_manifest,
+            open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Codex Session Manager");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_only_the_project_github_repository() {
+        assert!(is_allowed_external_url(
+            "https://github.com/aisspire/codexSessionManager"
+        ));
+        assert!(!is_allowed_external_url("https://github.com/aisspire/other"));
+        assert!(!is_allowed_external_url("https://example.com/aisspire/codexSessionManager"));
+    }
 }

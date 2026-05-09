@@ -50,7 +50,13 @@ pub fn list_sessions(
     let threads = db.read_threads()?;
     let metas_by_id = read_all_rollout_meta(&profile.sessions_dir())?
         .into_iter()
-        .filter_map(|meta| meta.id.clone().map(|id| (id, meta)))
+        .map(|meta| (meta, false))
+        .chain(
+            read_all_rollout_meta(&profile.archived_sessions_dir())?
+                .into_iter()
+                .map(|meta| (meta, true)),
+        )
+        .filter_map(|(meta, archived)| meta.id.clone().map(|id| (id, (meta, archived))))
         .collect::<HashMap<_, _>>();
     let index_by_id = read_session_index(&profile.session_index_path())?
         .into_iter()
@@ -66,6 +72,7 @@ pub fn list_sessions(
         .map(|thread| {
             let meta = metas_by_id.get(&thread.id);
             let index = index_by_id.get(&thread.id);
+            let meta_archived = meta.is_some_and(|(_, archived)| *archived);
             SessionSummary {
                 id: thread.id.clone(),
                 title: index
@@ -76,31 +83,33 @@ pub fn list_sessions(
                 project: thread
                     .cwd
                     .clone()
-                    .or_else(|| meta.and_then(|m| m.cwd.clone())),
+                    .or_else(|| meta.and_then(|(m, _)| m.cwd.clone())),
                 provider: thread
                     .model_provider
                     .clone()
-                    .or_else(|| meta.and_then(|m| m.model_provider.clone())),
+                    .or_else(|| meta.and_then(|(m, _)| m.model_provider.clone())),
                 model: thread.model.clone(),
                 source: thread
                     .source
                     .clone()
-                    .or_else(|| meta.and_then(|m| m.source.clone())),
-                archived: thread.archived,
+                    .or_else(|| meta.and_then(|(m, _)| m.source.clone())),
+                archived: thread.archived || meta_archived,
                 updated_at: thread.updated_at.clone(),
-                rollout_path: thread.rollout_path.clone(),
+                rollout_path: non_empty(thread.rollout_path.clone()).or_else(|| {
+                    meta.map(|(m, _)| m.path.display().to_string())
+                }),
                 in_session_index: index.is_some(),
             }
         })
         .chain(
             metas_by_id
                 .values()
-                .filter(|meta| {
+                .filter(|(meta, _)| {
                     meta.id
                         .as_deref()
                         .is_some_and(|id| !thread_ids.contains(id))
                 })
-                .map(|meta| {
+                .map(|(meta, archived)| {
                     let id = meta.id.clone().unwrap_or_default();
                     let index = index_by_id.get(&id);
                     SessionSummary {
@@ -111,7 +120,7 @@ pub fn list_sessions(
                         provider: meta.model_provider.clone(),
                         model: None,
                         source: meta.source.clone(),
-                        archived: false,
+                        archived: *archived,
                         updated_at: index.and_then(|entry| entry.updated_at.clone()),
                         rollout_path: Some(meta.path.display().to_string()),
                         in_session_index: index.is_some(),
@@ -175,4 +184,8 @@ fn matches_optional(actual: Option<&str>, expected: Option<&str>) -> bool {
         return true;
     };
     actual == Some(expected)
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
 }

@@ -434,3 +434,9 @@ src/validate.rs        迁移后校验
 - `delete`：移动到工具自己的 trash，而不是直接永久删除。
 - `tui`：用终端界面预览迁移计划。
 - `tauri`：把核心库包装成桌面软件。
+
+## 支持
+
+如果这个项目帮到了你，star、反馈问题，或小额支持都很感谢：  
+
+[支持链接](https://aisspire.github.io/support/)

@@ -34,6 +34,106 @@ fn archives_and_restores_selected_sessions() {
 }
 
 #[test]
+fn archives_and_restores_touch_rollout_files_to_notify_codex() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let rollout_path = profile.sessions_dir().join("thread-1.jsonl");
+    fs::create_dir_all(profile.sessions_dir()).unwrap();
+    write_rollout(&rollout_path, "thread-1");
+    set_rollout_path(&profile.state_db_path(), "thread-1", &rollout_path);
+    let archived_path = profile.archived_sessions_dir().join("thread-1.jsonl");
+    let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_770_790_000);
+    let options = SessionApplyOptions {
+        apply: true,
+        backup: false,
+        include_sessions_backup: false,
+    };
+
+    set_file_times(&rollout_path, old_time);
+    archive_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
+        .unwrap();
+    assert!(archived_path.metadata().unwrap().modified().unwrap() > old_time);
+
+    set_file_times(&archived_path, old_time);
+    restore_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
+        .unwrap();
+    assert!(rollout_path.metadata().unwrap().modified().unwrap() > old_time);
+}
+
+#[test]
+fn archives_and_restores_move_rollout_files_between_codex_directories() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let rollout_path = profile
+        .sessions_dir()
+        .join("2026")
+        .join("05")
+        .join("07")
+        .join("rollout-2026-05-07T21-52-45-thread-1.jsonl");
+    fs::create_dir_all(rollout_path.parent().unwrap()).unwrap();
+    write_rollout(&rollout_path, "thread-1");
+    set_rollout_path(&profile.state_db_path(), "thread-1", &rollout_path);
+    let archived_path = profile
+        .archived_sessions_dir()
+        .join("rollout-2026-05-07T21-52-45-thread-1.jsonl");
+    let options = SessionApplyOptions {
+        apply: true,
+        backup: false,
+        include_sessions_backup: false,
+    };
+
+    archive_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
+        .unwrap();
+
+    assert!(!rollout_path.exists());
+    assert!(archived_path.exists());
+    assert_archived(&profile.state_db_path(), "thread-1", true);
+
+    restore_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
+        .unwrap();
+
+    assert!(rollout_path.exists());
+    assert!(!archived_path.exists());
+    assert_archived(&profile.state_db_path(), "thread-1", false);
+}
+
+#[test]
+fn restores_codex_archived_rollout_even_when_sqlite_is_not_archived() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let restored_path = profile
+        .sessions_dir()
+        .join("2026")
+        .join("05")
+        .join("07")
+        .join("rollout-2026-05-07T21-52-45-thread-1.jsonl");
+    let archived_path = profile
+        .archived_sessions_dir()
+        .join("rollout-2026-05-07T21-52-45-thread-1.jsonl");
+    fs::create_dir_all(profile.archived_sessions_dir()).unwrap();
+    write_rollout(&archived_path, "thread-1");
+    set_rollout_path(&profile.state_db_path(), "thread-1", &restored_path);
+    assert_archived(&profile.state_db_path(), "thread-1", false);
+    let options = SessionApplyOptions {
+        apply: true,
+        backup: false,
+        include_sessions_backup: false,
+    };
+
+    let report =
+        restore_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
+            .unwrap();
+
+    assert_eq!(report.sqlite_rows, 0);
+    assert!(restored_path.exists());
+    assert!(!archived_path.exists());
+    assert_archived(&profile.state_db_path(), "thread-1", false);
+}
+
+#[test]
 fn refuses_to_archive_when_codex_is_running() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
@@ -232,6 +332,16 @@ fn set_rollout_path(path: &std::path::Path, id: &str, rollout_path: &std::path::
         params![rollout_path.display().to_string(), id],
     )
     .unwrap();
+}
+
+fn set_file_times(path: &std::path::Path, time: SystemTime) {
+    let times = FileTimes::new().set_accessed(time).set_modified(time);
+    OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
 }
 
 fn assert_archived(path: &std::path::Path, id: &str, expected: bool) {

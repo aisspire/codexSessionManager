@@ -64,6 +64,10 @@ impl CodexProfile {
     pub fn sessions_dir(&self) -> PathBuf {
         self.codex_home.join("sessions")
     }
+
+    pub fn archived_sessions_dir(&self) -> PathBuf {
+        self.codex_home.join("archived_sessions")
+    }
 }
 
 fn expand_home(path: PathBuf) -> PathBuf {

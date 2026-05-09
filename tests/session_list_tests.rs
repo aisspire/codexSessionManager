@@ -113,6 +113,43 @@ fn lists_sessions_present_only_in_rollout_and_session_index() {
     assert!(!sessions[0].archived);
 }
 
+#[test]
+fn lists_sessions_from_archived_rollout_directory_as_archived() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let active_rollout_path = profile.sessions_dir().join("active-1.jsonl");
+    create_rollout(&active_rollout_path, "active-1", "/mnt/e/code/project-a", "cm");
+    let archived_rollout_path = profile
+        .archived_sessions_dir()
+        .join("rollout-2026-05-06T20-43-11-archived-1.jsonl");
+    create_rollout(
+        &archived_rollout_path,
+        "archived-1",
+        "/mnt/e/code/project-b",
+        "openai",
+    );
+    set_archived(&profile.state_db_path(), "archived-1", false);
+
+    let sessions = list_sessions(
+        &profile,
+        &SessionListFilter {
+            archived: ArchivedFilter::Archived,
+            search: Some("Archived title".to_string()),
+            ..SessionListFilter::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "archived-1");
+    assert!(sessions[0].archived);
+    assert_eq!(
+        sessions[0].rollout_path.as_deref(),
+        Some(archived_rollout_path.to_str().unwrap())
+    );
+}
+
 fn create_state_db(path: &std::path::Path) {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch(
@@ -165,6 +202,15 @@ fn create_rollout(path: &std::path::Path, id: &str, cwd: &str, provider: &str) {
         format!(
             r#"{{"type":"session_meta","payload":{{"id":"{id}","cwd":"{cwd}","source":"cli","model_provider":"{provider}"}}}}"#
         ),
+    )
+    .unwrap();
+}
+
+fn set_archived(path: &std::path::Path, id: &str, archived: bool) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute(
+        "UPDATE threads SET archived = ?1 WHERE id = ?2",
+        rusqlite::params![if archived { 1 } else { 0 }, id],
     )
     .unwrap();
 }

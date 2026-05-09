@@ -71,7 +71,7 @@ label {
 
 .nav {
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto 1fr auto;
   gap: 18px;
   min-height: 0;
   padding: 18px 14px;
@@ -119,6 +119,46 @@ label {
 .page-nav-button:hover {
   border-color: #354253;
   background: #202a37;
+}
+
+.settings-panel {
+  display: grid;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid #2c3746;
+}
+
+.settings-title {
+  color: #8fa0b3;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.github-link {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  border: 1px solid #354253;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #e7edf4;
+  background: #1d2632;
+  font-size: 13px;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.github-link:hover {
+  border-color: #7fd1c7;
+  background: #253140;
+}
+
+.github-icon {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
 }
 
 .primary,
@@ -358,9 +398,11 @@ label {
   background: #edf5f6;
 }
 
-.chevron {
+.folder-icon {
+  width: 19px;
+  height: 19px;
   color: #0e6870;
-  font-size: 14px;
+  fill: currentColor;
 }
 
 .project-title {
@@ -561,6 +603,10 @@ dd {
   .page-nav {
     grid-auto-flow: column;
     overflow-x: auto;
+  }
+
+  .settings-panel {
+    display: none;
   }
 
   .page-header {
