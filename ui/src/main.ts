@@ -1,25 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import { loadInputCache, saveInputCache } from "./inputCache";
 import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectExpansionCache";
+import {
+  buildSessionMetaItems,
+  sessionStateDisplay,
+  sessionTitle as displaySessionTitle,
+} from "./sessionDisplay";
 import { buildProjectGroups, type ProjectGroup } from "./sessionGroups";
 import "./styles.css";
 
 type AppPage = "batch-edit" | "session-management" | "database-repair";
 type ArchivedFilter = "active" | "archived" | "all";
-type TableColumnKey = "select" | "session" | "provider" | "model" | "state" | "updated";
 type SessionCommand =
   | "archive_sessions"
   | "active_sessions"
   | "delete_sessions"
   | "refresh_session_updated_at";
-
-interface TableColumn {
-  key: TableColumnKey;
-  label: string;
-  width: number;
-  minWidth: number;
-  resizable: boolean;
-}
 
 interface ProfileInput {
   codex_home: string;
@@ -112,15 +108,6 @@ const pageLabels: Record<AppPage, string> = {
 
 const GITHUB_REPOSITORY_URL = "https://github.com/aisspire/codexSessionManager";
 
-const tableColumns: TableColumn[] = [
-  { key: "select", label: "", width: 46, minWidth: 46, resizable: false },
-  { key: "session", label: "会话", width: 360, minWidth: 220, resizable: true },
-  { key: "provider", label: "提供方", width: 130, minWidth: 96, resizable: true },
-  { key: "model", label: "模型", width: 160, minWidth: 110, resizable: true },
-  { key: "state", label: "状态", width: 112, minWidth: 86, resizable: true },
-  { key: "updated", label: "更新时间", width: 200, minWidth: 150, resizable: true },
-];
-
 const blankDetailEdit = (): DetailEditState => ({
   editingField: "",
   draft: "",
@@ -162,7 +149,6 @@ const state = {
   activeId: "",
   detailOpen: false,
   status: "就绪",
-  columnWidths: tableColumns.map((column) => column.width),
   // 展开状态按项目 key 保存。首次加载时会自动展开全部项目，用户操作后保持本地状态。
   expandedProjects: cachedExpandedProjects ?? new Set<string>(),
 };
@@ -351,8 +337,14 @@ function archivedButton(value: ArchivedFilter, label: string) {
 function groupedTable(groups: ProjectGroup<SessionSummary>[]) {
   return `
     <section class="table-shell" aria-label="会话列表">
-      <div class="table" style="${tableSizingStyle()}">
-        ${tableHeader()}
+      <div class="table session-list">
+        <div class="session-list-toolbar">
+          <label class="global-select">
+            <input id="select-all" type="checkbox" aria-label="全选当前列表" ${allVisibleSessionsSelected() ? "checked" : ""} />
+            <span>全选当前列表</span>
+          </label>
+          <span class="session-list-summary">按项目分组 · ${state.sessions.length} 个会话</span>
+        </div>
         ${
           groups.length
             ? groups.map((group) => projectGroup(group)).join("")
@@ -361,28 +353,6 @@ function groupedTable(groups: ProjectGroup<SessionSummary>[]) {
       </div>
     </section>
   `;
-}
-
-function tableHeader() {
-  const cells = tableColumns
-    .map((column, index) => {
-      if (column.key === "select") {
-        return `
-      <span class="header-cell select-header-cell">
-        <input id="select-all" type="checkbox" aria-label="全选当前列表" ${allVisibleSessionsSelected() ? "checked" : ""} />
-      </span>
-    `;
-      }
-
-      return `
-      <span class="header-cell">
-        <span class="header-label">${escapeHtml(column.label)}</span>
-        ${column.resizable ? `<span class="resize-handle" data-resize-column="${index}" role="separator" aria-label="调整${escapeHtml(column.label)}列宽"></span>` : ""}
-      </span>
-    `;
-    })
-    .join("");
-  return `<div class="row header">${cells}</div>`;
 }
 
 function projectGroup(group: ProjectGroup<SessionSummary>) {
@@ -403,7 +373,7 @@ function projectGroup(group: ProjectGroup<SessionSummary>) {
           组内全选
         </label>
       </div>
-      ${expanded ? group.sessions.map(sessionRow).join("") : ""}
+      ${expanded ? `<div class="session-card-grid">${group.sessions.map(sessionRow).join("")}</div>` : ""}
     </section>
   `;
 }
@@ -469,14 +439,20 @@ function folderIcon(expanded: boolean) {
 function sessionRow(session: SessionSummary) {
   const selected = state.selectedIds.has(session.id);
   const active = state.activeId === session.id && state.detailOpen;
+  const stateDisplay = sessionStateDisplay(session);
+  const metaItems = buildSessionMetaItems(session);
   return `
-    <button class="row session-row ${active ? "active" : ""}" data-open="${escapeHtml(session.id)}">
-      <input type="checkbox" data-select="${escapeHtml(session.id)}" ${selected ? "checked" : ""} />
-      <span class="session-title">${escapeHtml(sessionTitle(session))}</span>
-      <span>${escapeHtml(session.provider || "")}</span>
-      <span>${escapeHtml(session.model || "")}</span>
-      <span>${session.archived ? "已归档" : "活动"}</span>
-      <span>${escapeHtml(session.updated_at || "")}</span>
+    <button class="session-card ${selected ? "selected" : ""} ${active ? "active" : ""}" data-open="${escapeHtml(session.id)}">
+      <input class="session-card-check" type="checkbox" data-select="${escapeHtml(session.id)}" aria-label="选择${escapeHtml(sessionTitle(session))}" ${selected ? "checked" : ""} />
+      <span class="session-card-body">
+        <span class="session-card-top">
+          <span class="session-title" title="${escapeHtml(sessionTitle(session))}">${escapeHtml(sessionTitle(session))}</span>
+          <span class="session-state session-state-${stateDisplay.tone}">${escapeHtml(stateDisplay.label)}</span>
+        </span>
+        <span class="session-meta">
+          ${metaItems.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+        </span>
+      </span>
     </button>
   `;
 }
@@ -530,7 +506,6 @@ function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
     bindGroupSelection(groups);
     bindRowEvents();
     bindDetailEvents();
-    bindColumnResize();
   }
   bindSettingsEvents();
 
@@ -871,7 +846,7 @@ async function saveDetailEdits() {
 }
 
 function sessionTitle(session: SessionSummary) {
-  return session.title || session.first_user_message || session.id;
+  return displaySessionTitle(session);
 }
 
 function detailCurrentValue(session: SessionSummary, field: DetailEditField) {
@@ -975,21 +950,6 @@ function formatRepairApplyReport(report: DatabaseRepairApplyReport) {
   return `已应用 ${report.applied_items} 项 · SQLite ${report.sqlite_rows} 行${skipped}${backup}`;
 }
 
-function tableSizingStyle() {
-  const grid = state.columnWidths.map((width) => `${width}px`).join(" ");
-  const width = state.columnWidths.reduce((total, columnWidth) => total + columnWidth, 0);
-  return `--session-grid: ${grid}; --session-table-width: ${width}px;`;
-}
-
-function applyTableSizing() {
-  const table = document.querySelector<HTMLElement>(".table");
-  if (!table) return;
-  const grid = state.columnWidths.map((width) => `${width}px`).join(" ");
-  const width = state.columnWidths.reduce((total, columnWidth) => total + columnWidth, 0);
-  table.style.setProperty("--session-grid", grid);
-  table.style.setProperty("--session-table-width", `${width}px`);
-}
-
 function allVisibleSessionsSelected() {
   return state.sessions.length > 0 && state.sessions.every((session) => state.selectedIds.has(session.id));
 }
@@ -1043,38 +1003,6 @@ function restoreTableScroll(scroll: { left: number; top: number }) {
   if (!table) return;
   table.scrollLeft = scroll.left;
   table.scrollTop = scroll.top;
-}
-
-function bindColumnResize() {
-  document.querySelectorAll<HTMLElement>("[data-resize-column]").forEach((handle) => {
-    handle.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      const columnIndex = Number(handle.dataset.resizeColumn);
-      const column = tableColumns[columnIndex];
-      if (!column) return;
-
-      const startX = event.clientX;
-      const startWidth = state.columnWidths[columnIndex];
-      document.body.classList.add("resizing-column");
-
-      const onPointerMove = (moveEvent: PointerEvent) => {
-        const nextWidth = Math.max(column.minWidth, startWidth + moveEvent.clientX - startX);
-        state.columnWidths[columnIndex] = Math.round(nextWidth);
-        applyTableSizing();
-      };
-
-      const onPointerUp = () => {
-        document.body.classList.remove("resizing-column");
-        document.removeEventListener("pointermove", onPointerMove);
-        document.removeEventListener("pointerup", onPointerUp);
-        document.removeEventListener("pointercancel", onPointerUp);
-      };
-
-      document.addEventListener("pointermove", onPointerMove);
-      document.addEventListener("pointerup", onPointerUp);
-      document.addEventListener("pointercancel", onPointerUp);
-    });
-  });
 }
 
 function emptyToUndefined(value: string) {
