@@ -246,6 +246,23 @@ label {
   gap: 8px;
 }
 
+.repair-filter-toolbar {
+  grid-template-columns: minmax(220px, 1fr) auto;
+  align-items: end;
+}
+
+.repair-action-toolbar {
+  grid-template-columns: minmax(0, 1fr) minmax(260px, auto);
+  align-items: center;
+}
+
+.repair-note {
+  min-width: 0;
+  color: #516071;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .segmented {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -456,6 +473,59 @@ label {
   color: #657588;
 }
 
+.repair-table-shell {
+  background: #ffffff;
+}
+
+.repair-table {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  background: #ffffff;
+}
+
+.repair-row {
+  display: grid;
+  grid-template-columns: 46px 150px minmax(190px, 1fr) minmax(220px, 1.2fr) minmax(220px, 1.2fr) minmax(150px, 0.8fr);
+  align-items: center;
+  min-width: 1040px;
+  min-height: 44px;
+  border-bottom: 1px solid #e1e6eb;
+  padding: 0 12px;
+  color: #18212f;
+  background: #ffffff;
+}
+
+.repair-row span {
+  min-width: 0;
+  overflow: hidden;
+  padding-right: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repair-row input {
+  width: 18px;
+  min-height: 18px;
+}
+
+.repair-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  min-height: 38px;
+  color: #4f5f70;
+  font-size: 12px;
+  font-weight: 800;
+  background: #e7edf2;
+}
+
+.repair-row.muted {
+  color: #7a8795;
+  background: #f8fafc;
+}
+
 .status {
   min-height: 44px;
   padding: 12px 20px;
@@ -615,7 +685,9 @@ dd {
   }
 
   .filter-toolbar,
-  .action-toolbar {
+  .action-toolbar,
+  .repair-filter-toolbar,
+  .repair-action-toolbar {
     grid-template-columns: 1fr;
   }
 

@@ -4,7 +4,7 @@ import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectE
 import { buildProjectGroups, type ProjectGroup } from "./sessionGroups";
 import "./styles.css";
 
-type AppPage = "batch-edit" | "session-management";
+type AppPage = "batch-edit" | "session-management" | "database-repair";
 type ArchivedFilter = "active" | "archived" | "all";
 type TableColumnKey = "select" | "session" | "provider" | "model" | "state" | "updated";
 type SessionCommand =
@@ -60,6 +60,39 @@ interface MutationReport {
   index_entries: number;
 }
 
+type DatabaseRepairKind =
+  | "missing-thread-row"
+  | "repair-rollout-path"
+  | "normalize-rollout-path"
+  | "sync-archived-state"
+  | "sqlite-only-thread"
+  | "duplicate-jsonl";
+
+interface DatabaseRepairItem {
+  id: string;
+  kind: DatabaseRepairKind;
+  session_id: string;
+  summary: string;
+  before?: string;
+  after?: string;
+  rollout_path?: string;
+  applicable: boolean;
+  skip_reason?: string;
+}
+
+interface DatabaseRepairPreview {
+  items: DatabaseRepairItem[];
+  backup_note: string;
+}
+
+interface DatabaseRepairApplyReport {
+  applied_items: number;
+  sqlite_rows: number;
+  backup_dir?: string;
+  backup_files: string[];
+  skipped_items: DatabaseRepairItem[];
+}
+
 type DetailEditField = "title" | "project" | "provider";
 
 interface DetailEditState {
@@ -74,6 +107,7 @@ interface DetailEditState {
 const pageLabels: Record<AppPage, string> = {
   "batch-edit": "批量编辑",
   "session-management": "会话管理",
+  "database-repair": "数据库修复",
 };
 
 const GITHUB_REPOSITORY_URL = "https://github.com/aisspire/codexSessionManager";
@@ -122,6 +156,9 @@ const state = {
   detailEdit: blankDetailEdit(),
   sessions: [] as SessionSummary[],
   selectedIds: new Set<string>(),
+  repairItems: [] as DatabaseRepairItem[],
+  selectedRepairIds: new Set<string>(),
+  repairBackupNote: "",
   activeId: "",
   detailOpen: false,
   status: "就绪",
@@ -142,6 +179,8 @@ function render(options: RenderOptions = {}) {
   const tableScroll = options.preserveTableScroll ? readTableScroll() : undefined;
   const groups = buildProjectGroups(state.sessions);
   const active = state.sessions.find((session) => session.id === state.activeId);
+  const mainContent =
+    state.activePage === "database-repair" ? repairTable() : groupedTable(groups);
 
   appRoot.innerHTML = `
     <main class="shell">
@@ -150,7 +189,7 @@ function render(options: RenderOptions = {}) {
         ${pageHeader()}
         ${filterBar()}
         ${actionBar()}
-        ${groupedTable(groups)}
+        ${mainContent}
         <div class="status">${escapeHtml(state.status)}</div>
       </section>
       ${active && state.detailOpen ? detailDrawer(active) : ""}
@@ -172,6 +211,7 @@ function navigation() {
       <nav class="page-nav" aria-label="功能页面">
         ${pageNavButton("batch-edit")}
         ${pageNavButton("session-management")}
+        ${pageNavButton("database-repair")}
       </nav>
       ${settingsPanel()}
     </aside>
@@ -204,7 +244,13 @@ function pageHeader() {
   const description =
     state.activePage === "batch-edit"
       ? "批量修改已选会话的名称前缀、提供方和项目路径。"
-      : "归档、活动、置顶或删除已选会话。";
+      : state.activePage === "session-management"
+        ? "归档、活动、置顶或删除已选会话。"
+        : "预览 Codex 数据库与 JSONL 文件之间的不一致项，勾选后执行保守修复。";
+  const total = state.activePage === "database-repair" ? state.repairItems.length : state.sessions.length;
+  const selected =
+    state.activePage === "database-repair" ? state.selectedRepairIds.size : state.selectedIds.size;
+  const totalLabel = state.activePage === "database-repair" ? "项目" : "会话";
   return `
     <header class="page-header">
       <div>
@@ -212,9 +258,9 @@ function pageHeader() {
         <p>${escapeHtml(description)}</p>
       </div>
       <div class="page-count">
-        <strong>${state.sessions.length}</strong>
-        <span>会话</span>
-        <strong>${state.selectedIds.size}</strong>
+        <strong>${total}</strong>
+        <span>${totalLabel}</span>
+        <strong>${selected}</strong>
         <span>已选</span>
       </div>
     </header>
@@ -222,6 +268,10 @@ function pageHeader() {
 }
 
 function filterBar() {
+  if (state.activePage === "database-repair") {
+    return repairFilterBar();
+  }
+
   return `
     <section class="toolbar filter-toolbar" aria-label="搜索筛选">
       <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
@@ -240,8 +290,33 @@ function filterBar() {
   `;
 }
 
+function repairFilterBar() {
+  return `
+    <section class="toolbar repair-filter-toolbar" aria-label="数据库修复范围">
+      <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
+      <button id="refresh" class="primary">预览修复项</button>
+    </section>
+  `;
+}
+
 function actionBar() {
+  if (state.activePage === "database-repair") {
+    return repairActionBar();
+  }
   return state.activePage === "batch-edit" ? batchEditBar() : sessionManagementBar();
+}
+
+function repairActionBar() {
+  const applicable = state.repairItems.filter((item) => item.applicable).length;
+  return `
+    <section class="toolbar action-toolbar repair-action-toolbar" aria-label="数据库修复操作">
+      <div class="repair-note">${escapeHtml(state.repairBackupNote || "默认仅预览。应用前会检查 Codex 是否仍在运行，并创建数据库与索引备份。")}</div>
+      <div class="action-buttons">
+        <button id="select-all-repairs" ${applicable === 0 ? "disabled" : ""}>全选可修复</button>
+        <button id="apply-repairs" class="primary" ${state.selectedRepairIds.size === 0 ? "disabled" : ""}>应用已选修复</button>
+      </div>
+    </section>
+  `;
 }
 
 function batchEditBar() {
@@ -333,6 +408,54 @@ function projectGroup(group: ProjectGroup<SessionSummary>) {
   `;
 }
 
+function repairTable() {
+  return `
+    <section class="table-shell repair-table-shell" aria-label="数据库修复预览">
+      <div class="repair-table">
+        ${repairTableHeader()}
+        ${
+          state.repairItems.length
+            ? state.repairItems.map(repairRow).join("")
+            : `<div class="empty-list">暂无预览结果</div>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function repairTableHeader() {
+  const allSelected = allApplicableRepairsSelected();
+  return `
+    <div class="repair-row repair-header">
+      <span class="select-header-cell">
+        <input id="select-all-repair-checkbox" type="checkbox" aria-label="全选可修复项目" ${allSelected ? "checked" : ""} />
+      </span>
+      <span>类型</span>
+      <span>会话</span>
+      <span>当前值</span>
+      <span>目标值</span>
+      <span>状态</span>
+    </div>
+  `;
+}
+
+function repairRow(item: DatabaseRepairItem) {
+  const selected = state.selectedRepairIds.has(item.id);
+  const status = item.applicable ? "可修复" : item.skip_reason || "仅报告";
+  return `
+    <div class="repair-row ${item.applicable ? "" : "muted"}">
+      <span>
+        <input type="checkbox" data-select-repair="${escapeHtml(item.id)}" ${selected ? "checked" : ""} ${item.applicable ? "" : "disabled"} />
+      </span>
+      <span>${escapeHtml(repairKindLabel(item.kind))}</span>
+      <span title="${escapeHtml(item.session_id)}">${escapeHtml(item.session_id)}</span>
+      <span title="${escapeHtml(item.before || "")}">${escapeHtml(item.before || "")}</span>
+      <span title="${escapeHtml(item.after || item.rollout_path || "")}">${escapeHtml(item.after || item.rollout_path || "")}</span>
+      <span title="${escapeHtml(status)}">${escapeHtml(status)}</span>
+    </div>
+  `;
+}
+
 function folderIcon(expanded: boolean) {
   return expanded
     ? `<svg class="folder-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -399,15 +522,21 @@ function detailDrawer(session: SessionSummary) {
 function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
   bindPageSwitching();
   bindFilters();
-  bindBatchEditInputs();
-  bindGlobalSelection();
-  bindGroupSelection(groups);
-  bindRowEvents();
-  bindDetailEvents();
-  bindColumnResize();
+  if (state.activePage === "database-repair") {
+    bindRepairEvents();
+  } else {
+    bindBatchEditInputs();
+    bindGlobalSelection();
+    bindGroupSelection(groups);
+    bindRowEvents();
+    bindDetailEvents();
+    bindColumnResize();
+  }
   bindSettingsEvents();
 
-  document.querySelector("#refresh")?.addEventListener("click", refresh);
+  document.querySelector("#refresh")?.addEventListener("click", () => {
+    state.activePage === "database-repair" ? refreshDatabaseRepairs() : refresh();
+  });
   document.querySelector("#preview-selected-edit")?.addEventListener("click", () => editSelected(false));
   document.querySelector("#apply-selected-edit")?.addEventListener("click", () => editSelected(true));
   document.querySelector("#archive")?.addEventListener("click", () => mutateSelected("archive_sessions"));
@@ -423,11 +552,33 @@ function bindSettingsEvents() {
   });
 }
 
+function bindRepairEvents() {
+  const selectAll = document.querySelector<HTMLInputElement>("#select-all-repair-checkbox");
+  if (selectAll) {
+    selectAll.indeterminate = someApplicableRepairsSelected() && !allApplicableRepairsSelected();
+    selectAll.addEventListener("change", () => toggleAllRepairs(selectAll.checked));
+  }
+  document.querySelector("#select-all-repairs")?.addEventListener("click", () => {
+    toggleAllRepairs(true);
+  });
+  document.querySelector("#apply-repairs")?.addEventListener("click", applySelectedRepairs);
+  document.querySelectorAll<HTMLInputElement>("[data-select-repair]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const id = checkbox.dataset.selectRepair || "";
+      checkbox.checked ? state.selectedRepairIds.add(id) : state.selectedRepairIds.delete(id);
+      render({ preserveTableScroll: true });
+    });
+  });
+}
+
 function bindPageSwitching() {
   document.querySelectorAll<HTMLElement>("[data-page]").forEach((button) => {
     button.addEventListener("click", () => {
       state.activePage = button.dataset.page as AppPage;
       render({ preserveTableScroll: true });
+      if (state.activePage === "database-repair" && state.repairItems.length === 0) {
+        refreshDatabaseRepairs();
+      }
     });
   });
 }
@@ -764,6 +915,44 @@ async function openGithubRepository() {
   });
 }
 
+async function refreshDatabaseRepairs() {
+  await run(async () => {
+    const preview = await invoke<DatabaseRepairPreview>("preview_database_repairs", {
+      profile: state.profile,
+    });
+    state.repairItems = preview.items;
+    state.repairBackupNote = preview.backup_note;
+    state.selectedRepairIds.clear();
+    state.status = `已预览 ${preview.items.length} 个修复项目`;
+  });
+}
+
+async function applySelectedRepairs() {
+  const selected = [...state.selectedRepairIds];
+  if (selected.length === 0) {
+    state.status = "请至少选择一个修复项目";
+    render({ preserveTableScroll: true });
+    return;
+  }
+  if (!window.confirm(`将应用 ${selected.length} 个数据库修复项。继续？`)) {
+    return;
+  }
+
+  await run(async () => {
+    const report = await invoke<DatabaseRepairApplyReport>("apply_database_repairs", {
+      profile: state.profile,
+      options: { selected },
+    });
+    state.status = formatRepairApplyReport(report);
+    const preview = await invoke<DatabaseRepairPreview>("preview_database_repairs", {
+      profile: state.profile,
+    });
+    state.repairItems = preview.items;
+    state.repairBackupNote = preview.backup_note;
+    state.selectedRepairIds.clear();
+  });
+}
+
 async function run(task: () => Promise<void>) {
   try {
     state.status = "正在处理...";
@@ -778,6 +967,12 @@ async function run(task: () => Promise<void>) {
 
 function formatMutationReport(report: MutationReport) {
   return `${report.action} · ${report.applied ? "已应用" : "预览"} · SQLite ${report.sqlite_rows} 行 · JSONL ${report.jsonl_files} 个 · 索引 ${report.index_entries} 条`;
+}
+
+function formatRepairApplyReport(report: DatabaseRepairApplyReport) {
+  const backup = report.backup_dir ? ` · 备份 ${report.backup_dir}` : "";
+  const skipped = report.skipped_items.length ? ` · 跳过 ${report.skipped_items.length} 项` : "";
+  return `已应用 ${report.applied_items} 项 · SQLite ${report.sqlite_rows} 行${skipped}${backup}`;
 }
 
 function tableSizingStyle() {
@@ -803,8 +998,40 @@ function someVisibleSessionsSelected() {
   return state.sessions.some((session) => state.selectedIds.has(session.id));
 }
 
+function applicableRepairItems() {
+  return state.repairItems.filter((item) => item.applicable);
+}
+
+function allApplicableRepairsSelected() {
+  const applicable = applicableRepairItems();
+  return applicable.length > 0 && applicable.every((item) => state.selectedRepairIds.has(item.id));
+}
+
+function someApplicableRepairsSelected() {
+  return applicableRepairItems().some((item) => state.selectedRepairIds.has(item.id));
+}
+
+function toggleAllRepairs(selected: boolean) {
+  for (const item of applicableRepairItems()) {
+    selected ? state.selectedRepairIds.add(item.id) : state.selectedRepairIds.delete(item.id);
+  }
+  render({ preserveTableScroll: true });
+}
+
+function repairKindLabel(kind: DatabaseRepairKind) {
+  const labels: Record<DatabaseRepairKind, string> = {
+    "missing-thread-row": "补 threads 行",
+    "repair-rollout-path": "修 rollout_path",
+    "normalize-rollout-path": "路径归一化",
+    "sync-archived-state": "同步归档状态",
+    "sqlite-only-thread": "SQLite-only 报告",
+    "duplicate-jsonl": "重复 JSONL 报告",
+  };
+  return labels[kind];
+}
+
 function readTableScroll() {
-  const table = document.querySelector<HTMLElement>(".table");
+  const table = document.querySelector<HTMLElement>(".table, .repair-table");
   return {
     left: table?.scrollLeft ?? 0,
     top: table?.scrollTop ?? 0,
@@ -812,7 +1039,7 @@ function readTableScroll() {
 }
 
 function restoreTableScroll(scroll: { left: number; top: number }) {
-  const table = document.querySelector<HTMLElement>(".table");
+  const table = document.querySelector<HTMLElement>(".table, .repair-table");
   if (!table) return;
   table.scrollLeft = scroll.left;
   table.scrollTop = scroll.top;

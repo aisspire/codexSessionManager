@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::{named_params, Connection};
+use rusqlite::{named_params, params_from_iter, Connection, ToSql};
 
 use crate::path_map::{apply_first_path_map, PathMap};
 
@@ -202,6 +202,55 @@ impl StateDb {
         Ok(changed)
     }
 
+    pub fn insert_repaired_thread(&mut self, thread: &ThreadRecord) -> Result<usize> {
+        let columns = self.thread_columns()?;
+        let values = repaired_thread_values(thread);
+        let mut insert_columns = Vec::new();
+        let mut insert_values = Vec::new();
+
+        for (column, value) in values {
+            if columns.contains(&column) {
+                insert_columns.push(column);
+                insert_values.push(value);
+            }
+        }
+
+        let placeholders = (0..insert_columns.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO threads ({}) VALUES ({})",
+            insert_columns.join(", "),
+            placeholders
+        );
+        let params = insert_values
+            .iter()
+            .map(|value| value as &dyn ToSql)
+            .collect::<Vec<_>>();
+
+        self.conn
+            .execute(&sql, params_from_iter(params))
+            .context("failed to insert repaired thread row")
+    }
+
+    pub fn update_rollout_path(&mut self, id: &str, rollout_path: &str) -> Result<usize> {
+        self.conn
+            .execute(
+                r#"
+                UPDATE threads
+                SET rollout_path = :rollout_path
+                WHERE id = :id
+                  AND COALESCE(rollout_path, '') != :rollout_path
+                "#,
+                named_params! {
+                    ":id": id,
+                    ":rollout_path": rollout_path,
+                },
+            )
+            .context("failed to update rollout_path")
+    }
+
     pub fn repair_has_user_event(&mut self) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let changed = tx.execute(
@@ -252,4 +301,88 @@ impl StateDb {
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .context("failed to run SQLite integrity_check")
     }
+
+    fn thread_columns(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(threads)")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to inspect threads columns")
+    }
+}
+
+fn repaired_thread_values(thread: &ThreadRecord) -> Vec<(String, rusqlite::types::Value)> {
+    use rusqlite::types::Value;
+
+    vec![
+        ("id".to_string(), Value::Text(thread.id.clone())),
+        (
+            "rollout_path".to_string(),
+            Value::Text(thread.rollout_path.clone().unwrap_or_default()),
+        ),
+        ("created_at".to_string(), Value::Integer(0)),
+        ("updated_at".to_string(), Value::Integer(0)),
+        (
+            "source".to_string(),
+            Value::Text(thread.source.clone().unwrap_or_else(|| "cli".to_string())),
+        ),
+        (
+            "model_provider".to_string(),
+            Value::Text(thread.model_provider.clone().unwrap_or_default()),
+        ),
+        (
+            "cwd".to_string(),
+            Value::Text(thread.cwd.clone().unwrap_or_default()),
+        ),
+        (
+            "title".to_string(),
+            Value::Text(thread.title.clone().unwrap_or_default()),
+        ),
+        (
+            "sandbox_policy".to_string(),
+            Value::Text("workspace-write".to_string()),
+        ),
+        (
+            "approval_mode".to_string(),
+            Value::Text("on-request".to_string()),
+        ),
+        ("tokens_used".to_string(), Value::Integer(0)),
+        (
+            "has_user_event".to_string(),
+            Value::Integer(if thread.has_user_event { 1 } else { 0 }),
+        ),
+        (
+            "archived".to_string(),
+            Value::Integer(if thread.archived { 1 } else { 0 }),
+        ),
+        (
+            "first_user_message".to_string(),
+            Value::Text(thread.first_user_message.clone().unwrap_or_default()),
+        ),
+        (
+            "model".to_string(),
+            thread.model.clone().map(Value::Text).unwrap_or(Value::Null),
+        ),
+        (
+            "reasoning_effort".to_string(),
+            thread
+                .reasoning_effort
+                .clone()
+                .map(Value::Text)
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "created_at_ms".to_string(),
+            thread
+                .created_at_ms
+                .map(Value::Integer)
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "updated_at_ms".to_string(),
+            thread
+                .updated_at_ms
+                .map(Value::Integer)
+                .unwrap_or(Value::Null),
+        ),
+    ]
 }

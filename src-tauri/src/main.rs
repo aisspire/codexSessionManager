@@ -1,5 +1,8 @@
 use std::process::Command;
 
+use codex_session_manager::db_repair::{
+    self, DatabaseRepairApplyReport, DatabaseRepairOptions, DatabaseRepairPreview,
+};
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
 use codex_session_manager::path_map::PathMap;
 use codex_session_manager::profile::CodexProfile;
@@ -99,13 +102,23 @@ fn edit_selected_sessions(
     }
 
     let profile = build_profile(profile)?;
-    migrate::edit_selected_sessions(
-        &profile,
-        &ids,
-        &edit,
-        &ApplyOptions { apply },
-    )
-    .map_err(format_error)
+    migrate::edit_selected_sessions(&profile, &ids, &edit, &ApplyOptions { apply })
+        .map_err(format_error)
+}
+
+#[tauri::command]
+fn preview_database_repairs(profile: ProfileInput) -> Result<DatabaseRepairPreview, String> {
+    let profile = build_profile(profile)?;
+    db_repair::preview_database_repairs(&profile).map_err(format_error)
+}
+
+#[tauri::command]
+fn apply_database_repairs(
+    profile: ProfileInput,
+    options: DatabaseRepairOptions,
+) -> Result<DatabaseRepairApplyReport, String> {
+    let profile = build_profile(profile)?;
+    db_repair::apply_database_repairs(&profile, &options).map_err(format_error)
 }
 
 #[tauri::command]
@@ -184,6 +197,8 @@ fn main() {
             delete_sessions,
             refresh_session_updated_at,
             edit_selected_sessions,
+            preview_database_repairs,
+            apply_database_repairs,
             open_external_url
         ])
         .run(tauri::generate_context!())
@@ -199,7 +214,11 @@ mod tests {
         assert!(is_allowed_external_url(
             "https://github.com/aisspire/codexSessionManager"
         ));
-        assert!(!is_allowed_external_url("https://github.com/aisspire/other"));
-        assert!(!is_allowed_external_url("https://example.com/aisspire/codexSessionManager"));
+        assert!(!is_allowed_external_url(
+            "https://github.com/aisspire/other"
+        ));
+        assert!(!is_allowed_external_url(
+            "https://example.com/aisspire/codexSessionManager"
+        ));
     }
 }
