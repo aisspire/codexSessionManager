@@ -1,10 +1,13 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::Path;
 
+use crate::backup_store::{self, BackupTrigger};
 use crate::path_map::apply_first_path_map;
 use crate::profile::CodexProfile;
 use crate::rollout::{read_all_rollout_meta, rewrite_session_meta};
+use crate::safety;
 use crate::session_index::{
     append_session_index_entries, missing_user_index_entries, read_session_index,
     update_session_index_thread_names,
@@ -18,9 +21,7 @@ pub struct ApplyOptions {
 
 impl Default for ApplyOptions {
     fn default() -> Self {
-        Self {
-            apply: false,
-        }
+        Self { apply: false }
     }
 }
 
@@ -31,6 +32,8 @@ pub struct MutationReport {
     pub sqlite_rows: usize,
     pub jsonl_files: usize,
     pub index_entries: usize,
+    pub backup_manifests: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,13 +47,16 @@ pub struct SessionEdit {
 
 impl MutationReport {
     pub fn to_text(&self) -> String {
-        let lines = vec![
+        let mut lines = vec![
             format!("action: {}", self.action),
             format!("mode: {}", if self.applied { "applied" } else { "dry-run" }),
             format!("sqlite rows: {}", self.sqlite_rows),
             format!("jsonl files: {}", self.jsonl_files),
             format!("session_index entries: {}", self.index_entries),
         ];
+        if !self.backup_manifests.is_empty() {
+            lines.push(format!("backup manifests: {}", self.backup_manifests.len()));
+        }
 
         lines.join("\n")
     }
@@ -62,6 +68,25 @@ pub fn edit_selected_sessions(
     edit: &SessionEdit,
     options: &ApplyOptions,
 ) -> Result<MutationReport> {
+    edit_selected_sessions_with_guard(
+        profile,
+        ids,
+        edit,
+        options,
+        safety::ensure_codex_not_running,
+    )
+}
+
+pub fn edit_selected_sessions_with_guard<F>(
+    profile: &CodexProfile,
+    ids: &[String],
+    edit: &SessionEdit,
+    options: &ApplyOptions,
+    guard: F,
+) -> Result<MutationReport>
+where
+    F: FnOnce() -> Result<()>,
+{
     let provider = edit
         .provider
         .as_deref()
@@ -125,6 +150,14 @@ pub fn edit_selected_sessions(
         return Ok(report);
     }
 
+    guard()?;
+    for id in ids {
+        let manifest = backup_store::create_session_backup(profile, id, BackupTrigger::Edit)?;
+        report
+            .backup_manifests
+            .push(manifest_path_from_backup(&manifest)?);
+    }
+
     let sqlite_rows = report.sqlite_rows;
     db.update_selected_session_fields(ids, provider, project)?;
     db.update_session_titles(
@@ -164,6 +197,18 @@ pub fn edit_selected_sessions(
     }
     report.jsonl_files = jsonl_files;
     Ok(report)
+}
+
+fn manifest_path_from_backup(manifest: &backup_store::SessionBackupManifest) -> Result<String> {
+    let session_path = manifest
+        .backup_session_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("session backup did not include a copied JSONL path"))?;
+    let manifest_path = Path::new(session_path)
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("backup session path has no parent"))?
+        .join("manifest.json");
+    Ok(manifest_path.display().to_string())
 }
 
 fn build_session_renames(

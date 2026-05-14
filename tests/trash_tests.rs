@@ -12,11 +12,13 @@ fn delete_moves_rollout_files_to_tool_trash_and_archives_threads() {
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     fs::create_dir_all(profile.sessions_dir()).unwrap();
     let rollout = profile.sessions_dir().join("thread-1.jsonl");
-    fs::write(&rollout, "session body").unwrap();
+    fs::write(
+        &rollout,
+        r#"{"type":"session_meta","payload":{"id":"thread-1","cwd":"/tmp/project","source":"cli","model_provider":"cm"}}"#,
+    )
+    .unwrap();
     create_state_db(&profile.state_db_path(), &rollout);
-    let options = SessionApplyOptions {
-        apply: true,
-    };
+    let options = SessionApplyOptions { apply: true };
 
     let report =
         delete_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
@@ -24,6 +26,8 @@ fn delete_moves_rollout_files_to_tool_trash_and_archives_threads() {
 
     assert!(report.applied);
     assert_eq!(report.sqlite_rows, 1);
+    assert_eq!(report.backup_manifests.len(), 1);
+    assert!(std::path::Path::new(&report.backup_manifests[0]).exists());
     assert_eq!(report.trash_manifest.as_ref().unwrap().entries.len(), 1);
     assert!(!rollout.exists());
     assert_archived(&profile.state_db_path(), "thread-1", true);
@@ -35,6 +39,42 @@ fn delete_moves_rollout_files_to_tool_trash_and_archives_threads() {
         serde_json::from_str(&fs::read_to_string(manifest_path).unwrap()).unwrap();
     assert_eq!(manifest.entries[0].session_id, "thread-1");
     assert!(std::path::Path::new(&manifest.entries[0].trashed_path).exists());
+}
+
+#[test]
+fn delete_jsonl_only_session_creates_backup_and_removes_index_entry() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    fs::create_dir_all(profile.sessions_dir()).unwrap();
+    let rollout = profile.sessions_dir().join("jsonl-only.jsonl");
+    fs::write(
+        &rollout,
+        r#"{"type":"session_meta","payload":{"id":"jsonl-only","cwd":"/tmp/jsonl","source":"cli","model_provider":"cm"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        profile.session_index_path(),
+        "{\"id\":\"jsonl-only\",\"thread_name\":\"JSONL only\",\"updated_at\":\"2026-05-06T00:00:00Z\"}\n",
+    )
+    .unwrap();
+
+    let report = delete_sessions_with_guard(
+        &profile,
+        &["jsonl-only".to_string()],
+        &SessionApplyOptions { apply: true },
+        || Ok(()),
+    )
+    .unwrap();
+
+    assert!(report.applied);
+    assert_eq!(report.sqlite_rows, 0);
+    assert_eq!(report.index_entries, 1);
+    assert_eq!(report.backup_manifests.len(), 1);
+    assert!(!rollout.exists());
+    assert!(fs::read_to_string(profile.session_index_path())
+        .unwrap()
+        .trim()
+        .is_empty());
 }
 
 fn create_state_db(path: &std::path::Path, rollout: &std::path::Path) {

@@ -1,6 +1,9 @@
 use std::fs;
 
-use codex_session_manager::migrate::{edit_selected_sessions, ApplyOptions, SessionEdit};
+use anyhow::bail;
+use codex_session_manager::migrate::{
+    edit_selected_sessions_with_guard, ApplyOptions, SessionEdit,
+};
 use codex_session_manager::profile::CodexProfile;
 use codex_session_manager::session_index::read_session_index;
 use rusqlite::Connection;
@@ -18,7 +21,7 @@ fn edits_provider_and_project_for_selected_sessions_only() {
     write_rollout(&selected_path, "thread-1", "codex-auto-review", "/tmp/old");
     write_rollout(&untouched_path, "thread-2", "codex-auto-review", "/tmp/old");
 
-    let report = edit_selected_sessions(
+    let report = edit_selected_sessions_with_guard(
         &profile,
         &["thread-1".to_string()],
         &SessionEdit {
@@ -27,14 +30,15 @@ fn edits_provider_and_project_for_selected_sessions_only() {
             title: None,
             title_prefix: None,
         },
-        &ApplyOptions {
-            apply: true,
-        },
+        &ApplyOptions { apply: true },
+        || Ok(()),
     )
     .unwrap();
 
     assert_eq!(report.sqlite_rows, 1);
     assert_eq!(report.jsonl_files, 1);
+    assert_eq!(report.backup_manifests.len(), 1);
+    assert!(std::path::Path::new(&report.backup_manifests[0]).exists());
     assert_eq!(
         read_thread(&profile.state_db_path(), "thread-1"),
         ("cm".to_string(), "/tmp/new".to_string())
@@ -59,13 +63,21 @@ fn renames_single_selected_session_in_sqlite_and_session_index() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
+    let session_dir = profile.sessions_dir().join("2026").join("05").join("06");
+    fs::create_dir_all(&session_dir).unwrap();
+    write_rollout(
+        &session_dir.join("thread-1.jsonl"),
+        "thread-1",
+        "codex-auto-review",
+        "/tmp/old",
+    );
     fs::write(
         profile.session_index_path(),
         "{\"id\":\"thread-1\",\"thread_name\":\"Old index title\",\"updated_at\":\"2026-05-06T00:00:00Z\"}\n",
     )
     .unwrap();
 
-    let report = edit_selected_sessions(
+    let report = edit_selected_sessions_with_guard(
         &profile,
         &["thread-1".to_string()],
         &SessionEdit {
@@ -74,9 +86,8 @@ fn renames_single_selected_session_in_sqlite_and_session_index() {
             title: Some("New title".to_string()),
             title_prefix: None,
         },
-        &ApplyOptions {
-            apply: true,
-        },
+        &ApplyOptions { apply: true },
+        || Ok(()),
     )
     .unwrap();
 
@@ -95,13 +106,27 @@ fn renames_multiple_selected_sessions_with_numbered_prefix_by_created_time() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
+    let session_dir = profile.sessions_dir().join("2026").join("05").join("06");
+    fs::create_dir_all(&session_dir).unwrap();
+    write_rollout(
+        &session_dir.join("thread-1.jsonl"),
+        "thread-1",
+        "codex-auto-review",
+        "/tmp/old",
+    );
+    write_rollout(
+        &session_dir.join("thread-2.jsonl"),
+        "thread-2",
+        "codex-auto-review",
+        "/tmp/old",
+    );
     fs::write(
         profile.session_index_path(),
         "{\"id\":\"thread-2\",\"thread_name\":\"Old thread 2\",\"updated_at\":\"2026-05-06T00:00:00Z\"}\n",
     )
     .unwrap();
 
-    let report = edit_selected_sessions(
+    let report = edit_selected_sessions_with_guard(
         &profile,
         &["thread-1".to_string(), "thread-2".to_string()],
         &SessionEdit {
@@ -110,9 +135,8 @@ fn renames_multiple_selected_sessions_with_numbered_prefix_by_created_time() {
             title: None,
             title_prefix: Some("Review".to_string()),
         },
-        &ApplyOptions {
-            apply: true,
-        },
+        &ApplyOptions { apply: true },
+        || Ok(()),
     )
     .unwrap();
 
@@ -134,6 +158,36 @@ fn renames_multiple_selected_sessions_with_numbered_prefix_by_created_time() {
     assert!(entries
         .iter()
         .any(|entry| entry.id == "thread-1" && entry.thread_name.as_deref() == Some("Review(2)")));
+}
+
+#[test]
+fn edit_refuses_to_write_when_codex_is_running() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let session_dir = profile.sessions_dir().join("2026").join("05").join("06");
+    fs::create_dir_all(&session_dir).unwrap();
+    let selected_path = session_dir.join("thread-1.jsonl");
+    write_rollout(&selected_path, "thread-1", "codex-auto-review", "/tmp/old");
+
+    let error = edit_selected_sessions_with_guard(
+        &profile,
+        &["thread-1".to_string()],
+        &SessionEdit {
+            provider: Some("cm".to_string()),
+            project: None,
+            title: None,
+            title_prefix: None,
+        },
+        &ApplyOptions { apply: true },
+        || bail!("Codex appears to be running"),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("Codex appears to be running"));
+    assert!(fs::read_to_string(&selected_path)
+        .unwrap()
+        .contains(r#""model_provider":"codex-auto-review""#));
 }
 
 fn write_rollout(path: &std::path::Path, id: &str, provider: &str, cwd: &str) {

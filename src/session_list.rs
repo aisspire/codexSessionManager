@@ -103,9 +103,8 @@ pub fn list_sessions(
                 archived: thread.archived || meta_archived,
                 favorite,
                 updated_at: thread.updated_at.clone(),
-                rollout_path: non_empty(thread.rollout_path.clone()).or_else(|| {
-                    meta.map(|(m, _)| m.path.display().to_string())
-                }),
+                rollout_path: non_empty(thread.rollout_path.clone())
+                    .or_else(|| meta.map(|(m, _)| m.path.display().to_string())),
                 in_session_index: index.is_some(),
             }
         })

@@ -124,7 +124,12 @@ fn lists_sessions_from_archived_rollout_directory_as_archived() {
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
     let active_rollout_path = profile.sessions_dir().join("active-1.jsonl");
-    create_rollout(&active_rollout_path, "active-1", "/mnt/e/code/project-a", "cm");
+    create_rollout(
+        &active_rollout_path,
+        "active-1",
+        "/mnt/e/code/project-a",
+        "cm",
+    );
     let archived_rollout_path = profile
         .archived_sessions_dir()
         .join("rollout-2026-05-06T20-43-11-archived-1.jsonl");

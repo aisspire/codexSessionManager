@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::backup_store::{self, BackupTrigger};
 use crate::path_map::path_buf_for_current_os;
 use crate::profile::CodexProfile;
 use crate::rollout::read_all_rollout_meta;
@@ -21,9 +22,7 @@ pub struct SessionApplyOptions {
 
 impl Default for SessionApplyOptions {
     fn default() -> Self {
-        Self {
-            apply: false,
-        }
+        Self { apply: false }
     }
 }
 
@@ -34,6 +33,8 @@ pub struct SessionMutationReport {
     pub requested_ids: Vec<String>,
     pub sqlite_rows: usize,
     pub index_entries: usize,
+    pub backup_manifests: Vec<String>,
+    pub warnings: Vec<String>,
     pub trash_manifest_path: Option<String>,
     pub trash_manifest: Option<TrashManifest>,
 }
@@ -47,6 +48,9 @@ impl SessionMutationReport {
             format!("sqlite rows: {}", self.sqlite_rows),
             format!("session_index entries: {}", self.index_entries),
         ];
+        if !self.backup_manifests.is_empty() {
+            lines.push(format!("backup manifests: {}", self.backup_manifests.len()));
+        }
         if let Some(trash_manifest_path) = &self.trash_manifest_path {
             lines.push(format!("trash manifest: {trash_manifest_path}"));
         }
@@ -128,6 +132,8 @@ where
         sqlite_rows: 0,
         index_entries: 0,
         trash_manifest_path: None,
+        backup_manifests: Vec::new(),
+        warnings: Vec::new(),
         trash_manifest: None,
     };
 
@@ -148,19 +154,17 @@ pub fn delete_sessions_with_guard<F>(
 where
     F: FnOnce() -> Result<()>,
 {
-    let db = StateDb::open(&profile.state_db_path())?;
-    let threads = db.read_threads()?;
-    let selected = threads
-        .into_iter()
-        .filter(|thread| ids.iter().any(|id| id == &thread.id))
-        .collect::<Vec<_>>();
+    let threads = read_threads_if_present(profile)?;
+    let selected = selected_threads_for_delete(profile, ids, &threads)?;
 
     let mut report = SessionMutationReport {
         action: "delete sessions to trash".to_string(),
         applied: options.apply,
         requested_ids: ids.to_vec(),
         sqlite_rows: selected.iter().filter(|thread| !thread.archived).count(),
-        index_entries: 0,
+        index_entries: count_session_index_entries(&profile.session_index_path(), ids)?,
+        backup_manifests: Vec::new(),
+        warnings: Vec::new(),
         trash_manifest_path: None,
         trash_manifest: None,
     };
@@ -171,12 +175,24 @@ where
 
     guard()?;
 
+    for id in ids {
+        let manifest = backup_store::create_session_backup(profile, id, BackupTrigger::Delete)?;
+        report
+            .backup_manifests
+            .push(manifest_path_from_backup(&manifest)?);
+    }
+
     let trash = trash::move_threads_to_trash(profile, &selected)?;
     report.trash_manifest_path = Some(trash.manifest_path.display().to_string());
     report.trash_manifest = Some(trash.manifest);
 
-    let mut db = StateDb::open(&profile.state_db_path())?;
-    report.sqlite_rows = db.set_archived(ids, true)?;
+    report.index_entries = remove_session_index_entries(&profile.session_index_path(), ids)?;
+    if profile.state_db_path().exists() {
+        let mut db = StateDb::open(&profile.state_db_path())?;
+        report.sqlite_rows = db.set_archived(ids, true)?;
+    } else {
+        report.sqlite_rows = 0;
+    }
     Ok(report)
 }
 
@@ -205,6 +221,8 @@ where
         requested_ids: ids.to_vec(),
         sqlite_rows,
         index_entries: 0,
+        backup_manifests: Vec::new(),
+        warnings: Vec::new(),
         trash_manifest_path: None,
         trash_manifest: None,
     };
@@ -220,6 +238,123 @@ where
     report.sqlite_rows = db.set_archived(ids, archived)?;
     touch_rollout_files(&rollout_paths)?;
     Ok(report)
+}
+
+fn read_threads_if_present(profile: &CodexProfile) -> Result<Vec<crate::state_db::ThreadRecord>> {
+    if !profile.state_db_path().exists() {
+        return Ok(Vec::new());
+    }
+    let db = StateDb::open(&profile.state_db_path())?;
+    db.read_threads()
+}
+
+fn selected_threads_for_delete(
+    profile: &CodexProfile,
+    ids: &[String],
+    threads: &[crate::state_db::ThreadRecord],
+) -> Result<Vec<crate::state_db::ThreadRecord>> {
+    let selected_ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut by_id = threads
+        .iter()
+        .filter(|thread| selected_ids.contains(thread.id.as_str()))
+        .map(|thread| (thread.id.clone(), thread.clone()))
+        .collect::<HashMap<_, _>>();
+
+    for id in ids {
+        if let Some(path) = backup_store::locate_unique_local_session(profile, id)? {
+            by_id
+                .entry(id.clone())
+                .and_modify(|thread| thread.rollout_path = Some(path.display().to_string()))
+                .or_insert_with(|| synthetic_thread_for_local_jsonl(id, path));
+        }
+    }
+
+    Ok(ids
+        .iter()
+        .filter_map(|id| by_id.get(id).cloned())
+        .collect::<Vec<_>>())
+}
+
+fn synthetic_thread_for_local_jsonl(id: &str, path: PathBuf) -> crate::state_db::ThreadRecord {
+    crate::state_db::ThreadRecord {
+        id: id.to_string(),
+        rollout_path: Some(path.display().to_string()),
+        cwd: None,
+        source: None,
+        model_provider: None,
+        model: None,
+        reasoning_effort: None,
+        has_user_event: true,
+        archived: false,
+        created_at: None,
+        updated_at: None,
+        created_at_ms: None,
+        updated_at_ms: None,
+        title: None,
+        first_user_message: None,
+    }
+}
+
+fn manifest_path_from_backup(manifest: &backup_store::SessionBackupManifest) -> Result<String> {
+    let session_path = manifest
+        .backup_session_path
+        .as_deref()
+        .context("session backup did not include a copied JSONL path")?;
+    let manifest_path = Path::new(session_path)
+        .parent()
+        .context("backup session path has no parent")?
+        .join("manifest.json");
+    Ok(manifest_path.display().to_string())
+}
+
+fn count_session_index_entries(path: &Path, ids: &[String]) -> Result<usize> {
+    if !path.exists() || ids.is_empty() {
+        return Ok(0);
+    }
+    let selected_ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("failed to read session index {}", path.display()))?;
+    Ok(text
+        .lines()
+        .filter(|line| index_line_matches_id(line, &selected_ids).unwrap_or(false))
+        .count())
+}
+
+fn remove_session_index_entries(path: &Path, ids: &[String]) -> Result<usize> {
+    if !path.exists() || ids.is_empty() {
+        return Ok(0);
+    }
+    let selected_ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("failed to read session index {}", path.display()))?;
+    let mut removed = 0;
+    let mut kept = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if index_line_matches_id(line, &selected_ids)? {
+            removed += 1;
+        } else {
+            kept.push(line.to_string());
+        }
+    }
+    let new_text = if kept.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", kept.join("\n"))
+    };
+    fs::write(path, new_text)
+        .with_context(|| format!("failed to write session index {}", path.display()))?;
+    Ok(removed)
+}
+
+fn index_line_matches_id(line: &str, ids: &HashSet<&str>) -> Result<bool> {
+    let value = serde_json::from_str::<serde_json::Value>(line)?;
+    Ok(value
+        .get("id")
+        .and_then(|value| value.as_str())
+        .is_some_and(|id| ids.contains(id)))
 }
 
 fn refreshable_rollout_paths(profile: &CodexProfile, ids: &[String]) -> Result<Vec<PathBuf>> {

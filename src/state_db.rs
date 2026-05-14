@@ -5,7 +5,7 @@ use rusqlite::{named_params, params_from_iter, Connection, ToSql};
 
 use crate::path_map::{apply_first_path_map, PathMap};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadRecord {
     pub id: String,
     pub rollout_path: Option<String>,
