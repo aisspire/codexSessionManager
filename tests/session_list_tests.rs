@@ -1,7 +1,10 @@
 use std::fs;
 
+use codex_session_manager::favorites::set_favorite;
 use codex_session_manager::profile::CodexProfile;
-use codex_session_manager::session_list::{list_sessions, ArchivedFilter, SessionListFilter};
+use codex_session_manager::session_list::{
+    list_sessions, ArchivedFilter, SessionListFilter, SessionScope,
+};
 use rusqlite::Connection;
 use tempfile::tempdir;
 
@@ -50,6 +53,7 @@ fn lists_sessions_filtered_by_project_provider_model_and_archived_state() {
     assert_eq!(sessions[0].provider.as_deref(), Some("cm"));
     assert_eq!(sessions[0].model.as_deref(), Some("gpt-5.5"));
     assert!(!sessions[0].archived);
+    assert!(!sessions[0].favorite);
     assert_eq!(sessions[0].title.as_deref(), Some("Active session"));
 
     let all = list_sessions(
@@ -105,6 +109,7 @@ fn lists_sessions_present_only_in_rollout_and_session_index() {
     );
     assert_eq!(sessions[0].provider.as_deref(), Some("cm"));
     assert_eq!(sessions[0].source.as_deref(), Some("cli"));
+    assert!(!sessions[0].favorite);
     assert_eq!(
         sessions[0].rollout_path.as_deref(),
         Some(rollout_path.to_str().unwrap())
@@ -148,6 +153,106 @@ fn lists_sessions_from_archived_rollout_directory_as_archived() {
         sessions[0].rollout_path.as_deref(),
         Some(archived_rollout_path.to_str().unwrap())
     );
+}
+
+#[test]
+fn favorite_scope_returns_only_favorite_sessions() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    set_favorite(&profile, "archived-1", true).unwrap();
+
+    let sessions = list_sessions(
+        &profile,
+        &SessionListFilter {
+            archived: SessionScope::Favorite,
+            ..SessionListFilter::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "archived-1");
+    assert!(sessions[0].favorite);
+}
+
+#[test]
+fn jsonl_only_sessions_can_be_marked_favorite() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let rollout_path = profile.sessions_dir().join("jsonl-only.jsonl");
+    create_rollout(&rollout_path, "jsonl-only", "/mnt/e/code/jsonl-only", "cm");
+    set_favorite(&profile, "jsonl-only", true).unwrap();
+
+    let sessions = list_sessions(
+        &profile,
+        &SessionListFilter {
+            archived: SessionScope::Favorite,
+            ..SessionListFilter::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "jsonl-only");
+    assert!(sessions[0].favorite);
+    assert_eq!(
+        sessions[0].rollout_path.as_deref(),
+        Some(rollout_path.to_str().unwrap())
+    );
+}
+
+#[test]
+fn title_priority_is_index_then_sqlite_then_first_user_message() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+
+    fs::write(
+        profile.session_index_path(),
+        concat!(
+            r#"{"id":"active-1","thread_name":"Index title","updated_at":"2026-05-06T00:00:00Z"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let with_index = list_sessions(
+        &profile,
+        &SessionListFilter {
+            archived: ArchivedFilter::All,
+            search: Some("active-1".to_string()),
+            ..SessionListFilter::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(with_index[0].title.as_deref(), Some("Index title"));
+
+    fs::write(profile.session_index_path(), "").unwrap();
+    let with_sqlite = list_sessions(
+        &profile,
+        &SessionListFilter {
+            archived: ArchivedFilter::All,
+            search: Some("active-1".to_string()),
+            ..SessionListFilter::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(with_sqlite[0].title.as_deref(), Some("SQLite title"));
+
+    let conn = Connection::open(profile.state_db_path()).unwrap();
+    conn.execute("UPDATE threads SET title = NULL WHERE id = 'active-1'", [])
+        .unwrap();
+    let with_first_message = list_sessions(
+        &profile,
+        &SessionListFilter {
+            archived: ArchivedFilter::All,
+            search: Some("active-1".to_string()),
+            ..SessionListFilter::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(with_first_message[0].title.as_deref(), Some("hello"));
 }
 
 fn create_state_db(path: &std::path::Path) {

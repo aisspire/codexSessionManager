@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::favorites;
 use crate::profile::CodexProfile;
 use crate::rollout::read_all_rollout_meta;
 use crate::session_index::read_session_index;
@@ -10,12 +11,15 @@ use crate::state_db::StateDb;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ArchivedFilter {
+pub enum SessionScope {
     Active,
     Archived,
+    Favorite,
     #[default]
     All,
 }
+
+pub type ArchivedFilter = SessionScope;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListFilter {
@@ -23,7 +27,7 @@ pub struct SessionListFilter {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub source: Option<String>,
-    pub archived: ArchivedFilter,
+    pub archived: SessionScope,
     pub search: Option<String>,
 }
 
@@ -37,6 +41,7 @@ pub struct SessionSummary {
     pub model: Option<String>,
     pub source: Option<String>,
     pub archived: bool,
+    pub favorite: bool,
     pub updated_at: Option<String>,
     pub rollout_path: Option<String>,
     pub in_session_index: bool,
@@ -62,6 +67,7 @@ pub fn list_sessions(
         .into_iter()
         .map(|entry| (entry.id.clone(), entry))
         .collect::<HashMap<_, _>>();
+    let favorite_ids = favorites::favorite_ids(profile)?;
 
     let thread_ids = threads
         .iter()
@@ -73,6 +79,7 @@ pub fn list_sessions(
             let meta = metas_by_id.get(&thread.id);
             let index = index_by_id.get(&thread.id);
             let meta_archived = meta.is_some_and(|(_, archived)| *archived);
+            let favorite = favorite_ids.contains(&thread.id);
             SessionSummary {
                 id: thread.id.clone(),
                 title: index
@@ -94,6 +101,7 @@ pub fn list_sessions(
                     .clone()
                     .or_else(|| meta.and_then(|(m, _)| m.source.clone())),
                 archived: thread.archived || meta_archived,
+                favorite,
                 updated_at: thread.updated_at.clone(),
                 rollout_path: non_empty(thread.rollout_path.clone()).or_else(|| {
                     meta.map(|(m, _)| m.path.display().to_string())
@@ -113,6 +121,7 @@ pub fn list_sessions(
                     let id = meta.id.clone().unwrap_or_default();
                     let index = index_by_id.get(&id);
                     SessionSummary {
+                        favorite: favorite_ids.contains(&id),
                         id,
                         title: index.and_then(|entry| entry.thread_name.clone()),
                         first_user_message: None,
@@ -141,8 +150,9 @@ pub fn list_sessions(
 
 fn matches_filter(session: &SessionSummary, filter: &SessionListFilter) -> bool {
     match filter.archived {
-        ArchivedFilter::Active if session.archived => return false,
-        ArchivedFilter::Archived if !session.archived => return false,
+        SessionScope::Active if session.archived => return false,
+        SessionScope::Archived if !session.archived => return false,
+        SessionScope::Favorite if !session.favorite => return false,
         _ => {}
     }
 

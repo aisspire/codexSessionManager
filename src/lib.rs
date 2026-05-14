@@ -6,12 +6,14 @@
 pub mod backup;
 pub mod cli;
 pub mod db_repair;
+pub mod favorites;
 pub mod migrate;
 pub mod path_map;
 pub mod profile;
 pub mod rollout;
 pub mod safety;
 pub mod scan;
+pub mod settings;
 pub mod session_index;
 pub mod session_list;
 pub mod session_ops;
