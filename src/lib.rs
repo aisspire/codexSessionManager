@@ -11,6 +11,7 @@ pub mod favorites;
 pub mod migrate;
 pub mod path_map;
 pub mod profile;
+pub mod restore;
 pub mod rollout;
 pub mod safety;
 pub mod scan;

@@ -178,6 +178,30 @@ pub fn preview_database_repairs(profile: &CodexProfile) -> Result<DatabaseRepair
     })
 }
 
+pub fn preview_database_sync_from_local(profile: &CodexProfile) -> Result<DatabaseRepairPreview> {
+    preview_database_repairs(profile)
+}
+
+pub fn apply_database_sync_from_local(profile: &CodexProfile) -> Result<DatabaseRepairApplyReport> {
+    apply_database_sync_from_local_with_guard(profile, safety::ensure_codex_not_running)
+}
+
+pub fn apply_database_sync_from_local_with_guard<F>(
+    profile: &CodexProfile,
+    guard: F,
+) -> Result<DatabaseRepairApplyReport>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let preview = preview_database_sync_from_local(profile)?;
+    let selected = preview
+        .items
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    apply_database_repairs_with_guard(profile, &DatabaseRepairOptions { selected }, guard)
+}
+
 pub fn apply_database_repairs(
     profile: &CodexProfile,
     options: &DatabaseRepairOptions,

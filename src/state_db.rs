@@ -234,6 +234,51 @@ impl StateDb {
             .context("failed to insert repaired thread row")
     }
 
+    pub fn upsert_restored_thread(&mut self, thread: &ThreadRecord) -> Result<usize> {
+        let existing: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM threads WHERE id = ?1",
+            [&thread.id],
+            |row| row.get(0),
+        )?;
+        if existing == 0 {
+            return self.insert_repaired_thread(thread);
+        }
+
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            r#"
+            UPDATE threads
+            SET
+                rollout_path = :rollout_path,
+                cwd = :cwd,
+                source = :source,
+                model_provider = :model_provider,
+                title = :title,
+                has_user_event = :has_user_event,
+                archived = :archived,
+                first_user_message = :first_user_message,
+                model = :model,
+                reasoning_effort = :reasoning_effort
+            WHERE id = :id
+            "#,
+            named_params! {
+                ":id": thread.id,
+                ":rollout_path": thread.rollout_path,
+                ":cwd": thread.cwd,
+                ":source": thread.source,
+                ":model_provider": thread.model_provider,
+                ":title": thread.title,
+                ":has_user_event": if thread.has_user_event { 1 } else { 0 },
+                ":archived": if thread.archived { 1 } else { 0 },
+                ":first_user_message": thread.first_user_message,
+                ":model": thread.model,
+                ":reasoning_effort": thread.reasoning_effort,
+            },
+        )?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn update_rollout_path(&mut self, id: &str, rollout_path: &str) -> Result<usize> {
         self.conn
             .execute(

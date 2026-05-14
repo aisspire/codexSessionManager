@@ -2,12 +2,19 @@
 
 use std::process::Command;
 
+use codex_session_manager::backup_store::{
+    self, BackupDeleteReport, SessionBackupSummary,
+};
 use codex_session_manager::db_repair::{
     self, DatabaseRepairApplyReport, DatabaseRepairOptions, DatabaseRepairPreview,
 };
+use codex_session_manager::favorites::{self, FavoritesFile};
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
 use codex_session_manager::path_map::PathMap;
 use codex_session_manager::profile::CodexProfile;
+use codex_session_manager::restore::{self, RestorePreview, RestoreReport, RestoreSessionOptions};
+use codex_session_manager::safety;
+use codex_session_manager::settings::{self, AppSettings};
 use codex_session_manager::session_list::{self, SessionListFilter, SessionSummary};
 use codex_session_manager::session_ops::{self, SessionApplyOptions, SessionMutationReport};
 use serde::Deserialize;
@@ -30,6 +37,75 @@ fn list_sessions(
 ) -> Result<Vec<SessionSummary>, String> {
     let profile = build_profile(profile)?;
     session_list::list_sessions(&profile, &filter).map_err(format_error)
+}
+
+#[tauri::command]
+fn load_settings(profile: ProfileInput) -> Result<AppSettings, String> {
+    let profile = build_profile(profile)?;
+    settings::load_settings(&profile).map_err(format_error)
+}
+
+#[tauri::command]
+fn save_settings(profile: ProfileInput, settings: AppSettings) -> Result<AppSettings, String> {
+    let profile = build_profile(profile)?;
+    settings::save_settings(&profile, &settings).map_err(format_error)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+fn list_session_backups(profile: ProfileInput) -> Result<Vec<SessionBackupSummary>, String> {
+    let profile = build_profile(profile)?;
+    backup_store::list_session_backups(&profile).map_err(format_error)
+}
+
+#[tauri::command]
+fn preview_restore_session_backup(
+    profile: ProfileInput,
+    backup_id: String,
+) -> Result<RestorePreview, String> {
+    let profile = build_profile(profile)?;
+    restore::preview_restore_session_backup(&profile, &backup_id).map_err(format_error)
+}
+
+#[tauri::command]
+fn restore_session_backup(
+    profile: ProfileInput,
+    backup_id: String,
+    options: RestoreSessionOptions,
+) -> Result<RestoreReport, String> {
+    let profile = build_profile(profile)?;
+    restore::restore_session_backup(&profile, &backup_id, &options).map_err(format_error)
+}
+
+#[tauri::command]
+fn delete_session_backup(
+    profile: ProfileInput,
+    backup_id: String,
+    confirmed_last_archive: bool,
+) -> Result<BackupDeleteReport, String> {
+    let profile = build_profile(profile)?;
+    backup_store::delete_backup_snapshot_with_confirmation(
+        &profile,
+        &backup_id,
+        confirmed_last_archive,
+    )
+    .map_err(format_error)
+}
+
+#[tauri::command]
+fn toggle_favorite(profile: ProfileInput, session_id: String) -> Result<FavoritesFile, String> {
+    let profile = build_profile(profile)?;
+    favorites::toggle_favorite(&profile, &session_id).map_err(format_error)
+}
+
+#[tauri::command]
+fn set_favorite(
+    profile: ProfileInput,
+    session_id: String,
+    favorite: bool,
+) -> Result<FavoritesFile, String> {
+    let profile = build_profile(profile)?;
+    favorites::set_favorite(&profile, &session_id, favorite).map_err(format_error)
 }
 
 #[tauri::command]
@@ -124,6 +200,21 @@ fn apply_database_repairs(
 }
 
 #[tauri::command]
+fn detect_codex_running() -> bool {
+    safety::detect_codex_processes()
+        .map(|processes| !processes.is_empty())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn apply_database_sync_from_local(
+    profile: ProfileInput,
+) -> Result<DatabaseRepairApplyReport, String> {
+    let profile = build_profile(profile)?;
+    db_repair::apply_database_sync_from_local(&profile).map_err(format_error)
+}
+
+#[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     if !is_allowed_external_url(&url) {
         return Err("external URL is not allowed".to_string());
@@ -194,6 +285,14 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             list_sessions,
+            load_settings,
+            save_settings,
+            list_session_backups,
+            preview_restore_session_backup,
+            restore_session_backup,
+            delete_session_backup,
+            toggle_favorite,
+            set_favorite,
             archive_sessions,
             active_sessions,
             delete_sessions,
@@ -201,6 +300,8 @@ fn main() {
             edit_selected_sessions,
             preview_database_repairs,
             apply_database_repairs,
+            detect_codex_running,
+            apply_database_sync_from_local,
             open_external_url
         ])
         .run(tauri::generate_context!())

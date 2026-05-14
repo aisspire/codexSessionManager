@@ -2,7 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use codex_session_manager::db_repair::{
-    apply_database_repairs_with_guard, preview_database_repairs, DatabaseRepairKind,
+    apply_database_repairs_with_guard, apply_database_sync_from_local_with_guard,
+    preview_database_repairs, preview_database_sync_from_local, DatabaseRepairKind,
     DatabaseRepairOptions,
 };
 use codex_session_manager::profile::CodexProfile;
@@ -163,6 +164,56 @@ fn normalizes_wsl_mount_rollout_path_to_current_jsonl_path() {
     );
 }
 
+#[test]
+fn database_sync_from_local_auto_applies_all_applicable_repairs() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let jsonl_only = profile.sessions_dir().join("jsonl-only.jsonl");
+    create_rollout(&jsonl_only, "jsonl-only", "E:\\code\\jsonl", "cm");
+    let broken = profile.sessions_dir().join("broken.jsonl");
+    create_rollout(&broken, "broken", "E:\\code\\broken", "cm");
+    insert_thread(
+        &profile.state_db_path(),
+        "broken",
+        "",
+        false,
+        "E:\\code\\broken",
+        "cm",
+    );
+    insert_thread(
+        &profile.state_db_path(),
+        "sqlite-only",
+        "missing.jsonl",
+        false,
+        "E:\\code\\sqlite-only",
+        "cm",
+    );
+
+    let preview = preview_database_sync_from_local(&profile).unwrap();
+    assert!(preview
+        .items
+        .iter()
+        .any(|item| item.kind == DatabaseRepairKind::MissingThreadRow));
+    assert!(preview
+        .items
+        .iter()
+        .any(|item| item.kind == DatabaseRepairKind::SqliteOnlyThread && !item.applicable));
+
+    let report = apply_database_sync_from_local_with_guard(&profile, || Ok(())).unwrap();
+
+    assert_eq!(report.applied_items, 2);
+    assert_thread_exists(&profile.state_db_path(), "jsonl-only");
+    assert_eq!(
+        read_thread_values(&profile.state_db_path(), "broken")
+            .rollout_path
+            .as_deref(),
+        Some(broken.to_str().unwrap())
+    );
+    assert!(!report.skipped_items.is_empty());
+    assert!(report.backup_dir.is_some());
+}
+
 fn create_state_db(path: &Path) {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch(
@@ -258,4 +309,14 @@ fn read_thread_values(db_path: &Path, id: &str) -> ThreadValues {
         },
     )
     .unwrap()
+}
+
+fn assert_thread_exists(db_path: &Path, id: &str) {
+    let conn = Connection::open(db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
 }

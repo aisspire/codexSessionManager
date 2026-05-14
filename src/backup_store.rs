@@ -253,6 +253,15 @@ pub fn delete_backup_snapshot(profile: &CodexProfile, backup_id: &str) -> Result
     delete_backup_snapshot_with_confirmation(profile, backup_id, true).map(|_| ())
 }
 
+pub fn read_session_backup_manifest(
+    profile: &CodexProfile,
+    backup_id: &str,
+) -> Result<(SessionBackupManifest, PathBuf)> {
+    let dir = backup_dir_from_id(profile, backup_id)?;
+    let manifest_path = dir.join("manifest.json");
+    Ok((read_manifest(&manifest_path)?, manifest_path))
+}
+
 pub fn delete_backup_snapshot_with_confirmation(
     profile: &CodexProfile,
     backup_id: &str,
