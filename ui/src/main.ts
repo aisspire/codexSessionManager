@@ -9,7 +9,7 @@ import {
 import { buildProjectGroups, type ProjectGroup } from "./sessionGroups";
 import "./styles.css";
 
-type AppPage = "batch-edit" | "session-management" | "database-repair";
+type AppPage = "batch-edit" | "session-management" | "restore-backups" | "database-repair";
 type SessionScope = "active" | "archived" | "favorite" | "all";
 type SessionCommand =
   | "archive_sessions"
@@ -111,12 +111,39 @@ interface DatabaseSyncSettings {
 
 interface SessionBackupSummary {
   session_id: string;
+  title?: string;
+  project?: string;
   local_exists: boolean;
   snapshots: SessionBackupSnapshot[];
 }
 
 interface SessionBackupSnapshot {
+  backup_id: string;
+  created_at_unix: number;
+  trigger: BackupTrigger;
+  manifest_path: string;
   size_bytes: number;
+}
+
+type BackupTrigger = "delete" | "edit" | "manual" | "database-repair" | "restore-preflight";
+
+interface RestorePreview {
+  backup_id: string;
+  session_id: string;
+  restore_session_path?: string;
+  overwrites_existing: boolean;
+  index_entries: number;
+  favorite: boolean;
+}
+
+interface RestoreReport {
+  applied: boolean;
+  files_restored: number;
+  restored_session_path?: string;
+  index_entries: number;
+  sqlite_rows: number;
+  preflight_backup_manifest?: string;
+  favorite_restored: boolean;
 }
 
 type DetailEditField = "title" | "project" | "provider";
@@ -133,6 +160,7 @@ interface DetailEditState {
 const pageLabels: Record<AppPage, string> = {
   "batch-edit": "批量编辑",
   "session-management": "会话管理",
+  "restore-backups": "恢复备份",
   "database-repair": "数据库修复",
 };
 
@@ -180,6 +208,12 @@ const state = {
   settingsDraft: null as AppSettings | null,
   settingsOpen: false,
   backupSummary: null as { sessions: number; snapshots: number; bytes: number } | null,
+  backupRows: [] as SessionBackupSummary[],
+  selectedSnapshotBySession: {} as Record<string, number>,
+  restorePreview: null as RestorePreview | null,
+  syncStatus: "",
+  codexWasRunning: null as boolean | null,
+  autoSyncInFlight: false,
   activeId: "",
   detailOpen: false,
   status: "就绪",
@@ -200,7 +234,11 @@ function render(options: RenderOptions = {}) {
   const groups = buildProjectGroups(state.sessions);
   const active = state.sessions.find((session) => session.id === state.activeId);
   const mainContent =
-    state.activePage === "database-repair" ? repairTable() : groupedTable(groups);
+    state.activePage === "database-repair"
+      ? repairTable()
+      : state.activePage === "restore-backups"
+        ? backupTable()
+        : groupedTable(groups);
 
   appRoot.innerHTML = `
     <main class="shell">
@@ -232,6 +270,7 @@ function navigation() {
       <nav class="page-nav" aria-label="功能页面">
         ${pageNavButton("batch-edit")}
         ${pageNavButton("session-management")}
+        ${pageNavButton("restore-backups")}
         ${pageNavButton("database-repair")}
       </nav>
       ${settingsPanel()}
@@ -268,10 +307,21 @@ function pageHeader() {
       ? "批量修改已选会话的名称前缀、提供方和项目路径。"
       : state.activePage === "session-management"
         ? "归档、活动、置顶或删除已选会话。"
-        : "预览 Codex 数据库与 JSONL 文件之间的不一致项，勾选后执行保守修复。";
-  const total = state.activePage === "database-repair" ? state.repairItems.length : state.sessions.length;
+        : state.activePage === "restore-backups"
+          ? "按会话查看备份快照，恢复缺失或覆盖前自动创建预检备份。"
+          : "预览 Codex 数据库与 JSONL 文件之间的不一致项，勾选后执行保守修复。";
+  const total =
+    state.activePage === "database-repair"
+      ? state.repairItems.length
+      : state.activePage === "restore-backups"
+        ? state.backupRows.length
+        : state.sessions.length;
   const selected =
-    state.activePage === "database-repair" ? state.selectedRepairIds.size : state.selectedIds.size;
+    state.activePage === "database-repair"
+      ? state.selectedRepairIds.size
+      : state.activePage === "restore-backups"
+        ? state.backupRows.reduce((count, row) => count + row.snapshots.length, 0)
+        : state.selectedIds.size;
   const totalLabel = state.activePage === "database-repair" ? "项目" : "会话";
   return `
     <header class="page-header">
@@ -338,6 +388,9 @@ function filterBar() {
   if (state.activePage === "database-repair") {
     return repairFilterBar();
   }
+  if (state.activePage === "restore-backups") {
+    return backupFilterBar();
+  }
 
   return `
     <section class="toolbar filter-toolbar" aria-label="搜索筛选">
@@ -367,9 +420,21 @@ function repairFilterBar() {
   `;
 }
 
+function backupFilterBar() {
+  return `
+    <section class="toolbar repair-filter-toolbar" aria-label="备份范围">
+      <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
+      <button id="refresh" class="primary">刷新备份</button>
+    </section>
+  `;
+}
+
 function actionBar() {
   if (state.activePage === "database-repair") {
     return repairActionBar();
+  }
+  if (state.activePage === "restore-backups") {
+    return backupActionBar();
   }
   return state.activePage === "batch-edit" ? batchEditBar() : sessionManagementBar();
 }
@@ -382,7 +447,18 @@ function repairActionBar() {
       <div class="action-buttons">
         <button id="select-all-repairs" ${applicable === 0 ? "disabled" : ""}>全选可修复</button>
         <button id="apply-repairs" class="primary" ${state.selectedRepairIds.size === 0 ? "disabled" : ""}>应用已选修复</button>
+        <button id="sync-database-local">按本地文件同步数据库</button>
       </div>
+      <div class="sync-note">${escapeHtml(state.syncStatus)}</div>
+    </section>
+  `;
+}
+
+function backupActionBar() {
+  return `
+    <section class="toolbar action-toolbar management-toolbar" aria-label="备份操作">
+      <button id="refresh-backups" class="primary">刷新备份</button>
+      <span class="repair-note">红色行表示本地 JSONL 已缺失。删除这种会话最后一个快照时会要求确认。</span>
     </section>
   `;
 }
@@ -472,6 +548,48 @@ function repairTable() {
         }
       </div>
     </section>
+  `;
+}
+
+function backupTable() {
+  return `
+    <section class="table-shell repair-table-shell" aria-label="备份列表">
+      <div class="backup-table">
+        ${
+          state.backupRows.length
+            ? state.backupRows.map(backupRow).join("")
+            : `<div class="empty-list">暂无备份快照</div>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function backupRow(row: SessionBackupSummary) {
+  const snapshotIndex = normalizedSnapshotIndex(row);
+  const snapshot = row.snapshots[snapshotIndex];
+  const missing = !row.local_exists;
+  return `
+    <div class="backup-row ${missing ? "missing" : ""}">
+      <div class="backup-main">
+        <strong title="${escapeHtml(row.title || row.session_id)}">${escapeHtml(row.title || row.session_id)}</strong>
+        <span title="${escapeHtml(row.project || "")}">${escapeHtml(row.project || "")}</span>
+        <code title="${escapeHtml(row.session_id)}">${escapeHtml(row.session_id)}</code>
+      </div>
+      <div class="backup-facts">
+        <span>${missing ? "本地缺失" : "本地存在"}</span>
+        <span>${row.snapshots.length} 个快照</span>
+        <span>${snapshot ? formatUnixTime(snapshot.created_at_unix) : ""}</span>
+        <span>${snapshot ? backupTriggerLabel(snapshot.trigger) : ""}</span>
+      </div>
+      <div class="backup-controls">
+        <button data-backup-prev="${escapeHtml(row.session_id)}" ${snapshotIndex <= 0 ? "disabled" : ""}>上一个</button>
+        <span>${row.snapshots.length ? `${snapshotIndex + 1} / ${row.snapshots.length}` : "0 / 0"}</span>
+        <button data-backup-next="${escapeHtml(row.session_id)}" ${snapshotIndex >= row.snapshots.length - 1 ? "disabled" : ""}>下一个</button>
+        <button data-backup-restore="${escapeHtml(row.session_id)}" ${snapshot ? "" : "disabled"} class="primary">恢复</button>
+        <button data-backup-delete="${escapeHtml(row.session_id)}" ${snapshot ? "" : "disabled"} class="danger">删除快照</button>
+      </div>
+    </div>
   `;
 }
 
@@ -586,6 +704,8 @@ function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
   bindFilters();
   if (state.activePage === "database-repair") {
     bindRepairEvents();
+  } else if (state.activePage === "restore-backups") {
+    bindBackupEvents();
   } else {
     bindBatchEditInputs();
     bindGlobalSelection();
@@ -596,7 +716,11 @@ function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
   bindSettingsEvents();
 
   document.querySelector("#refresh")?.addEventListener("click", () => {
-    state.activePage === "database-repair" ? refreshDatabaseRepairs() : refresh();
+    state.activePage === "database-repair"
+      ? refreshDatabaseRepairs()
+      : state.activePage === "restore-backups"
+        ? refreshBackups()
+        : refresh();
   });
   document.querySelector("#preview-selected-edit")?.addEventListener("click", () => editSelected(false));
   document.querySelector("#apply-selected-edit")?.addEventListener("click", () => editSelected(true));
@@ -633,12 +757,35 @@ function bindRepairEvents() {
     toggleAllRepairs(true);
   });
   document.querySelector("#apply-repairs")?.addEventListener("click", applySelectedRepairs);
+  document.querySelector("#sync-database-local")?.addEventListener("click", applyDatabaseSyncFromLocal);
   document.querySelectorAll<HTMLInputElement>("[data-select-repair]").forEach((checkbox) => {
     checkbox.addEventListener("change", () => {
       const id = checkbox.dataset.selectRepair || "";
       checkbox.checked ? state.selectedRepairIds.add(id) : state.selectedRepairIds.delete(id);
       render({ preserveTableScroll: true });
     });
+  });
+}
+
+function bindBackupEvents() {
+  document.querySelector("#refresh-backups")?.addEventListener("click", refreshBackups);
+  document.querySelectorAll<HTMLElement>("[data-backup-prev], [data-backup-next]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const sessionId = button.dataset.backupPrev || button.dataset.backupNext || "";
+      const row = state.backupRows.find((candidate) => candidate.session_id === sessionId);
+      if (!row) return;
+      const current = normalizedSnapshotIndex(row);
+      state.selectedSnapshotBySession[sessionId] = button.dataset.backupPrev
+        ? Math.max(0, current - 1)
+        : Math.min(row.snapshots.length - 1, current + 1);
+      render({ preserveTableScroll: true });
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-backup-restore]").forEach((button) => {
+    button.addEventListener("click", () => restoreSelectedBackup(button.dataset.backupRestore || ""));
+  });
+  document.querySelectorAll<HTMLElement>("[data-backup-delete]").forEach((button) => {
+    button.addEventListener("click", () => deleteSelectedBackup(button.dataset.backupDelete || ""));
   });
 }
 
@@ -649,6 +796,9 @@ function bindPageSwitching() {
       render({ preserveTableScroll: true });
       if (state.activePage === "database-repair" && state.repairItems.length === 0) {
         refreshDatabaseRepairs();
+      }
+      if (state.activePage === "restore-backups" && state.backupRows.length === 0) {
+        refreshBackups();
       }
     });
   });
@@ -1123,6 +1273,124 @@ async function applySelectedRepairs() {
   });
 }
 
+async function refreshBackups() {
+  await run(async () => {
+    state.backupRows = await invoke<SessionBackupSummary[]>("list_session_backups", {
+      profile: state.profile,
+    });
+    state.backupSummary = summarizeBackups(state.backupRows);
+    state.restorePreview = null;
+    state.status = `已加载 ${state.backupRows.length} 个会话备份`;
+  });
+}
+
+async function restoreSelectedBackup(sessionId: string) {
+  const snapshot = selectedSnapshot(sessionId);
+  if (!snapshot) return;
+  await run(async () => {
+    const preview = await invoke<RestorePreview>("preview_restore_session_backup", {
+      profile: state.profile,
+      backupId: snapshot.backup_id,
+    });
+    state.restorePreview = preview;
+    const overwriteText = preview.overwrites_existing ? "\n目标 JSONL 已存在，将先创建预检备份。" : "";
+    const favoriteText = preview.favorite ? "\n将恢复收藏状态。" : "";
+    const confirmed = window.confirm(
+      `恢复会话 ${preview.session_id}\n目标：${preview.restore_session_path || "无 JSONL 文件"}${overwriteText}${favoriteText}`,
+    );
+    if (!confirmed) return;
+    const report = await invoke<RestoreReport>("restore_session_backup", {
+      profile: state.profile,
+      backupId: snapshot.backup_id,
+      options: {
+        apply: true,
+        overwrite_existing: true,
+        restore_favorite: true,
+      },
+    });
+    state.status = formatRestoreReport(report);
+    state.backupRows = await invoke<SessionBackupSummary[]>("list_session_backups", {
+      profile: state.profile,
+    });
+    state.sessions = await invoke<SessionSummary[]>("list_sessions", {
+      profile: state.profile,
+      filter: state.filter,
+    });
+  });
+}
+
+async function deleteSelectedBackup(sessionId: string) {
+  const row = state.backupRows.find((candidate) => candidate.session_id === sessionId);
+  const snapshot = selectedSnapshot(sessionId);
+  if (!row || !snapshot) return;
+  const deletingLastMissingArchive = !row.local_exists && row.snapshots.length === 1;
+  if (deletingLastMissingArchive) {
+    const confirmed = window.confirm(
+      `这是 ${sessionId} 在本工具中的最后一个备份，且本地 JSONL 已缺失。确认永久删除这个快照？`,
+    );
+    if (!confirmed) return;
+  }
+  await run(async () => {
+    await invoke("delete_session_backup", {
+      profile: state.profile,
+      backupId: snapshot.backup_id,
+      confirmedLastArchive: deletingLastMissingArchive,
+    });
+    state.status = "备份快照已删除";
+    state.backupRows = await invoke<SessionBackupSummary[]>("list_session_backups", {
+      profile: state.profile,
+    });
+    state.backupSummary = summarizeBackups(state.backupRows);
+  });
+}
+
+async function applyDatabaseSyncFromLocal() {
+  if (!window.confirm("将按本地 JSONL 和 session_index 同步 SQLite。继续？")) return;
+  await run(async () => {
+    const report = await invoke<DatabaseRepairApplyReport>("apply_database_sync_from_local", {
+      profile: state.profile,
+    });
+    state.syncStatus = "已按本地文件同步 SQLite";
+    state.status = formatRepairApplyReport(report);
+    await refreshDatabaseRepairs();
+  });
+}
+
+async function pollCodexProcess() {
+  if (state.autoSyncInFlight || state.settings?.database_sync.mode !== "auto-when-codex-stops") {
+    return;
+  }
+  try {
+    const running = await invoke<boolean>("detect_codex_running");
+    if (state.codexWasRunning === true && !running) {
+      state.autoSyncInFlight = true;
+      const report = await invoke<DatabaseRepairApplyReport>("apply_database_sync_from_local", {
+        profile: state.profile,
+      });
+      state.syncStatus = `Codex 已停止，已同步 SQLite：${report.applied_items} 项`;
+      state.status = state.syncStatus;
+      if (state.activePage === "database-repair") {
+        const preview = await invoke<DatabaseRepairPreview>("preview_database_repairs", {
+          profile: state.profile,
+        });
+        state.repairItems = preview.items;
+        state.repairBackupNote = preview.backup_note;
+      }
+      render({ preserveTableScroll: true });
+    } else {
+      state.syncStatus = running ? "Codex 运行中，等待停止后同步" : "Codex 未运行";
+      if (state.activePage === "database-repair") {
+        render({ preserveTableScroll: true });
+      }
+    }
+    state.codexWasRunning = running;
+  } catch (error) {
+    state.syncStatus = `自动同步跳过：${String(error)}`;
+  } finally {
+    state.autoSyncInFlight = false;
+  }
+}
+
 async function run(task: () => Promise<void>) {
   try {
     state.status = "正在处理...";
@@ -1173,6 +1441,43 @@ function summarizeBackups(rows: SessionBackupSummary[]) {
       0,
     ),
   };
+}
+
+function normalizedSnapshotIndex(row: SessionBackupSummary) {
+  const requested = state.selectedSnapshotBySession[row.session_id] ?? 0;
+  if (row.snapshots.length === 0) return 0;
+  const normalized = Math.min(Math.max(requested, 0), row.snapshots.length - 1);
+  state.selectedSnapshotBySession[row.session_id] = normalized;
+  return normalized;
+}
+
+function selectedSnapshot(sessionId: string) {
+  const row = state.backupRows.find((candidate) => candidate.session_id === sessionId);
+  if (!row || row.snapshots.length === 0) return undefined;
+  return row.snapshots[normalizedSnapshotIndex(row)];
+}
+
+function formatUnixTime(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  return new Date(value * 1000).toLocaleString();
+}
+
+function backupTriggerLabel(trigger: BackupTrigger) {
+  const labels: Record<BackupTrigger, string> = {
+    delete: "删除前",
+    edit: "编辑前",
+    manual: "手动",
+    "database-repair": "数据库修复",
+    "restore-preflight": "恢复预检",
+  };
+  return labels[trigger];
+}
+
+function formatRestoreReport(report: RestoreReport) {
+  const target = report.restored_session_path ? ` · ${report.restored_session_path}` : "";
+  const preflight = report.preflight_backup_manifest ? " · 已创建覆盖前备份" : "";
+  const favorite = report.favorite_restored ? " · 已恢复收藏" : "";
+  return `已恢复 ${report.files_restored} 个文件 · 索引 ${report.index_entries} 条 · SQLite ${report.sqlite_rows} 行${favorite}${preflight}${target}`;
 }
 
 function optionalNumber(value: number | null | undefined) {
@@ -1246,7 +1551,7 @@ function repairKindLabel(kind: DatabaseRepairKind) {
 }
 
 function readTableScroll() {
-  const table = document.querySelector<HTMLElement>(".table, .repair-table");
+  const table = document.querySelector<HTMLElement>(".table, .repair-table, .backup-table");
   return {
     left: table?.scrollLeft ?? 0,
     top: table?.scrollTop ?? 0,
@@ -1254,7 +1559,7 @@ function readTableScroll() {
 }
 
 function restoreTableScroll(scroll: { left: number; top: number }) {
-  const table = document.querySelector<HTMLElement>(".table, .repair-table");
+  const table = document.querySelector<HTMLElement>(".table, .repair-table, .backup-table");
   if (!table) return;
   table.scrollLeft = scroll.left;
   table.scrollTop = scroll.top;
@@ -1280,3 +1585,6 @@ function escapeHtml(value: string) {
 
 render();
 void loadAppSettings(false);
+window.setInterval(() => {
+  void pollCodexProcess();
+}, 30_000);

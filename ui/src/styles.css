@@ -288,6 +288,13 @@ select {
   overflow-wrap: anywhere;
 }
 
+.sync-note {
+  grid-column: 1 / -1;
+  color: #607083;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .segmented {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -722,6 +729,104 @@ select {
 .repair-row.muted {
   color: #7a8795;
   background: #f8fafc;
+}
+
+.backup-table {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  background: #f3f6f8;
+}
+
+.backup-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.2fr) minmax(320px, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-width: 980px;
+  border: 1px solid #d9e2ea;
+  border-radius: 7px;
+  padding: 12px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(17 24 39 / 4%);
+}
+
+.backup-row.missing {
+  border-color: #e4b4b0;
+  background: #fff7f6;
+}
+
+.backup-main {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.backup-main strong,
+.backup-main span,
+.backup-main code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-main strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.backup-main span,
+.backup-main code {
+  color: #607083;
+  font-size: 12px;
+}
+
+.backup-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.backup-facts span {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #dde5ec;
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: #46576a;
+  background: #f8fafc;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-row.missing .backup-facts span:first-child {
+  border-color: #deb4af;
+  color: #8b3e39;
+  background: #f8e7e5;
+}
+
+.backup-controls {
+  display: grid;
+  grid-template-columns: auto 58px auto auto auto;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.backup-controls span {
+  color: #607083;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
 }
 
 .status {

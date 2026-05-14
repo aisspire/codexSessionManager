@@ -1,5 +1,22 @@
 # Codex Session Manager
 
+## 当前数据安全模型
+
+- `<CodexHome>/sessions/`、`<CodexHome>/archived_sessions/` 下的本地会话 JSONL 文件，以及 `<CodexHome>/session_index.jsonl`，被视为主要事实来源。
+- `<CodexHome>/state_5.sqlite` 被视为辅助索引。只要本地 JSONL 和索引证据足够明确，就可以从这些本地文件修复或同步 SQLite。
+- 编辑会话元数据和删除会话前会自动创建会话级备份。归档和取消归档不会自动创建备份。
+- 会话备份保存在 `<CodexHome>/backups/codex-session-manager/sessions/<session_id>/`。
+- 为了兼容旧行为，删除仍会把 JSONL 移入工具自己的回收区；面向用户的恢复入口则是“恢复备份”页面。
+
+## 备份恢复、设置与收藏
+
+- “恢复备份”页面按会话 ID 每行展示一组备份，包含标题、项目、会话 ID、最新备份时间、快照数量、本地文件是否存在，以及行内快照翻页。
+- 红色备份行表示本地 JSONL 已缺失。删除这类会话的最后一个备份快照时，需要额外确认。
+- 恢复备份会恢复 JSONL，合并缺失的 `session_index.jsonl` 条目，可选恢复收藏状态，并从恢复后的本地文件同步 SQLite。如果恢复会覆盖已有本地 JSONL，会先创建一个 `restore-preflight` 预检备份。
+- 收藏信息保存在 `<CodexHome>/codex-session-manager/favorites.json`，只按会话 ID 记录。收藏状态会跨归档、取消归档、删除和恢复保留。
+- 设置保存在 `<CodexHome>/codex-session-manager/settings.json`。备份设置包括最大存储空间、最长保留时间、最大快照数量、最小空闲空间保护，以及自动清理时是否跳过缺失本地会话的唯一备份。
+- 数据库同步可以在“数据库修复”页面手动运行。当同步模式设置为 `auto-when-codex-stops` 时，桌面端会轮询 Codex 进程状态，并在 Codex 从运行变为停止后执行一次 SQLite 同步。
+
 Codex Session Manager 是一个用于查看和整理 OpenAI Codex 本地会话的桌面工具。
 它把常用的会话查看、筛选、批量编辑、归档、设为活动、置顶和删除到回收区等操作放进一个简单的桌面界面里。
 
@@ -27,10 +44,14 @@ Codex 的本地会话信息分散在多个位置：
 - 将已归档会话设为活动。
 - 置顶会话，通过刷新 rollout 文件时间让会话更容易出现在较新的位置。
 - 删除会话到工具回收区，不直接永久删除。
+- 收藏会话，并通过“收藏”范围筛选快速查看重点会话。
+- 在“恢复备份”页面按会话查看、翻页、删除和恢复备份快照。
+- 在设置面板中管理备份保留策略和数据库自动同步策略。
 - 预览并保守修复数据库与 JSONL 文件之间的不一致，包括 JSONL-only 会话、不可用的 `rollout_path` 和归档状态偏差。
+- 按本地 JSONL 和 `session_index.jsonl` 手动同步 SQLite；也可以设置为 Codex 停止后自动同步一次。
 - 自动保存输入框内容、筛选条件和项目分组展开状态。
 
-当前版本暂时不提供通用的备份恢复界面。数据库修复在应用写入前会自动备份关键文件，但其他批量整理或删除操作前，仍建议自行保存重要数据。
+会话 JSONL 和 `session_index.jsonl` 是主要事实来源，SQLite 只是可修复的辅助索引。删除和编辑会话信息前会自动创建会话级备份；归档和取消归档不会自动创建备份。
 
 ## 运行环境
 
@@ -232,7 +253,7 @@ Linux:   ~/.codex
 - SQLite-only row：SQLite 中有会话行，但没有找到唯一对应 JSONL 文件。
 - 重复 JSONL：同一会话 ID 对应多个 JSONL 文件，需人工确认。
 
-应用修复前，软件会先检查 Codex 是否正在运行；检测到 Codex 可能正在使用同一份数据时会拒绝写入。写入前还会在 `<CodexHome>/backups/codex-session-manager-<timestamp>` 下备份关键文件，至少包括 `state_5.sqlite` 和 `session_index.jsonl`，并尽量包含 SQLite 的 WAL/SHM 文件。
+应用修复前，软件会先检查 Codex 是否正在运行；检测到 Codex 可能正在使用同一份数据时会拒绝写入。写入前会创建关键文件备份，至少包括 `state_5.sqlite` 和 `session_index.jsonl`，并尽量包含 SQLite 的 WAL/SHM 文件。会话级备份则保存在 `<CodexHome>/backups/codex-session-manager/sessions/<session_id>/`。
 
 数据库修复不会重写会话正文 JSONL，也不会删除 SQLite-only 行。
 
@@ -253,7 +274,7 @@ Windows 版桌面应用在执行归档、活动、置顶等文件操作时，会
 写入前建议关闭正在使用同一份数据的 Codex。
 应用会在归档、活动、删除和数据库修复等写入操作前检查 Codex 是否正在运行；检测到可能占用同一份本地数据时，会拒绝写入，避免两个程序同时修改造成状态混乱。
 
-数据库修复在写入前会自动备份 `state_5.sqlite`、`session_index.jsonl` 等关键文件。其他大批量整理或删除操作前，如果会话很重要，请先自行复制保存 `.codex` 中的关键数据。
+数据库修复在写入前会自动备份 `state_5.sqlite`、`session_index.jsonl` 等关键文件。编辑会话信息和删除会话前会自动创建会话级备份；恢复覆盖已有本地 JSONL 前也会先创建 `restore-preflight` 预检备份。对于特别重要的数据，执行大批量整理前仍可以额外自行复制保存 `.codex` 中的关键文件。
 
 ## 原理简述
 
