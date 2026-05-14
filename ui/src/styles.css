@@ -255,8 +255,37 @@ select {
 }
 
 .filter-toolbar {
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.filter-path-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  gap: 10px;
   align-items: end;
+  min-width: 0;
+}
+
+.filter-path-row .primary {
+  min-width: 76px;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: minmax(250px, 1.35fr) repeat(5, minmax(116px, 1fr));
+  gap: 10px;
+  align-items: end;
+  min-width: 0;
+}
+
+.filter-status {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: #516071;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .action-toolbar {
@@ -300,6 +329,14 @@ select {
   grid-template-columns: repeat(4, 1fr);
   gap: 6px;
   min-width: 0;
+}
+
+.segmented button {
+  min-width: 0;
+  padding-inline: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .action-buttons {
@@ -1003,8 +1040,8 @@ dd {
     grid-template-columns: minmax(168px, 22vw) minmax(0, 1fr);
   }
 
-  .filter-toolbar {
-    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  .filter-grid {
+    grid-template-columns: minmax(240px, 1.2fr) repeat(3, minmax(126px, 1fr));
   }
 
   .action-toolbar {
@@ -1045,6 +1082,18 @@ dd {
   .repair-filter-toolbar,
   .repair-action-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .filter-path-row {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .filter-status {
+    grid-column: 1 / -1;
   }
 
   .workbench {

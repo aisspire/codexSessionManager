@@ -394,19 +394,26 @@ function filterBar() {
 
   return `
     <section class="toolbar filter-toolbar" aria-label="搜索筛选">
-      <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
-      <label>项目<input id="project" value="${escapeHtml(state.filter.project ?? "")}" /></label>
-      <label>提供方<input id="provider" value="${escapeHtml(state.filter.provider ?? "")}" /></label>
-      <label>模型<input id="model" value="${escapeHtml(state.filter.model ?? "")}" /></label>
-      <label>来源<input id="source" value="${escapeHtml(state.filter.source ?? "")}" /></label>
-      <label>搜索<input id="search" value="${escapeHtml(state.filter.search ?? "")}" /></label>
-      <div class="segmented" role="group" aria-label="归档状态">
-        ${archivedButton("all", "全部")}
-        ${archivedButton("active", "活动")}
-        ${archivedButton("archived", "已归档")}
-        ${archivedButton("favorite", "收藏")}
+      <div class="filter-path-row">
+        <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
+        <button id="refresh" class="primary">刷新</button>
       </div>
-      <button id="refresh" class="primary">刷新</button>
+      <div class="filter-grid">
+        <div class="filter-status">
+          <span>范围</span>
+          <div class="segmented" role="group" aria-label="会话范围">
+            ${archivedButton("all", "全部")}
+            ${archivedButton("active", "活动")}
+            ${archivedButton("archived", "已归档")}
+            ${archivedButton("favorite", "收藏")}
+          </div>
+        </div>
+        <label>项目<input id="project" value="${escapeHtml(state.filter.project ?? "")}" /></label>
+        <label>提供方<input id="provider" value="${escapeHtml(state.filter.provider ?? "")}" /></label>
+        <label>模型<input id="model" value="${escapeHtml(state.filter.model ?? "")}" /></label>
+        <label>来源<input id="source" value="${escapeHtml(state.filter.source ?? "")}" /></label>
+        <label>搜索<input id="search" value="${escapeHtml(state.filter.search ?? "")}" /></label>
+      </div>
     </section>
   `;
 }
