@@ -10,7 +10,7 @@ import { buildProjectGroups, type ProjectGroup } from "./sessionGroups";
 import "./styles.css";
 
 type AppPage = "batch-edit" | "session-management" | "database-repair";
-type ArchivedFilter = "active" | "archived" | "all";
+type SessionScope = "active" | "archived" | "favorite" | "all";
 type SessionCommand =
   | "archive_sessions"
   | "active_sessions"
@@ -34,6 +34,7 @@ interface SessionSummary {
   model?: string;
   source?: string;
   archived: boolean;
+  favorite: boolean;
   updated_at?: string;
   rollout_path?: string;
   in_session_index: boolean;
@@ -44,7 +45,7 @@ interface SessionListFilter {
   provider?: string;
   model?: string;
   source?: string;
-  archived: ArchivedFilter;
+  archived: SessionScope;
   search?: string;
 }
 
@@ -87,6 +88,35 @@ interface DatabaseRepairApplyReport {
   backup_dir?: string;
   backup_files: string[];
   skipped_items: DatabaseRepairItem[];
+}
+
+type DatabaseSyncMode = "never" | "auto-when-codex-stops";
+
+interface AppSettings {
+  backup: BackupSettings;
+  database_sync: DatabaseSyncSettings;
+}
+
+interface BackupSettings {
+  max_bytes?: number | null;
+  max_age_days?: number | null;
+  max_count?: number | null;
+  skip_unique_archive_on_auto_prune: boolean;
+  minimum_free_bytes: number;
+}
+
+interface DatabaseSyncSettings {
+  mode: DatabaseSyncMode;
+}
+
+interface SessionBackupSummary {
+  session_id: string;
+  local_exists: boolean;
+  snapshots: SessionBackupSnapshot[];
+}
+
+interface SessionBackupSnapshot {
+  size_bytes: number;
 }
 
 type DetailEditField = "title" | "project" | "provider";
@@ -146,6 +176,10 @@ const state = {
   repairItems: [] as DatabaseRepairItem[],
   selectedRepairIds: new Set<string>(),
   repairBackupNote: "",
+  settings: null as AppSettings | null,
+  settingsDraft: null as AppSettings | null,
+  settingsOpen: false,
+  backupSummary: null as { sessions: number; snapshots: number; bytes: number } | null,
   activeId: "",
   detailOpen: false,
   status: "就绪",
@@ -179,6 +213,7 @@ function render(options: RenderOptions = {}) {
         <div class="status">${escapeHtml(state.status)}</div>
       </section>
       ${active && state.detailOpen ? detailDrawer(active) : ""}
+      ${state.settingsOpen ? settingsDrawer() : ""}
     </main>
   `;
   bindEvents(groups);
@@ -216,6 +251,7 @@ function settingsPanel() {
   return `
     <section class="settings-panel" aria-label="设置">
       <span class="settings-title">设置</span>
+      <button class="settings-open-button" data-open-settings>备份与同步</button>
       <a class="github-link" data-open-github href="${GITHUB_REPOSITORY_URL}" title="打开 GitHub 仓库">
         <svg class="github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
           <path d="M8 0.2C3.7 0.2 0.2 3.7 0.2 8c0 3.4 2.2 6.3 5.3 7.4 0.4 0.1 0.5-0.2 0.5-0.4v-1.4c-2.2 0.5-2.6-0.9-2.6-0.9-0.4-0.9-0.9-1.1-0.9-1.1-0.7-0.5 0.1-0.5 0.1-0.5 0.8 0.1 1.2 0.8 1.2 0.8 0.7 1.2 1.9 0.9 2.3 0.7 0.1-0.5 0.3-0.9 0.5-1.1-1.7-0.2-3.5-0.9-3.5-3.9 0-0.9 0.3-1.6 0.8-2.1-0.1-0.2-0.4-1 0.1-2.1 0 0 0.7-0.2 2.2 0.8 0.6-0.2 1.3-0.3 2-0.3s1.4 0.1 2 0.3c1.5-1 2.2-0.8 2.2-0.8 0.4 1.1 0.2 1.9 0.1 2.1 0.5 0.6 0.8 1.3 0.8 2.1 0 3-1.8 3.6-3.5 3.8 0.3 0.2 0.5 0.7 0.5 1.5V15c0 0.2 0.1 0.5 0.5 0.4 3.1-1 5.3-3.9 5.3-7.4C15.8 3.7 12.3 0.2 8 0.2z" />
@@ -253,6 +289,51 @@ function pageHeader() {
   `;
 }
 
+function settingsDrawer() {
+  const draft = state.settingsDraft || defaultSettings();
+  const summary = state.backupSummary;
+  return `
+    <div class="drawer-backdrop" data-close-settings></div>
+    <aside class="settings-drawer" aria-label="设置">
+      <div class="drawer-top">
+        <span>备份与同步设置</span>
+        <button class="icon-button" data-close-settings title="关闭设置">×</button>
+      </div>
+      <div class="settings-form">
+        <label>最大备份空间（MB）
+          <input id="setting-max-mb" type="number" min="0" step="1" value="${optionalBytesToMb(draft.backup.max_bytes)}" />
+        </label>
+        <label>保留天数
+          <input id="setting-max-age" type="number" min="0" step="1" value="${optionalNumber(draft.backup.max_age_days)}" />
+        </label>
+        <label>最大快照数
+          <input id="setting-max-count" type="number" min="0" step="1" value="${optionalNumber(draft.backup.max_count)}" />
+        </label>
+        <label>最小空闲空间（MB）
+          <input id="setting-min-free-mb" type="number" min="0" step="1" value="${bytesToMb(draft.backup.minimum_free_bytes)}" />
+        </label>
+        <label class="check-row">
+          <input id="setting-skip-unique" type="checkbox" ${draft.backup.skip_unique_archive_on_auto_prune ? "checked" : ""} />
+          <span>自动清理时保留缺失本地会话的唯一备份</span>
+        </label>
+        <label>数据库同步
+          <select id="setting-sync-mode">
+            <option value="never" ${draft.database_sync.mode === "never" ? "selected" : ""}>从不自动同步</option>
+            <option value="auto-when-codex-stops" ${draft.database_sync.mode === "auto-when-codex-stops" ? "selected" : ""}>Codex 停止后自动同步</option>
+          </select>
+        </label>
+      </div>
+      <div class="settings-summary">
+        ${summary ? `${summary.sessions} 个会话备份 · ${summary.snapshots} 个快照 · ${formatBytes(summary.bytes)}` : "备份统计未加载"}
+      </div>
+      <div class="settings-actions">
+        <button id="reload-settings">重新加载</button>
+        <button id="save-settings" class="primary">保存设置</button>
+      </div>
+    </aside>
+  `;
+}
+
 function filterBar() {
   if (state.activePage === "database-repair") {
     return repairFilterBar();
@@ -270,6 +351,7 @@ function filterBar() {
         ${archivedButton("all", "全部")}
         ${archivedButton("active", "活动")}
         ${archivedButton("archived", "已归档")}
+        ${archivedButton("favorite", "收藏")}
       </div>
       <button id="refresh" class="primary">刷新</button>
     </section>
@@ -330,7 +412,7 @@ function sessionManagementBar() {
   `;
 }
 
-function archivedButton(value: ArchivedFilter, label: string) {
+function archivedButton(value: SessionScope, label: string) {
   return `<button data-archived="${value}" class="${state.filter.archived === value ? "selected" : ""}">${label}</button>`;
 }
 
@@ -442,18 +524,21 @@ function sessionRow(session: SessionSummary) {
   const stateDisplay = sessionStateDisplay(session);
   const metaItems = buildSessionMetaItems(session);
   return `
-    <button class="session-card ${selected ? "selected" : ""} ${active ? "active" : ""}" data-open="${escapeHtml(session.id)}">
+    <div class="session-card ${selected ? "selected" : ""} ${active ? "active" : ""}" role="button" tabindex="0" data-open="${escapeHtml(session.id)}">
       <input class="session-card-check" type="checkbox" data-select="${escapeHtml(session.id)}" aria-label="选择${escapeHtml(sessionTitle(session))}" ${selected ? "checked" : ""} />
       <span class="session-card-body">
         <span class="session-card-top">
           <span class="session-title" title="${escapeHtml(sessionTitle(session))}">${escapeHtml(sessionTitle(session))}</span>
-          <span class="session-state session-state-${stateDisplay.tone}">${escapeHtml(stateDisplay.label)}</span>
+          <span class="session-card-tools">
+            <button class="favorite-button ${session.favorite ? "active" : ""}" data-toggle-favorite="${escapeHtml(session.id)}" title="${session.favorite ? "取消收藏" : "收藏"}" aria-label="${session.favorite ? "取消收藏" : "收藏"}">${session.favorite ? "★" : "☆"}</button>
+            <span class="session-state session-state-${stateDisplay.tone}">${escapeHtml(stateDisplay.label)}</span>
+          </span>
         </span>
         <span class="session-meta">
           ${metaItems.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
         </span>
       </span>
-    </button>
+    </div>
   `;
 }
 
@@ -486,6 +571,7 @@ function detailDrawer(session: SessionSummary) {
       </dl>
       <div class="detail-actions">
         <button id="save-detail-title" class="primary" ${dirty ? "" : "disabled"}>保存</button>
+        <button data-toggle-favorite="${escapeHtml(session.id)}">${session.favorite ? "取消收藏" : "收藏"}</button>
         <button data-single-command="refresh_session_updated_at">置顶</button>
         <button data-single="archive">归档</button>
         <button data-single="active">活动</button>
@@ -521,6 +607,16 @@ function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
 }
 
 function bindSettingsEvents() {
+  document.querySelector<HTMLElement>("[data-open-settings]")?.addEventListener("click", () => openSettings());
+  document.querySelectorAll<HTMLElement>("[data-close-settings]").forEach((target) => {
+    target.addEventListener("click", () => {
+      state.settingsOpen = false;
+      render({ preserveTableScroll: true });
+    });
+  });
+  bindSettingsInputs();
+  document.querySelector("#reload-settings")?.addEventListener("click", () => loadAppSettings(true));
+  document.querySelector("#save-settings")?.addEventListener("click", saveAppSettings);
   document.querySelector<HTMLElement>("[data-open-github]")?.addEventListener("click", (event) => {
     event.preventDefault();
     openGithubRepository();
@@ -559,7 +655,17 @@ function bindPageSwitching() {
 }
 
 function bindFilters() {
-  bindInput("codex-home", (value) => (state.profile.codex_home = value));
+  bindInput("codex-home", (value) => {
+    if (state.profile.codex_home !== value) {
+      state.settings = null;
+      state.settingsDraft = null;
+      state.backupSummary = null;
+    }
+    state.profile.codex_home = value;
+  });
+  document.querySelector<HTMLInputElement>("#codex-home")?.addEventListener("change", () => {
+    void loadAppSettings(false);
+  });
   bindInput("project", (value) => (state.filter.project = emptyToUndefined(value)));
   bindInput("provider", (value) => (state.filter.provider = emptyToUndefined(value)));
   bindInput("model", (value) => (state.filter.model = emptyToUndefined(value)));
@@ -567,9 +673,32 @@ function bindFilters() {
   bindInput("search", (value) => (state.filter.search = emptyToUndefined(value)));
   document.querySelectorAll<HTMLElement>("[data-archived]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.filter.archived = button.dataset.archived as ArchivedFilter;
+      state.filter.archived = button.dataset.archived as SessionScope;
       refresh();
     });
+  });
+}
+
+function bindSettingsInputs() {
+  const draft = state.settingsDraft;
+  if (!draft) return;
+  document.querySelector<HTMLInputElement>("#setting-max-mb")?.addEventListener("input", (event) => {
+    draft.backup.max_bytes = mbInputToBytes((event.target as HTMLInputElement).value);
+  });
+  document.querySelector<HTMLInputElement>("#setting-max-age")?.addEventListener("input", (event) => {
+    draft.backup.max_age_days = optionalInteger((event.target as HTMLInputElement).value);
+  });
+  document.querySelector<HTMLInputElement>("#setting-max-count")?.addEventListener("input", (event) => {
+    draft.backup.max_count = optionalInteger((event.target as HTMLInputElement).value);
+  });
+  document.querySelector<HTMLInputElement>("#setting-min-free-mb")?.addEventListener("input", (event) => {
+    draft.backup.minimum_free_bytes = mbInputToBytes((event.target as HTMLInputElement).value) ?? 0;
+  });
+  document.querySelector<HTMLInputElement>("#setting-skip-unique")?.addEventListener("change", (event) => {
+    draft.backup.skip_unique_archive_on_auto_prune = (event.target as HTMLInputElement).checked;
+  });
+  document.querySelector<HTMLSelectElement>("#setting-sync-mode")?.addEventListener("change", (event) => {
+    draft.database_sync.mode = (event.target as HTMLSelectElement).value as DatabaseSyncMode;
   });
 }
 
@@ -628,6 +757,21 @@ function bindRowEvents() {
       state.detailOpen = true;
       state.detailEdit = blankDetailEdit();
       render({ preserveTableScroll: true });
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        state.activeId = row.dataset.open || "";
+        state.detailOpen = true;
+        state.detailEdit = blankDetailEdit();
+        render({ preserveTableScroll: true });
+      }
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-toggle-favorite]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleFavorite(button.dataset.toggleFavorite || "");
     });
   });
   document.querySelectorAll<HTMLInputElement>("[data-select]").forEach((checkbox) => {
@@ -849,6 +993,23 @@ function sessionTitle(session: SessionSummary) {
   return displaySessionTitle(session);
 }
 
+async function toggleFavorite(id: string) {
+  if (!id) return;
+  const activeId = state.activeId;
+  await run(async () => {
+    await invoke("toggle_favorite", { profile: state.profile, sessionId: id });
+    state.sessions = await invoke<SessionSummary[]>("list_sessions", {
+      profile: state.profile,
+      filter: state.filter,
+    });
+    state.activeId = state.sessions.some((session) => session.id === activeId)
+      ? activeId
+      : state.sessions[0]?.id || "";
+    state.detailOpen = state.detailOpen && Boolean(state.activeId);
+    state.status = "收藏状态已更新";
+  });
+}
+
 function detailCurrentValue(session: SessionSummary, field: DetailEditField) {
   if (field === "title") return sessionTitle(session);
   if (field === "project") return session.project || "";
@@ -887,6 +1048,40 @@ async function openGithubRepository() {
   await run(async () => {
     await invoke("open_external_url", { url: GITHUB_REPOSITORY_URL });
     state.status = "已在默认浏览器打开 GitHub 仓库";
+  });
+}
+
+async function openSettings() {
+  state.settingsOpen = true;
+  render({ preserveTableScroll: true });
+  await loadAppSettings(true);
+}
+
+async function loadAppSettings(showStatus: boolean) {
+  await run(async () => {
+    const settings = await invoke<AppSettings>("load_settings", { profile: state.profile });
+    state.settings = settings;
+    state.settingsDraft = cloneSettings(settings);
+    const backups = await invoke<SessionBackupSummary[]>("list_session_backups", {
+      profile: state.profile,
+    });
+    state.backupSummary = summarizeBackups(backups);
+    if (showStatus) {
+      state.status = "设置已加载";
+    }
+  });
+}
+
+async function saveAppSettings() {
+  if (!state.settingsDraft) return;
+  await run(async () => {
+    const saved = await invoke<AppSettings>("save_settings", {
+      profile: state.profile,
+      settings: state.settingsDraft,
+    });
+    state.settings = saved;
+    state.settingsDraft = cloneSettings(saved);
+    state.status = "设置已保存";
   });
 }
 
@@ -948,6 +1143,66 @@ function formatRepairApplyReport(report: DatabaseRepairApplyReport) {
   const backup = report.backup_dir ? ` · 备份 ${report.backup_dir}` : "";
   const skipped = report.skipped_items.length ? ` · 跳过 ${report.skipped_items.length} 项` : "";
   return `已应用 ${report.applied_items} 项 · SQLite ${report.sqlite_rows} 行${skipped}${backup}`;
+}
+
+function defaultSettings(): AppSettings {
+  return {
+    backup: {
+      max_bytes: null,
+      max_age_days: null,
+      max_count: null,
+      skip_unique_archive_on_auto_prune: true,
+      minimum_free_bytes: 536_870_912,
+    },
+    database_sync: {
+      mode: "never",
+    },
+  };
+}
+
+function cloneSettings(settings: AppSettings): AppSettings {
+  return JSON.parse(JSON.stringify(settings)) as AppSettings;
+}
+
+function summarizeBackups(rows: SessionBackupSummary[]) {
+  return {
+    sessions: rows.length,
+    snapshots: rows.reduce((sum, row) => sum + row.snapshots.length, 0),
+    bytes: rows.reduce(
+      (sum, row) => sum + row.snapshots.reduce((snapshotSum, snapshot) => snapshotSum + snapshot.size_bytes, 0),
+      0,
+    ),
+  };
+}
+
+function optionalNumber(value: number | null | undefined) {
+  return value == null ? "" : String(value);
+}
+
+function optionalInteger(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function bytesToMb(value: number) {
+  return Math.round(value / 1_048_576).toString();
+}
+
+function optionalBytesToMb(value: number | null | undefined) {
+  return value == null ? "" : bytesToMb(value);
+}
+
+function mbInputToBytes(value: string) {
+  const parsed = optionalInteger(value);
+  return parsed == null ? null : parsed * 1_048_576;
+}
+
+function formatBytes(value: number) {
+  if (value >= 1_073_741_824) return `${(value / 1_073_741_824).toFixed(1)} GB`;
+  if (value >= 1_048_576) return `${(value / 1_048_576).toFixed(1)} MB`;
+  return `${value} B`;
 }
 
 function allVisibleSessionsSelected() {
@@ -1024,3 +1279,4 @@ function escapeHtml(value: string) {
 }
 
 render();
+void loadAppSettings(false);

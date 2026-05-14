@@ -15,7 +15,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -121,11 +122,35 @@ label {
   background: #202a37;
 }
 
+select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid #c6ced7;
+  border-radius: 6px;
+  padding: 7px 9px;
+  color: #18212f;
+  background: #ffffff;
+}
+
 .settings-panel {
   display: grid;
   gap: 8px;
   padding-top: 14px;
   border-top: 1px solid #2c3746;
+}
+
+.settings-open-button {
+  justify-content: start;
+  width: 100%;
+  border-color: #354253;
+  color: #e7edf4;
+  background: #1d2632;
+  text-align: left;
+}
+
+.settings-open-button:hover {
+  border-color: #7fd1c7;
+  background: #253140;
 }
 
 .settings-title {
@@ -265,7 +290,7 @@ label {
 
 .segmented {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 6px;
   min-width: 0;
 }
@@ -522,6 +547,7 @@ label {
   background: #ffffff;
   text-align: left;
   box-shadow: 0 1px 2px rgb(17 24 39 / 4%);
+  cursor: pointer;
 }
 
 .session-card:hover {
@@ -558,6 +584,32 @@ label {
   align-items: start;
   gap: 10px;
   min-width: 0;
+}
+
+.session-card-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.favorite-button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  border-color: #d7dee6;
+  padding: 0;
+  color: #6b7785;
+  background: #ffffff;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.favorite-button.active {
+  border-color: #c99a32;
+  color: #8a5a00;
+  background: #fff7dc;
 }
 
 .session-title {
@@ -703,6 +755,59 @@ label {
   box-shadow: -18px 0 40px rgb(17 24 39 / 18%);
   overflow-y: auto;
   overflow-wrap: anywhere;
+}
+
+.settings-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 21;
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  gap: 16px;
+  width: min(430px, calc(100vw - 36px));
+  height: 100vh;
+  padding: 18px;
+  border-left: 1px solid #c8d1da;
+  background: #ffffff;
+  box-shadow: -18px 0 40px rgb(17 24 39 / 18%);
+  overflow-y: auto;
+}
+
+.settings-form {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.check-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  color: #243142;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.check-row input {
+  width: 18px;
+  min-height: 18px;
+}
+
+.settings-summary {
+  min-height: 38px;
+  border: 1px solid #d8e0e8;
+  border-radius: 7px;
+  padding: 10px;
+  color: #516071;
+  background: #f8fafc;
+  font-size: 13px;
+}
+
+.settings-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .drawer-top {
