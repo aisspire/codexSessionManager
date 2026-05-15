@@ -1,13 +1,14 @@
 use std::fs;
 
 use codex_session_manager::profile::CodexProfile;
+use codex_session_manager::session_list::{list_sessions, SessionListFilter};
 use codex_session_manager::session_ops::{delete_sessions_with_guard, SessionApplyOptions};
 use codex_session_manager::trash::TrashManifest;
 use rusqlite::Connection;
 use tempfile::tempdir;
 
 #[test]
-fn delete_moves_rollout_files_to_tool_trash_and_archives_threads() {
+fn delete_moves_rollout_files_to_tool_trash_and_deletes_threads() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     fs::create_dir_all(profile.sessions_dir()).unwrap();
@@ -30,7 +31,11 @@ fn delete_moves_rollout_files_to_tool_trash_and_archives_threads() {
     assert!(std::path::Path::new(&report.backup_manifests[0]).exists());
     assert_eq!(report.trash_manifest.as_ref().unwrap().entries.len(), 1);
     assert!(!rollout.exists());
-    assert_archived(&profile.state_db_path(), "thread-1", true);
+    assert_thread_missing(&profile.state_db_path(), "thread-1");
+    assert!(list_sessions(&profile, &SessionListFilter::default())
+        .unwrap()
+        .iter()
+        .all(|session| session.id != "thread-1"));
 
     let manifest_path = dir
         .path()
@@ -117,12 +122,12 @@ fn create_state_db(path: &std::path::Path, rollout: &std::path::Path) {
     .unwrap();
 }
 
-fn assert_archived(path: &std::path::Path, id: &str, expected: bool) {
+fn assert_thread_missing(path: &std::path::Path, id: &str) {
     let conn = Connection::open(path).unwrap();
-    let archived: i64 = conn
-        .query_row("SELECT archived FROM threads WHERE id = ?1", [id], |row| {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(archived != 0, expected);
+    assert_eq!(count, 0);
 }

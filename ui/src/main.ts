@@ -110,6 +110,7 @@ type DatabaseSyncMode = "never" | "auto-when-codex-stops";
 interface AppSettings {
   backup: BackupSettings;
   database_sync: DatabaseSyncSettings;
+  codex_cli: CodexCliSettings;
 }
 
 interface BackupSettings {
@@ -124,10 +125,15 @@ interface DatabaseSyncSettings {
   mode: DatabaseSyncMode;
 }
 
+interface CodexCliSettings {
+  command_path?: string | null;
+}
+
 interface SessionBackupSummary {
   session_id: string;
   title?: string;
   project?: string;
+  group?: string | null;
   local_exists: boolean;
   snapshots: SessionBackupSnapshot[];
 }
@@ -387,6 +393,9 @@ function settingsDrawer() {
             <option value="auto-when-codex-stops" ${draft.database_sync.mode === "auto-when-codex-stops" ? "selected" : ""}>Codex 停止后自动同步</option>
           </select>
         </label>
+        <label>Codex CLI 命令
+          <input id="setting-codex-cli" placeholder="留空自动查找；Windows 优先 where.exe codex 的 codex.cmd" value="${escapeHtml(draft.codex_cli.command_path ?? "")}" />
+        </label>
       </div>
       <div class="settings-summary">
         ${summary ? `${summary.sessions} 个会话备份 · ${summary.snapshots} 个快照 · ${formatBytes(summary.bytes)}` : "备份统计未加载"}
@@ -580,12 +589,27 @@ function backupTable() {
       <div class="backup-table">
         ${
           state.backupRows.length
-            ? state.backupRows.map(backupRow).join("")
+            ? backupRowsWithGroups()
             : `<div class="empty-list">暂无备份快照</div>`
         }
       </div>
     </section>
   `;
+}
+
+function backupRowsWithGroups() {
+  let currentGroup = "";
+  return state.backupRows
+    .map((row) => {
+      const group = row.group || "";
+      const header =
+        group && group !== currentGroup
+          ? `<div class="backup-group-header">${escapeHtml(group)}</div>`
+          : "";
+      currentGroup = group;
+      return header + backupRow(row);
+    })
+    .join("");
 }
 
 function backupRow(row: SessionBackupSummary) {
@@ -874,6 +898,10 @@ function bindSettingsInputs() {
   });
   document.querySelector<HTMLSelectElement>("#setting-sync-mode")?.addEventListener("change", (event) => {
     draft.database_sync.mode = (event.target as HTMLSelectElement).value as DatabaseSyncMode;
+  });
+  document.querySelector<HTMLInputElement>("#setting-codex-cli")?.addEventListener("input", (event) => {
+    const value = (event.target as HTMLInputElement).value.trim();
+    draft.codex_cli.command_path = value.length > 0 ? value : null;
   });
 }
 
@@ -1494,6 +1522,9 @@ function defaultSettings(): AppSettings {
     database_sync: {
       mode: "never",
     },
+    codex_cli: {
+      command_path: null,
+    },
   };
 }
 
@@ -1650,7 +1681,7 @@ function repairKindLabel(kind: DatabaseRepairKind) {
     "repair-rollout-path": "修 rollout_path",
     "normalize-rollout-path": "路径归一化",
     "sync-archived-state": "同步归档状态",
-    "sqlite-only-thread": "SQLite-only 报告",
+    "sqlite-only-thread": "删除 SQLite-only 行",
     "duplicate-jsonl": "重复 JSONL 报告",
   };
   return labels[kind];

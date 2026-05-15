@@ -64,6 +64,7 @@ pub struct SessionBackupSummary {
     pub session_id: String,
     pub title: Option<String>,
     pub project: Option<String>,
+    pub group: Option<String>,
     pub local_exists: bool,
     pub snapshots: Vec<SessionBackupSnapshot>,
 }
@@ -230,6 +231,9 @@ pub fn list_session_backups(profile: &CodexProfile) -> Result<Vec<SessionBackupS
         let project = manifests
             .first()
             .and_then(|(_, manifest, _)| manifest.project.clone());
+        let group = manifests
+            .first()
+            .and_then(|(_, manifest, _)| backup_group(manifest));
         let snapshots = manifests
             .into_iter()
             .map(|(backup_id, manifest, path)| SessionBackupSnapshot {
@@ -244,11 +248,20 @@ pub fn list_session_backups(profile: &CodexProfile) -> Result<Vec<SessionBackupS
             session_id,
             title,
             project,
+            group,
             local_exists,
             snapshots,
         });
     }
     Ok(summaries)
+}
+
+fn backup_group(manifest: &SessionBackupManifest) -> Option<String> {
+    if manifest.trigger == BackupTrigger::Delete {
+        Some("回收站".to_string())
+    } else {
+        None
+    }
 }
 
 pub fn delete_backup_snapshot(profile: &CodexProfile, backup_id: &str) -> Result<()> {

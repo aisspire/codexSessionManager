@@ -5,9 +5,11 @@ use std::rc::Rc;
 
 use anyhow::bail;
 use codex_session_manager::compact::{
-    compact_session_with_guard_and_runner, CodexCliOutput, CompactOptions,
+    compact_session_with_guard_and_runner, resolve_codex_command_from_where_output, CodexCliOutput,
+    CompactOptions,
 };
 use codex_session_manager::profile::CodexProfile;
+use codex_session_manager::settings::{save_settings, AppSettings};
 use tempfile::tempdir;
 
 #[test]
@@ -36,7 +38,10 @@ fn compact_creates_backup_and_invokes_codex_exec_resume_compact() {
     .unwrap();
 
     let invocation = seen.borrow().clone().unwrap();
-    assert_eq!(invocation.program, "codex");
+    assert!(invocation
+        .program
+        .to_ascii_lowercase()
+        .contains("codex"));
     assert_eq!(
         invocation.args,
         vec![
@@ -53,6 +58,58 @@ fn compact_creates_backup_and_invokes_codex_exec_resume_compact() {
         .any(|(key, value)| key == "CI" && value == "1"));
     assert!(Path::new(&report.backup_manifest).exists());
     assert!(report.stdout.contains("compacted"));
+}
+
+#[test]
+fn configured_codex_command_path_wins() {
+    let resolved =
+        resolve_codex_command_from_where_output(Some(" C:\\Tools\\codex.cmd "), "").unwrap();
+
+    assert_eq!(resolved, "C:\\Tools\\codex.cmd");
+}
+
+#[test]
+fn where_resolver_prefers_codex_cmd_over_internal_node_binary() {
+    let output = [
+        r"C:\project\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex\codex.exe",
+        r"C:\Users\me\AppData\Roaming\npm\codex.cmd",
+    ]
+    .join("\r\n");
+
+    let resolved = resolve_codex_command_from_where_output(None, &output).unwrap();
+
+    assert_eq!(resolved, r"C:\Users\me\AppData\Roaming\npm\codex.cmd");
+}
+
+#[test]
+fn compact_uses_configured_codex_command_path() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    write_rollout(&profile.sessions_dir().join("thread-1.jsonl"), "thread-1");
+    let mut settings = AppSettings::default();
+    settings.codex_cli.command_path = Some(r"C:\Tools\codex.cmd".to_string());
+    save_settings(&profile, &settings).unwrap();
+    let seen = Rc::new(RefCell::new(None));
+    let seen_runner = Rc::clone(&seen);
+
+    compact_session_with_guard_and_runner(
+        &profile,
+        "thread-1",
+        &CompactOptions { apply: true },
+        || Ok(()),
+        move |invocation| {
+            *seen_runner.borrow_mut() = Some(invocation.clone());
+            Ok(CodexCliOutput {
+                exit_code: Some(0),
+                stdout: "compacted".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            })
+        },
+    )
+    .unwrap();
+
+    assert_eq!(seen.borrow().clone().unwrap().program, r"C:\Tools\codex.cmd");
 }
 
 #[test]

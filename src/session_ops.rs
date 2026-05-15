@@ -161,7 +161,10 @@ where
         action: "delete sessions to trash".to_string(),
         applied: options.apply,
         requested_ids: ids.to_vec(),
-        sqlite_rows: selected.iter().filter(|thread| !thread.archived).count(),
+        sqlite_rows: selected
+            .iter()
+            .filter(|thread| ids.iter().any(|id| id == &thread.id))
+            .count(),
         index_entries: count_session_index_entries(&profile.session_index_path(), ids)?,
         backup_manifests: Vec::new(),
         warnings: Vec::new(),
@@ -189,7 +192,7 @@ where
     report.index_entries = remove_session_index_entries(&profile.session_index_path(), ids)?;
     if profile.state_db_path().exists() {
         let mut db = StateDb::open(&profile.state_db_path())?;
-        report.sqlite_rows = db.set_archived(ids, true)?;
+        report.sqlite_rows = db.delete_threads(ids)?;
     } else {
         report.sqlite_rows = 0;
     }

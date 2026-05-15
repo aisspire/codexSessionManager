@@ -198,11 +198,11 @@ fn database_sync_from_local_auto_applies_all_applicable_repairs() {
     assert!(preview
         .items
         .iter()
-        .any(|item| item.kind == DatabaseRepairKind::SqliteOnlyThread && !item.applicable));
+        .any(|item| item.kind == DatabaseRepairKind::SqliteOnlyThread && item.applicable));
 
     let report = apply_database_sync_from_local_with_guard(&profile, || Ok(())).unwrap();
 
-    assert_eq!(report.applied_items, 2);
+    assert_eq!(report.applied_items, 3);
     assert_thread_exists(&profile.state_db_path(), "jsonl-only");
     assert_eq!(
         read_thread_values(&profile.state_db_path(), "broken")
@@ -210,8 +210,49 @@ fn database_sync_from_local_auto_applies_all_applicable_repairs() {
             .as_deref(),
         Some(broken.to_str().unwrap())
     );
-    assert!(!report.skipped_items.is_empty());
+    assert_thread_missing(&profile.state_db_path(), "sqlite-only");
+    assert!(report.skipped_items.is_empty());
     assert!(report.backup_dir.is_some());
+}
+
+#[test]
+fn applies_sqlite_only_repair_by_deleting_thread_row_after_backup() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    insert_thread(
+        &profile.state_db_path(),
+        "sqlite-only",
+        "missing.jsonl",
+        false,
+        "E:\\code\\sqlite-only",
+        "cm",
+    );
+
+    let preview = preview_database_repairs(&profile).unwrap();
+    let item = preview
+        .items
+        .iter()
+        .find(|item| item.kind == DatabaseRepairKind::SqliteOnlyThread)
+        .unwrap();
+
+    assert!(item.applicable);
+    assert!(item.skip_reason.is_none());
+    assert_eq!(item.after.as_deref(), Some("delete threads row"));
+
+    let report = apply_database_repairs_with_guard(
+        &profile,
+        &DatabaseRepairOptions {
+            selected: vec![item.id.clone()],
+        },
+        || Ok(()),
+    )
+    .unwrap();
+
+    assert_eq!(report.applied_items, 1);
+    assert_eq!(report.sqlite_rows, 1);
+    assert!(report.backup_dir.is_some());
+    assert_thread_missing(&profile.state_db_path(), "sqlite-only");
 }
 
 fn create_state_db(path: &Path) {
@@ -319,4 +360,14 @@ fn assert_thread_exists(db_path: &Path, id: &str) {
         })
         .unwrap();
     assert_eq!(count, 1);
+}
+
+fn assert_thread_missing(db_path: &Path, id: &str) {
+    let conn = Connection::open(db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
 }

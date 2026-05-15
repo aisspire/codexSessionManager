@@ -780,6 +780,14 @@ select {
   background: #f3f6f8;
 }
 
+.backup-group-header {
+  min-width: 980px;
+  padding: 8px 4px 0;
+  color: #324153;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .backup-row {
   display: grid;
   grid-template-columns: minmax(260px, 1.2fr) minmax(320px, 1fr) auto;

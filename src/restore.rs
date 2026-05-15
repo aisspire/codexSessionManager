@@ -366,7 +366,9 @@ fn sync_sqlite_from_restored_session(
         .find_map(|value| value.get("updated_at").and_then(|value| value.as_str()))
         .map(str::to_string)
         .or_else(|| sqlite_thread.and_then(|thread| thread.updated_at.clone()));
-    let archived = restored_path.starts_with(profile.archived_sessions_dir());
+    let archived = sqlite_thread
+        .map(|thread| thread.archived)
+        .unwrap_or_else(|| restored_path.starts_with(profile.archived_sessions_dir()));
     let restored = ThreadRecord {
         id: manifest.session_id.clone(),
         rollout_path: Some(restored_path.display().to_string()),
@@ -393,7 +395,7 @@ fn sync_sqlite_from_restored_session(
         first_user_message: sqlite_thread.and_then(|thread| thread.first_user_message.clone()),
     };
     let mut db = StateDb::open(&profile.state_db_path())?;
-    db.upsert_restored_thread(&restored)
+    db.upsert_thread(&restored)
 }
 
 fn manifest_path_from_backup(manifest: &SessionBackupManifest) -> Result<String> {

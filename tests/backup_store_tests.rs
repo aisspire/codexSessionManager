@@ -87,6 +87,23 @@ fn listing_backups_groups_by_session_and_sorts_snapshots_newest_first() {
 }
 
 #[test]
+fn delete_backups_are_grouped_under_trash_when_latest_snapshot_is_delete() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    let rollout = profile.sessions_dir().join("thread-1.jsonl");
+    write_rollout(&rollout, "thread-1", "/tmp/project", "cm");
+
+    create_session_backup(&profile, "thread-1", BackupTrigger::Manual).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    create_session_backup(&profile, "thread-1", BackupTrigger::Delete).unwrap();
+
+    let rows = list_session_backups(&profile).unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].group.as_deref(), Some("回收站"));
+}
+
+#[test]
 fn listing_backup_marks_local_exists_false_when_jsonl_is_missing() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();

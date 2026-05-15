@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::backup_store::{self, BackupTrigger};
 use crate::profile::CodexProfile;
 use crate::safety;
+use crate::settings;
 
 const COMPACT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -88,7 +89,14 @@ where
     G: FnOnce() -> Result<()>,
     R: FnOnce(&CodexCliInvocation) -> Result<CodexCliOutput>,
 {
-    let invocation = compact_invocation(session_id);
+    let configured = settings::load_settings(profile)?
+        .codex_cli
+        .command_path
+        .unwrap_or_default();
+    let invocation = compact_invocation(
+        session_id,
+        &resolve_codex_command(Some(configured.as_str()))?,
+    );
     let mut report = CompactReport {
         action: "compact session context".to_string(),
         applied: options.apply,
@@ -140,9 +148,9 @@ where
     Ok(report)
 }
 
-fn compact_invocation(session_id: &str) -> CodexCliInvocation {
+fn compact_invocation(session_id: &str, program: &str) -> CodexCliInvocation {
     CodexCliInvocation {
-        program: "codex".to_string(),
+        program: program.to_string(),
         args: vec![
             "exec".to_string(),
             "resume".to_string(),
@@ -163,6 +171,65 @@ fn compact_invocation(session_id: &str) -> CodexCliInvocation {
     }
 }
 
+pub fn resolve_codex_command(configured: Option<&str>) -> Result<String> {
+    let configured = configured.and_then(non_empty_trimmed);
+    if let Some(path) = configured {
+        return Ok(path.to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = Command::new("where.exe").arg("codex").output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return resolve_codex_command_from_where_output(None, &stdout);
+            }
+        }
+    }
+
+    Ok("codex".to_string())
+}
+
+pub fn resolve_codex_command_from_where_output(
+    configured: Option<&str>,
+    stdout: &str,
+) -> Result<String> {
+    if let Some(path) = configured.and_then(non_empty_trimmed) {
+        return Ok(path.to_string());
+    }
+
+    let paths = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    if let Some(path) = paths
+        .iter()
+        .find(|path| path.to_ascii_lowercase().ends_with("codex.cmd"))
+    {
+        return Ok((*path).to_string());
+    }
+
+    if let Some(path) = paths
+        .iter()
+        .find(|path| !path.to_ascii_lowercase().contains("node_modules"))
+    {
+        return Ok((*path).to_string());
+    }
+
+    Ok("codex".to_string())
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 fn run_codex_cli(invocation: &CodexCliInvocation) -> Result<CodexCliOutput> {
     let mut command = Command::new(&invocation.program);
     command
@@ -175,7 +242,7 @@ fn run_codex_cli(invocation: &CodexCliInvocation) -> Result<CodexCliOutput> {
 
     let mut child = command.spawn().with_context(|| {
         format!(
-            "failed to start codex compact command: {} {}",
+            "failed to start codex compact command: {} {}. Set Codex CLI command path in settings or ensure `where.exe codex` finds codex.cmd.",
             invocation.program,
             invocation.args.join(" ")
         )

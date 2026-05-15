@@ -279,6 +279,10 @@ impl StateDb {
         Ok(changed)
     }
 
+    pub fn upsert_thread(&mut self, thread: &ThreadRecord) -> Result<usize> {
+        self.upsert_restored_thread(thread)
+    }
+
     pub fn update_rollout_path(&mut self, id: &str, rollout_path: &str) -> Result<usize> {
         self.conn
             .execute(
@@ -336,6 +340,22 @@ impl StateDb {
                     ":archived": if archived { 1 } else { 0 },
                 },
             )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn delete_threads(&mut self, ids: &[String]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        for id in ids {
+            changed += tx
+                .execute("DELETE FROM threads WHERE id = ?1", [id])
+                .context("failed to delete thread row")?;
         }
         tx.commit()?;
         Ok(changed)
