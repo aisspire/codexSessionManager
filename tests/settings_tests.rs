@@ -15,7 +15,6 @@ fn missing_settings_file_returns_defaults() {
 
     assert_eq!(settings, AppSettings::default());
     assert_eq!(settings.backup.minimum_free_bytes, 536_870_912);
-    assert_eq!(settings.codex_cli.command_path, None);
 }
 
 #[test]
@@ -77,5 +76,4 @@ fn partial_json_fills_missing_fields_with_defaults() {
     assert!(settings.backup.skip_unique_archive_on_auto_prune);
     assert_eq!(settings.backup.minimum_free_bytes, 536_870_912);
     assert_eq!(settings.database_sync.mode, DatabaseSyncMode::Never);
-    assert_eq!(settings.codex_cli.command_path, None);
 }

@@ -11,7 +11,6 @@ use crate::profile::CodexProfile;
 pub struct AppSettings {
     pub backup: BackupSettings,
     pub database_sync: DatabaseSyncSettings,
-    pub codex_cli: CodexCliSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,12 +29,6 @@ pub struct DatabaseSyncSettings {
     pub mode: DatabaseSyncMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct CodexCliSettings {
-    pub command_path: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DatabaseSyncMode {
@@ -48,7 +41,6 @@ impl Default for AppSettings {
         Self {
             backup: BackupSettings::default(),
             database_sync: DatabaseSyncSettings::default(),
-            codex_cli: CodexCliSettings::default(),
         }
     }
 }
