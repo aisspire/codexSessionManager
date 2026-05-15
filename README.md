@@ -1,166 +1,78 @@
 # Codex Session Manager
 
-## 当前数据安全模型
+一个面向 OpenAI Codex 本地会话的桌面整理工具。它把分散在 `state_5.sqlite`、`sessions/`、`archived_sessions/` 和 `session_index.jsonl` 中的会话信息合并成一个可浏览、可筛选、可批量整理的界面。
 
-- `<CodexHome>/sessions/`、`<CodexHome>/archived_sessions/` 下的本地会话 JSONL 文件，以及 `<CodexHome>/session_index.jsonl`，被视为主要事实来源。
-- `<CodexHome>/state_5.sqlite` 被视为辅助索引。只要本地 JSONL 和索引证据足够明确，就可以从这些本地文件修复或同步 SQLite。
-- 编辑会话元数据和删除会话前会自动创建会话级备份。归档和取消归档不会自动创建备份。
-- 会话备份保存在 `<CodexHome>/backups/codex-session-manager/sessions/<session_id>/`。
-- 为了兼容旧行为，删除仍会把 JSONL 移入工具自己的回收区；面向用户的恢复入口则是“恢复备份”页面。
+如果你经常在多个项目里使用 Codex，遇到过会话列表混乱、旧会话难找、归档状态不一致、SQLite 索引和 JSONL 文件不同步等问题，这个工具可以帮你先看清本地数据，再谨慎地整理它。
 
-## 备份恢复、设置与收藏
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2021-7a2f13.svg)](Cargo.toml)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24c8db.svg)](src-tauri/tauri.conf.json)
 
-- “恢复备份”页面按会话 ID 每行展示一组备份，包含标题、项目、会话 ID、最新备份时间、快照数量、本地文件是否存在，以及行内快照翻页。
-- 红色备份行表示本地 JSONL 已缺失。删除这类会话的最后一个备份快照时，需要额外确认。
-- 恢复备份会恢复 JSONL，合并缺失的 `session_index.jsonl` 条目，可选恢复收藏状态，并从恢复后的本地文件同步 SQLite。如果恢复会覆盖已有本地 JSONL，会先创建一个 `restore-preflight` 预检备份。
-- 收藏信息保存在 `<CodexHome>/codex-session-manager/favorites.json`，只按会话 ID 记录。收藏状态会跨归档、取消归档、删除和恢复保留。
-- 设置保存在 `<CodexHome>/codex-session-manager/settings.json`。备份设置包括最大存储空间、最长保留时间、最大快照数量、最小空闲空间保护，以及自动清理时是否跳过缺失本地会话的唯一备份。
-- 数据库同步可以在“数据库修复”页面手动运行。当同步模式设置为 `auto-when-codex-stops` 时，桌面端会轮询 Codex 进程状态，并在 Codex 从运行变为停止后执行一次 SQLite 同步。
+![会话管理](assets/会话管理.jpg)
 
-Codex Session Manager 是一个用于查看和整理 OpenAI Codex 本地会话的桌面工具。
-它把常用的会话查看、筛选、批量编辑、归档、设为活动、置顶和删除到回收区等操作放进一个简单的桌面界面里。
+## 核心能力
 
-## 背景
-
-Codex 的本地会话信息分散在多个位置：
-
-```text
-<CodexHome>/state_5.sqlite            会话状态、项目路径、归档状态、rollout_path 等索引信息
-<CodexHome>/sessions/**/*.jsonl       会话正文和会话元信息
-<CodexHome>/archived_sessions/*.jsonl 已归档会话文件
-<CodexHome>/session_index.jsonl       最近会话标题和更新时间索引
-```
-
-所以会话在某个列表里“不见了”，通常不代表正文丢失，而可能是 SQLite、JSONL 文件、归档目录或 session_index 之间的状态不一致。
-本工具的列表视图会把 SQLite 中的 threads 和 `sessions` / `archived_sessions` 中可解析的 rollout JSONL 合并展示，便于看清楚当前本地数据的实际分布。
-
-## 功能
-
-- 按项目分组查看会话，支持展开和折叠项目分组。
-- 按项目、提供方、模型、来源、归档状态和关键字筛选会话。
+- 按项目分组浏览 Codex 本地会话，并保留项目展开状态。
+- 按项目、提供方、模型、来源、归档状态、收藏状态和关键字筛选。
 - 查看会话详情，包括标题、项目、模型、状态、更新时间、会话文件和索引状态。
-- 批量修改会话标题前缀、提供方和项目路径。
-- 单个或批量归档会话。
-- 将已归档会话设为活动。
-- 置顶会话，通过刷新 rollout 文件时间让会话更容易出现在较新的位置。
-- 删除会话到工具回收区，不直接永久删除。
-- 收藏会话，并通过“收藏”范围筛选快速查看重点会话。
-- 在“恢复备份”页面按会话查看、翻页、删除和恢复备份快照。
-- 在设置面板中管理备份保留策略和数据库自动同步策略。
-- 预览并保守修复数据库与 JSONL 文件之间的不一致，包括 JSONL-only 会话、不可用的 `rollout_path` 和归档状态偏差。
-- 按本地 JSONL 和 `session_index.jsonl` 手动同步 SQLite；也可以设置为 Codex 停止后自动同步一次。
+- 批量编辑标题前缀、提供方和项目路径。
+- 单个或批量归档、设为活动、置顶和删除到工具回收区。
+- 收藏重点会话，并用收藏范围快速过滤。
+- 管理会话级备份，按快照预览、恢复或删除备份。
+- 预览并保守修复 SQLite 与 JSONL 之间的不一致。
+- 按本地 JSONL 和 `session_index.jsonl` 手动同步 SQLite，也可配置为 Codex 停止后自动同步一次。
 - 自动保存输入框内容、筛选条件和项目分组展开状态。
 
-会话 JSONL 和 `session_index.jsonl` 是主要事实来源，SQLite 只是可修复的辅助索引。删除和编辑会话信息前会自动创建会话级备份；归档和取消归档不会自动创建备份。
+## 截图
 
-## 运行环境
+| 会话管理 | 批量编辑 |
+| --- | --- |
+| ![会话管理](assets/会话管理.jpg) | ![批量编辑](assets/批量编辑.jpg) |
 
-直接使用打包后的桌面应用时，通常只需要系统能运行 Tauri 应用。Windows 上一般需要 WebView2 Runtime，现代 Windows 通常已经自带。
+| 备份设置 | 数据备份 | 数据库修复 |
+| --- | --- | --- |
+| ![备份设置](assets/备份设置.jpg) | ![数据备份](assets/数据备份.jpg) | ![数据库修复](assets/数据库修复.jpg) |
 
-从源码运行或打包需要：
+## 下载和运行
+
+已发布版本会通过 GitHub Actions 构建桌面安装包，并上传到仓库的 [Releases](https://github.com/aisspire/codexSessionManager/releases) 页面。当前 release workflow 会生成草稿 Release，维护者检查附件后再手动发布。
+
+从源码运行桌面端需要：
 
 - Rust stable 和 Cargo
-- Node.js 和 npm
+- Node.js 20 或兼容版本
+- npm
 - Windows WebView2 Runtime
-- Tauri 2 相关依赖
+- Tauri 2 所需系统依赖
 
 本地开发运行：
 
-```bash
-cd ui
-npm install
-npm run tauri -- dev
+```powershell
+npm --prefix ui ci
+npm --prefix ui run tauri -- dev
 ```
 
-打包桌面应用：
-
-```bash
-cd ui
-npm run tauri -- build
-```
-
-## 发布流程
-
-本项目通过 GitHub Actions 和官方 `tauri-apps/tauri-action` 在推送版本标签时自动构建桌面安装包。
-发布 workflow 位于 `.github/workflows/release.yml`，触发条件是推送 `v*` 格式的 Git tag，例如 `v0.2.0`。
-不要从 GitHub Releases 页面手动创建正式发布作为第一步；手动创建的 Release 不会自动带上安装包。正确入口是在本地推送 tag，让 Actions 先构建并生成草稿 Release。
-`src-tauri/tauri.conf.json` 中必须启用 `bundle.active`，否则 Tauri 只会生成裸可执行文件，`tauri-action` 上传阶段会提示 `No artifacts were found`。
-
-当前发布会构建：
-
-- Windows：`windows-latest`
-- Linux：`ubuntu-22.04`
-- macOS Apple Silicon：`aarch64-apple-darwin`
-- macOS Intel：`x86_64-apple-darwin`
-
-发布前先用版本脚本同步项目版本号。脚本参数只写纯版本号，不带 `v`：
+构建前端：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\set-version.ps1 0.2.0
-```
-
-脚本会同步更新：
-
-- `Cargo.toml`
-- `Cargo.lock`
-- `src-tauri/Cargo.toml`
-- `src-tauri/Cargo.lock`
-- `ui/package.json`
-- `ui/package-lock.json`
-
-脚本还会移除 `src-tauri/tauri.conf.json` 中重复的 `version` 字段，让 Tauri 以 `src-tauri/Cargo.toml` 作为桌面应用版本来源。
-
-发布前建议至少执行下面两项本地检查：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\set-version.tests.ps1
 npm --prefix ui run build
 ```
 
-如果要在本机额外验证 Tauri 打包，可运行：
+打包桌面应用：
 
 ```powershell
 npm --prefix ui run tauri -- build
 ```
 
-Windows 本地打包时，如果出现无法删除 `src-tauri\target\...\codex-session-manager-desktop.exe` 或 `拒绝访问`，通常是旧应用进程、杀毒软件或系统仍占用该 exe。关闭正在运行的桌面应用后再重试。
+## 快速上手
 
-确认版本文件和构建检查没问题后，先创建一个干净的发布提交，再给这个提交打 tag。
-如果版本脚本实际修改了文件，提交这些版本变更：
+1. 打开应用后，确认顶部的 Codex 主目录。默认值是 `~/.codex`。
+2. 点击刷新，应用会扫描本地 Codex 会话并按项目分组展示。
+3. 使用顶部筛选栏缩小范围，例如按项目、模型、归档状态或关键字过滤。
+4. 点击会话行查看详情，必要时编辑标题、项目或提供方。
+5. 勾选单个会话或整个项目分组，然后执行归档、活动、置顶、删除或批量编辑。
 
-```powershell
-git status
-git add Cargo.toml Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json ui/package.json ui/package-lock.json
-git commit -m "chore(release): 准备 v0.2.0"
-git push origin main
-```
-
-如果当前版本号本来就是目标版本，`git status` 没有任何版本文件变化，也仍然建议创建一个空的发布提交，让 tag 指向清晰的 release commit：
-
-```powershell
-git commit --allow-empty -m "chore(release): 准备 v0.2.0"
-git push origin main
-```
-
-然后创建并推送 tag：
-
-```powershell
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-推送 tag 后，GitHub Actions 会自动执行 Release workflow，并把各平台构建产物上传到同一个 GitHub Release。
-当前 workflow 设置为 `releaseDraft: true`，因此生成的是草稿 Release。Actions 全部通过后，到 GitHub Releases 页面检查标题、说明和附件，确认无误后手动发布。
-如果 Release 页面没有安装包，先检查 Actions 页面里这个 tag 对应的 Release workflow 是否已经跑完并通过；没有 workflow 运行时，通常是 tag 没有推送到远端，或 tag 是在 workflow 提交之前创建的。
-
-早期内部测试可以先不配置代码签名。未签名包仍可构建和上传，但 Windows 可能显示未知发布者或 SmartScreen 提示，macOS 也可能要求用户绕过系统安全限制。面向公开用户稳定分发前，建议再补 Windows 代码签名证书、Apple Developer ID 签名和 macOS notarization。
-
-## 基本使用
-
-### 1. 设置 Codex 主目录
-
-打开应用后，先确认顶部的 Codex 主目录。默认值是 `~/.codex`。
-如果你的 Codex 数据在其他位置，需要改成实际目录，例如：
+常见 Codex 主目录示例：
 
 ```text
 Windows: C:\Users\<用户名>\.codex
@@ -168,138 +80,208 @@ WSL:     /mnt/c/Users/<用户名>/.codex
 Linux:   ~/.codex
 ```
 
-目录不正确时，列表可能为空，或者操作的不是你想管理的那份会话数据。
+更详细的日常操作说明见 [使用说明.md](使用说明.md)。
 
-### 2. 刷新会话列表
+## 数据模型
 
-点击“刷新”后，应用会重新读取本地会话数据，并按项目分组展示。
-列表不是单纯的 SQLite threads 表，而是会合并：
-
-- `state_5.sqlite` 中的 threads
-- `sessions/**/*.jsonl` 中带 `session_meta` 的会话
-- `archived_sessions/*.jsonl` 中带 `session_meta` 的会话
-- `session_index.jsonl` 中的标题和更新时间
-
-因此软件显示数量可能大于直接查询 `state_5.sqlite` 的 threads 数量。
-
-### 3. 筛选和搜索
-
-顶部筛选栏可以按以下条件缩小范围：
-
-- 项目路径
-- 提供方
-- 模型
-- 来源
-- 活动、已归档或全部
-- 搜索关键字
-
-筛选只影响当前列表展示，不会修改 Codex 数据。
-
-### 4. 查看和编辑单个会话
-
-点击会话行会打开详情面板。详情中可以查看标题、项目、提供方、模型、来源、会话文件和会话索引状态。
-
-详情面板中可直接编辑标题、项目和提供方。保存后，应用会更新本地索引并刷新列表。
-
-### 5. 批量选择
-
-你可以勾选单个会话，也可以在项目分组上选择该项目下的所有可见会话。
-选中多个会话后，可以统一执行归档、活动、置顶或删除等操作。
-
-## 会话管理操作
-
-### 归档
-
-归档会把会话设为已归档，并尽量把对应 rollout 文件从 `sessions` 移到 `archived_sessions`。
-归档适合把暂时不用、但仍想保留的会话从活动列表中收起来。
-
-### 活动
-
-“活动”会把已归档会话重新设为活动，并尽量把对应 rollout 文件从 `archived_sessions` 移回 `sessions`。
-活动完成后，应用会 touch 一下 rollout 文件，刷新文件修改时间，帮助 Codex 或列表刷新逻辑感知变化。
-
-### 置顶
-
-置顶会刷新选中会话 rollout 文件的访问时间和修改时间。
-它不重写会话正文，只用于让会话更容易出现在较新的位置。
-
-### 删除
-
-删除会把会话移动到工具自己的回收区，并把 SQLite 中对应会话标记为归档。
-它不是直接永久删除。
-
-## 数据库修复
-
-“数据库修复”位于左侧导航栏。它用于处理 Codex 本地数据中 SQLite、JSONL 文件和索引之间的常见不一致，默认只做预览，不会立即写入。
-
-点击“预览修复项”后，应用会扫描：
-
-- `sessions/**/*.jsonl` 中首行为 `session_meta` 且带 `id` 的会话文件
-- `archived_sessions/*.jsonl` 中首行为 `session_meta` 且带 `id` 的会话文件
-- `state_5.sqlite` 的 `threads` 表
-- `session_index.jsonl`
-
-预览结果会按行展示修复类型、会话 ID、当前值、目标值和状态。可以勾选单个项目，也可以点击“全选可修复”选择所有可保守处理的项目，再点击“应用已选修复”。
-
-当前会自动应用的保守修复包括：
-
-- JSONL-only 会话：JSONL 文件存在但 SQLite `threads` 中缺少对应行时，补充缺失行。
-- `rollout_path` 修复：SQLite 中的 `rollout_path` 为空、不存在或不可用时，改为当前真实 JSONL 路径。
-- 路径归一化：将 SQLite 中不可用的 `/mnt/<盘符>/...` 类 `rollout_path` 修为当前系统下可用的真实 JSONL 路径。
-- 归档状态同步：唯一 JSONL 位于 `archived_sessions` 时同步 `archived = 1`，位于 `sessions` 时同步 `archived = 0`。
-
-以下情况只报告，不自动修改：
-
-- SQLite-only row：SQLite 中有会话行，但没有找到唯一对应 JSONL 文件。
-- 重复 JSONL：同一会话 ID 对应多个 JSONL 文件，需人工确认。
-
-应用修复前，软件会先检查 Codex 是否正在运行；检测到 Codex 可能正在使用同一份数据时会拒绝写入。写入前会创建关键文件备份，至少包括 `state_5.sqlite` 和 `session_index.jsonl`，并尽量包含 SQLite 的 WAL/SHM 文件。会话级备份则保存在 `<CodexHome>/backups/codex-session-manager/sessions/<session_id>/`。
-
-数据库修复不会重写会话正文 JSONL，也不会删除 SQLite-only 行。
-
-## 路径兼容
-
-Codex 数据里可能同时存在 Windows 路径和 WSL 路径，例如：
+Codex 的本地会话信息通常分散在这些位置：
 
 ```text
-C:\Users\14139\.codex\sessions\...
-/mnt/c/Users/14139/.codex/sessions/...
+<CodexHome>/state_5.sqlite            会话状态、项目路径、归档状态、rollout_path 等索引信息
+<CodexHome>/sessions/**/*.jsonl       活动会话正文和会话元信息
+<CodexHome>/archived_sessions/*.jsonl 已归档会话文件
+<CodexHome>/session_index.jsonl       最近会话标题和更新时间索引
 ```
 
-Windows 版桌面应用在执行归档、活动、置顶等文件操作时，会把 `/mnt/<盘符>/...` 自动转换为对应 Windows 路径，例如 `/mnt/c/...` 转为 `C:\...`。
-这样可以避免把文件误移动到当前盘下的 `\mnt\c\...` 目录。
+Codex Session Manager 会把 SQLite 中的 threads、`sessions/` 和 `archived_sessions/` 中可解析的 rollout JSONL、以及 `session_index.jsonl` 合并为一个列表视图。列表数量可能大于直接查询 SQLite threads 的数量，这通常表示有些会话只存在于 JSONL 文件中，但仍然可以被识别。
 
-## 写入安全
+本项目把本地 JSONL 和 `session_index.jsonl` 视为主要事实来源，`state_5.sqlite` 视为可修复的辅助索引。只要本地文件证据足够明确，工具就可以从 JSONL 和索引反向修复或同步 SQLite。
 
-写入前建议关闭正在使用同一份数据的 Codex。
-应用会在归档、活动、删除和数据库修复等写入操作前检查 Codex 是否正在运行；检测到可能占用同一份本地数据时，会拒绝写入，避免两个程序同时修改造成状态混乱。
+## 安全和隐私
 
-数据库修复在写入前会自动备份 `state_5.sqlite`、`session_index.jsonl` 等关键文件。编辑会话信息和删除会话前会自动创建会话级备份；恢复覆盖已有本地 JSONL 前也会先创建 `restore-preflight` 预检备份。对于特别重要的数据，执行大批量整理前仍可以额外自行复制保存 `.codex` 中的关键文件。
+这个工具操作的是本机 Codex 数据，不需要上传会话内容。项目代码中没有面向远端服务上传会话数据的流程；桌面端只允许打开本项目 GitHub 仓库这个外部链接。
 
-## 原理简述
+写入行为遵循保守策略：
 
-桌面端由三部分组成：
+- 筛选、浏览、预览修复项不会修改 Codex 数据。
+- 编辑会话元数据和删除会话前会自动创建会话级备份。
+- 会话级备份保存在 `<CodexHome>/backups/codex-session-manager/sessions/<session_id>/`。
+- 删除会把会话移动到工具回收区，不直接永久删除。
+- 归档和取消归档会移动会话文件并更新索引，但不会自动创建会话级备份。
+- 数据库修复写入前会备份 `state_5.sqlite`、`session_index.jsonl`，并尽量包含 SQLite 的 WAL/SHM 文件。
+- 恢复备份如果会覆盖已有本地 JSONL，会先创建 `restore-preflight` 预检备份。
+- 归档、活动、删除、数据库修复等写入操作会检测 Codex 是否正在运行；检测到同一份本地数据可能被占用时会拒绝写入。
+
+建议在执行大批量整理、数据库修复或恢复操作前关闭正在使用同一份数据的 Codex。对于特别重要的数据，也可以先额外复制 `.codex` 中的关键文件。
+
+## 主要工作流
+
+### 会话整理
+
+会话管理视图适合日常整理。你可以先用项目、模型、来源、归档状态和关键字缩小范围，再选择单个会话或整个项目分组。批量操作包括归档、设为活动、置顶、删除和元数据编辑。
+
+归档会尽量把对应 rollout 文件从 `sessions` 移到 `archived_sessions`。设为活动会执行相反操作，并刷新 rollout 文件时间，帮助 Codex 或列表刷新逻辑感知变化。置顶只刷新文件访问时间和修改时间，不重写会话正文。
+
+### 备份恢复
+
+恢复备份页面按会话 ID 展示备份组，包括标题、项目、会话 ID、最新备份时间、快照数量和本地 JSONL 是否仍存在。红色备份行表示本地 JSONL 已缺失。
+
+恢复备份会恢复 JSONL，合并缺失的 `session_index.jsonl` 条目，可选恢复收藏状态，并从恢复后的本地文件同步 SQLite。删除某个本地已缺失会话的最后一个备份快照时，界面会要求额外确认。
+
+### 数据库修复
+
+数据库修复用于处理 SQLite、JSONL 文件和 `session_index.jsonl` 之间的不一致。它默认先预览，不会立即写入。
+
+可自动应用的保守修复包括：
+
+- JSONL-only 会话：JSONL 存在但 SQLite `threads` 缺少对应行时，补充缺失行。
+- `rollout_path` 修复：SQLite 中路径为空、不存在或不可用时，改为当前真实 JSONL 路径。
+- 路径归一化：将不可用的 `/mnt/<盘符>/...` 路径修为当前系统可用路径。
+- 归档状态同步：唯一 JSONL 位于 `archived_sessions` 时同步为已归档，位于 `sessions` 时同步为活动。
+
+只报告、不自动修改的情况包括 SQLite-only row 和重复 JSONL，因为这些情况无法仅凭代码安全地判断应该保留哪份数据。
+
+## CLI
+
+仓库根目录同时提供一个 Rust CLI，适合做只读检查、脚本化预览或在没有桌面界面时执行明确命令。
+
+查看帮助：
+
+```powershell
+cargo run -- --help
+```
+
+只读扫描：
+
+```powershell
+cargo run -- --codex-home C:\Users\<用户名>\.codex scan
+```
+
+列出会话：
+
+```powershell
+cargo run -- --codex-home C:\Users\<用户名>\.codex list --archived all
+```
+
+验证一致性：
+
+```powershell
+cargo run -- --codex-home C:\Users\<用户名>\.codex validate
+```
+
+列出备份：
+
+```powershell
+cargo run -- --codex-home C:\Users\<用户名>\.codex backup-list
+```
+
+会写入数据的 CLI 命令会显式要求 `--apply`。例如同步 SQLite：
+
+```powershell
+cargo run -- --codex-home C:\Users\<用户名>\.codex sync-database --apply
+```
+
+## 项目结构
 
 ```text
 ui/          Vite + TypeScript 前端界面
 src-tauri/   Tauri 2 桌面壳和前后端桥接
-src/         Rust 核心逻辑
+src/         Rust 核心逻辑与 CLI
+tests/       Rust 集成测试和 PowerShell 发布脚本测试
+assets/      README 和项目展示截图
 ```
 
-前端负责展示列表、筛选、选择、详情面板和操作按钮；Tauri 桥接层把这些操作交给 Rust 核心执行。
-Rust 侧负责读取 Codex 本地状态、解析 rollout JSONL、移动归档文件、更新 SQLite 状态、更新索引和执行安全检查。
+桌面端前端负责列表、筛选、选择、详情面板和操作按钮。Tauri 桥接层把这些操作交给 Rust 核心执行。Rust 侧负责读取 Codex 本地状态、解析 rollout JSONL、移动归档文件、更新 SQLite 状态、更新索引、管理备份和执行安全检查。
 
-写入时遵循几个原则：
+## 开发
 
-- 只修改必要的索引字段或文件位置。
-- 不全量重写会话正文。
-- 删除进入工具回收区，不直接永久删除。
-- Codex 正在运行时拒绝写入。
-- 对 WSL 挂载路径做运行时归一化。
-- 数据库修复只应用可确认的保守修复，无法唯一确认的项目只报告。
+安装前端依赖：
+
+```powershell
+npm --prefix ui ci
+```
+
+运行前端构建检查：
+
+```powershell
+npm --prefix ui run build
+```
+
+运行 Rust 测试：
+
+```powershell
+cargo test
+```
+
+运行版本脚本测试：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\set-version.tests.ps1
+```
+
+## 发布
+
+发布流程由 `.github/workflows/release.yml` 驱动。推送 `v*` 格式的 tag 后，GitHub Actions 会构建并上传桌面安装包。
+
+当前构建矩阵包括：
+
+- Windows: `windows-latest`
+- Linux: `ubuntu-22.04`
+- macOS Apple Silicon: `aarch64-apple-darwin`
+- macOS Intel: `x86_64-apple-darwin`
+
+发布前用版本脚本同步版本号，参数不带 `v`：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\set-version.ps1 0.2.0
+```
+
+脚本会同步更新 `Cargo.toml`、`Cargo.lock`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`ui/package.json` 和 `ui/package-lock.json`。
+
+建议发布前至少执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\set-version.tests.ps1
+npm --prefix ui run build
+```
+
+确认版本文件和构建检查没问题后，创建发布提交并推送 tag：
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+workflow 当前设置为 `releaseDraft: true`，生成的是草稿 Release。Actions 全部通过后，到 GitHub Releases 页面检查标题、说明和附件，再手动发布。
+
+## 常见问题
+
+### 列表为空怎么办？
+
+先确认 Codex 主目录是否正确，再清空筛选条件，把状态切到全部并刷新。如果仍然为空，检查 `.codex` 下是否存在 `sessions/`、`archived_sessions/`、`state_5.sqlite` 或 `session_index.jsonl`。
+
+### 为什么工具显示的会话数量比 SQLite threads 多？
+
+这是预期行为。工具会合并 SQLite threads 和本地 rollout JSONL。只存在于 JSONL 中的会话也会尽量展示出来，需要时可以进入数据库修复预览并补齐 SQLite 行。
+
+### 操作被拒绝怎么办？
+
+通常是 Codex 正在使用同一份本地数据。关闭 Codex 后再重试。错误信息会保留失败原因，方便定位具体问题。
+
+### 数据库修复会改写会话正文吗？
+
+不会。数据库修复不会重写会话正文 JSONL，也不会删除 SQLite-only 行。它只补充或更新 SQLite 中可以保守确认的索引字段。
+
+### 删除后还能恢复吗？
+
+可以。删除前会自动创建会话级备份，并把会话移动到工具回收区。日常恢复建议使用“恢复备份”页面按会话和快照恢复。
 
 ## 支持
 
-如果这个项目帮到了你，star、反馈问题，或小额支持都很感谢：
+如果这个项目帮到了你，欢迎 star、反馈问题，或通过下面的链接支持作者：
 
 [支持链接](https://aisspire.github.io/support/)
+
+## License
+
+[MIT](LICENSE)
