@@ -43,6 +43,7 @@ pub enum BackupTrigger {
     Manual,
     DatabaseRepair,
     RestorePreflight,
+    Compact,
 }
 
 impl BackupTrigger {
@@ -53,6 +54,7 @@ impl BackupTrigger {
             Self::Manual => "manual",
             Self::DatabaseRepair => "database-repair",
             Self::RestorePreflight => "restore-preflight",
+            Self::Compact => "compact",
         }
     }
 }

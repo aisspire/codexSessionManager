@@ -2,9 +2,8 @@
 
 use std::process::Command;
 
-use codex_session_manager::backup_store::{
-    self, BackupDeleteReport, SessionBackupSummary,
-};
+use codex_session_manager::backup_store::{self, BackupDeleteReport, SessionBackupSummary};
+use codex_session_manager::compact::{self, CompactOptions, CompactReport};
 use codex_session_manager::db_repair::{
     self, DatabaseRepairApplyReport, DatabaseRepairOptions, DatabaseRepairPreview,
 };
@@ -14,9 +13,9 @@ use codex_session_manager::path_map::PathMap;
 use codex_session_manager::profile::CodexProfile;
 use codex_session_manager::restore::{self, RestorePreview, RestoreReport, RestoreSessionOptions};
 use codex_session_manager::safety;
-use codex_session_manager::settings::{self, AppSettings};
 use codex_session_manager::session_list::{self, SessionListFilter, SessionSummary};
 use codex_session_manager::session_ops::{self, SessionApplyOptions, SessionMutationReport};
+use codex_session_manager::settings::{self, AppSettings};
 use serde::Deserialize;
 
 const PROJECT_GITHUB_URL: &str = "https://github.com/aisspire/codexSessionManager";
@@ -147,6 +146,16 @@ fn refresh_session_updated_at(
     let profile = build_profile(profile)?;
     session_ops::refresh_session_updated_at(&profile, &ids, &apply_options(apply))
         .map_err(format_error)
+}
+
+#[tauri::command]
+fn compact_session(
+    profile: ProfileInput,
+    id: String,
+    apply: bool,
+) -> Result<CompactReport, String> {
+    let profile = build_profile(profile)?;
+    compact::compact_session(&profile, &id, &CompactOptions { apply }).map_err(format_error)
 }
 
 #[tauri::command]
@@ -297,6 +306,7 @@ fn main() {
             active_sessions,
             delete_sessions,
             refresh_session_updated_at,
+            compact_session,
             edit_selected_sessions,
             preview_database_repairs,
             apply_database_repairs,

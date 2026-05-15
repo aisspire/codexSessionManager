@@ -6,6 +6,7 @@
 pub mod backup;
 pub mod backup_store;
 pub mod cli;
+pub mod compact;
 pub mod db_repair;
 pub mod favorites;
 pub mod migrate;

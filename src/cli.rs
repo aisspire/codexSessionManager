@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::backup_store::{self, BackupTrigger};
+use crate::compact::{self, CompactOptions};
 use crate::db_repair;
 use crate::migrate::{self, ApplyOptions};
 use crate::path_map::PathMap;
@@ -147,6 +148,14 @@ pub enum Command {
         #[arg(long)]
         apply: bool,
     },
+
+    /// Compact one session context through the Codex CLI.
+    CompactSession {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -186,38 +195,21 @@ pub fn run() -> Result<()> {
             )?;
             print_session_list(&sessions);
         }
-        Command::MigrateProvider {
-            from,
-            to,
-            apply,
-        } => {
-            let report = migrate::migrate_provider(
-                &profile,
-                from,
-                to,
-                &ApplyOptions { apply: *apply },
-            )?;
+        Command::MigrateProvider { from, to, apply } => {
+            let report =
+                migrate::migrate_provider(&profile, from, to, &ApplyOptions { apply: *apply })?;
             println!("{}", report.to_text());
         }
         Command::MigratePaths { apply } => {
-            let report = migrate::migrate_paths(
-                &profile,
-                &ApplyOptions { apply: *apply },
-            )?;
+            let report = migrate::migrate_paths(&profile, &ApplyOptions { apply: *apply })?;
             println!("{}", report.to_text());
         }
         Command::RepairSessionIndex { apply } => {
-            let report = migrate::repair_session_index(
-                &profile,
-                &ApplyOptions { apply: *apply },
-            )?;
+            let report = migrate::repair_session_index(&profile, &ApplyOptions { apply: *apply })?;
             println!("{}", report.to_text());
         }
         Command::RepairHasUserEvent { apply } => {
-            let report = migrate::repair_has_user_event(
-                &profile,
-                &ApplyOptions { apply: *apply },
-            )?;
+            let report = migrate::repair_has_user_event(&profile, &ApplyOptions { apply: *apply })?;
             println!("{}", report.to_text());
         }
         Command::Archive { ids, apply } => {
@@ -285,6 +277,17 @@ pub fn run() -> Result<()> {
             println!("sqlite rows: {}", report.sqlite_rows);
             if let Some(backup_dir) = report.backup_dir {
                 println!("backup dir: {backup_dir}");
+            }
+        }
+        Command::CompactSession { id, apply } => {
+            require_apply(*apply, "compact-session")?;
+            let report = compact::compact_session(&profile, id, &CompactOptions { apply: true })?;
+            println!("{}", report.to_text());
+            if !report.stdout.trim().is_empty() {
+                println!("stdout:\n{}", report.stdout.trim());
+            }
+            if !report.stderr.trim().is_empty() {
+                eprintln!("stderr:\n{}", report.stderr.trim());
             }
         }
     }

@@ -1,4 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  codexExitConfirmationMessage,
+  singleSelectionForCodexAction,
+} from "./codexExitConfirm";
 import { loadInputCache, saveInputCache } from "./inputCache";
 import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectExpansionCache";
 import {
@@ -55,6 +59,17 @@ interface MutationReport {
   sqlite_rows: number;
   jsonl_files: number;
   index_entries: number;
+}
+
+interface CompactReport {
+  action: string;
+  applied: boolean;
+  session_id: string;
+  backup_manifest: string;
+  command: string[];
+  exit_code?: number;
+  stdout: string;
+  stderr: string;
 }
 
 type DatabaseRepairKind =
@@ -125,7 +140,7 @@ interface SessionBackupSnapshot {
   size_bytes: number;
 }
 
-type BackupTrigger = "delete" | "edit" | "manual" | "database-repair" | "restore-preflight";
+type BackupTrigger = "delete" | "edit" | "manual" | "database-repair" | "restore-preflight" | "compact";
 
 interface RestorePreview {
   backup_id: string;
@@ -306,7 +321,7 @@ function pageHeader() {
     state.activePage === "batch-edit"
       ? "批量修改已选会话的名称前缀、提供方和项目路径。"
       : state.activePage === "session-management"
-        ? "归档、活动、置顶或删除已选会话。"
+        ? "归档、活动、置顶、压缩上下文或删除已选会话。"
         : state.activePage === "restore-backups"
           ? "按会话查看备份快照，恢复缺失或覆盖前自动创建预检备份。"
           : "预览 Codex 数据库与 JSONL 文件之间的不一致项，勾选后执行保守修复。";
@@ -490,6 +505,7 @@ function sessionManagementBar() {
       <button id="archive">归档</button>
       <button id="active">活动</button>
       <button id="refresh-time">置顶</button>
+      <button id="compact-context">压缩上下文</button>
       <button id="delete" class="danger">删除</button>
     </section>
   `;
@@ -698,6 +714,7 @@ function detailDrawer(session: SessionSummary) {
         <button id="save-detail-title" class="primary" ${dirty ? "" : "disabled"}>保存</button>
         <button data-toggle-favorite="${escapeHtml(session.id)}">${session.favorite ? "取消收藏" : "收藏"}</button>
         <button data-single-command="refresh_session_updated_at">置顶</button>
+        <button data-compact-single>压缩上下文</button>
         <button data-single="archive">归档</button>
         <button data-single="active">活动</button>
         <button data-single="delete" class="danger">删除</button>
@@ -734,6 +751,7 @@ function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
   document.querySelector("#archive")?.addEventListener("click", () => mutateSelected("archive_sessions"));
   document.querySelector("#active")?.addEventListener("click", () => mutateSelected("active_sessions"));
   document.querySelector("#refresh-time")?.addEventListener("click", () => mutateSelected("refresh_session_updated_at"));
+  document.querySelector("#compact-context")?.addEventListener("click", compactSelected);
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
 }
 
@@ -979,6 +997,9 @@ function bindDetailEvents() {
     const command = button.dataset.singleCommand || `${button.dataset.single}_sessions`;
     button.addEventListener("click", () => mutateIds(command as SessionCommand, [state.activeId]));
   });
+  document.querySelector<HTMLElement>("[data-compact-single]")?.addEventListener("click", () => {
+    compactIds([state.activeId]);
+  });
 }
 
 function bindInput(id: string, update: (value: string) => void) {
@@ -1029,9 +1050,45 @@ async function mutateIds(command: SessionCommand, ids: string[]) {
     render({ preserveTableScroll: true });
     return;
   }
+  if (commandRequiresCodexExit(command) && !confirmCodexExitAction(commandLabel(command), ids.length, commandCreatesBackup(command))) {
+    return;
+  }
   await run(async () => {
     const report = await invoke(command, { profile: state.profile, ids, apply: true });
     state.status = JSON.stringify(report);
+    await refresh();
+  });
+}
+
+async function compactSelected() {
+  await compactIds([...state.selectedIds]);
+}
+
+async function compactIds(ids: string[]) {
+  const selection = singleSelectionForCodexAction(ids, "压缩上下文");
+  if (!selection.ok) {
+    state.status = selection.message;
+    render({ preserveTableScroll: true });
+    return;
+  }
+  if (
+    !confirmCodexExitAction(
+      "压缩上下文",
+      1,
+      true,
+      "将通过 Codex CLI 恢复该会话并执行 /compact；若 CLI 出现更新、登录或其它交互提示，应用会显示错误输出。",
+    )
+  ) {
+    return;
+  }
+
+  await run(async () => {
+    const report = await invoke<CompactReport>("compact_session", {
+      profile: state.profile,
+      id: selection.id,
+      apply: true,
+    });
+    state.status = formatCompactReport(report);
     await refresh();
   });
 }
@@ -1051,7 +1108,7 @@ async function editSelected(apply: boolean) {
     render({ preserveTableScroll: true });
     return;
   }
-  if (apply && !window.confirm(`将修改 ${ids.length} 个已选会话。继续？`)) {
+  if (apply && !confirmCodexExitAction("修改会话元数据", ids.length, true)) {
     return;
   }
 
@@ -1261,7 +1318,7 @@ async function applySelectedRepairs() {
     render({ preserveTableScroll: true });
     return;
   }
-  if (!window.confirm(`将应用 ${selected.length} 个数据库修复项。继续？`)) {
+  if (!confirmCodexExitAction("应用数据库修复", selected.length, true)) {
     return;
   }
 
@@ -1303,7 +1360,12 @@ async function restoreSelectedBackup(sessionId: string) {
     const overwriteText = preview.overwrites_existing ? "\n目标 JSONL 已存在，将先创建预检备份。" : "";
     const favoriteText = preview.favorite ? "\n将恢复收藏状态。" : "";
     const confirmed = window.confirm(
-      `恢复会话 ${preview.session_id}\n目标：${preview.restore_session_path || "无 JSONL 文件"}${overwriteText}${favoriteText}`,
+      `${codexExitConfirmationMessage({
+        action: "恢复备份",
+        count: 1,
+        backup: preview.overwrites_existing,
+        extra: `会话 ${preview.session_id}\n目标：${preview.restore_session_path || "无 JSONL 文件"}${overwriteText}${favoriteText}`,
+      })}`,
     );
     if (!confirmed) return;
     const report = await invoke<RestoreReport>("restore_session_backup", {
@@ -1352,7 +1414,7 @@ async function deleteSelectedBackup(sessionId: string) {
 }
 
 async function applyDatabaseSyncFromLocal() {
-  if (!window.confirm("将按本地 JSONL 和 session_index 同步 SQLite。继续？")) return;
+  if (!confirmCodexExitAction("按本地文件同步数据库", 1, true)) return;
   await run(async () => {
     const report = await invoke<DatabaseRepairApplyReport>("apply_database_sync_from_local", {
       profile: state.profile,
@@ -1476,6 +1538,7 @@ function backupTriggerLabel(trigger: BackupTrigger) {
     manual: "手动",
     "database-repair": "数据库修复",
     "restore-preflight": "恢复预检",
+    compact: "压缩前",
   };
   return labels[trigger];
 }
@@ -1485,6 +1548,42 @@ function formatRestoreReport(report: RestoreReport) {
   const preflight = report.preflight_backup_manifest ? " · 已创建覆盖前备份" : "";
   const favorite = report.favorite_restored ? " · 已恢复收藏" : "";
   return `已恢复 ${report.files_restored} 个文件 · 索引 ${report.index_entries} 条 · SQLite ${report.sqlite_rows} 行${favorite}${preflight}${target}`;
+}
+
+function formatCompactReport(report: CompactReport) {
+  const backup = report.backup_manifest ? ` · 备份 ${report.backup_manifest}` : "";
+  const output = report.stdout.trim() || report.stderr.trim();
+  const outputNote = output ? ` · ${output.slice(0, 160)}` : "";
+  return `已压缩上下文 ${report.session_id}${backup}${outputNote}`;
+}
+
+function commandRequiresCodexExit(command: SessionCommand) {
+  return command === "archive_sessions" || command === "active_sessions" || command === "delete_sessions";
+}
+
+function commandCreatesBackup(command: SessionCommand) {
+  return command === "delete_sessions";
+}
+
+function commandLabel(command: SessionCommand) {
+  const labels: Record<SessionCommand, string> = {
+    archive_sessions: "归档",
+    active_sessions: "设为活动",
+    delete_sessions: "删除",
+    refresh_session_updated_at: "置顶",
+  };
+  return labels[command];
+}
+
+function confirmCodexExitAction(action: string, count: number, backup: boolean, extra?: string) {
+  return window.confirm(
+    codexExitConfirmationMessage({
+      action,
+      count,
+      backup,
+      extra,
+    }),
+  );
 }
 
 function optionalNumber(value: number | null | undefined) {
