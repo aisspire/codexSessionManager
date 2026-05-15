@@ -12,5 +12,8 @@ fn expands_tilde_codex_home_for_profile_paths() {
     let profile = CodexProfile::new("default", "~/.codex", None, None, Vec::new()).unwrap();
 
     assert_eq!(profile.codex_home, home.join(".codex"));
-    assert_eq!(profile.state_db_path(), home.join(".codex").join("state_5.sqlite"));
+    assert_eq!(
+        profile.state_db_path(),
+        home.join(".codex").join("state_5.sqlite")
+    );
 }

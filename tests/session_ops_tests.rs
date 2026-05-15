@@ -3,8 +3,8 @@ use std::time::{Duration, SystemTime};
 
 use codex_session_manager::profile::CodexProfile;
 use codex_session_manager::session_ops::{
-    active_sessions_with_guard, archive_sessions_with_guard,
-    refresh_session_updated_at_with_guard, SessionApplyOptions,
+    active_sessions_with_guard, archive_sessions_with_guard, refresh_session_updated_at_with_guard,
+    SessionApplyOptions,
 };
 use rusqlite::{params, Connection};
 use tempfile::tempdir;
@@ -15,9 +15,7 @@ fn archives_and_marks_selected_sessions_active() {
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
     let ids = vec!["thread-1".to_string()];
-    let options = SessionApplyOptions {
-        apply: true,
-    };
+    let options = SessionApplyOptions { apply: true };
 
     let archive = archive_sessions_with_guard(&profile, &ids, &options, || Ok(())).unwrap();
     assert!(archive.applied);
@@ -43,18 +41,14 @@ fn archives_and_marks_active_touch_rollout_files_to_notify_codex() {
     set_rollout_path(&profile.state_db_path(), "thread-1", &rollout_path);
     let archived_path = profile.archived_sessions_dir().join("thread-1.jsonl");
     let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_770_790_000);
-    let options = SessionApplyOptions {
-        apply: true,
-    };
+    let options = SessionApplyOptions { apply: true };
 
     set_file_times(&rollout_path, old_time);
-    archive_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
-        .unwrap();
+    archive_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(())).unwrap();
     assert!(archived_path.metadata().unwrap().modified().unwrap() > old_time);
 
     set_file_times(&archived_path, old_time);
-    active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
-        .unwrap();
+    active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(())).unwrap();
     assert!(rollout_path.metadata().unwrap().modified().unwrap() > old_time);
 }
 
@@ -75,19 +69,15 @@ fn archives_and_marks_active_move_rollout_files_between_codex_directories() {
     let archived_path = profile
         .archived_sessions_dir()
         .join("rollout-2026-05-07T21-52-45-thread-1.jsonl");
-    let options = SessionApplyOptions {
-        apply: true,
-    };
+    let options = SessionApplyOptions { apply: true };
 
-    archive_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
-        .unwrap();
+    archive_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(())).unwrap();
 
     assert!(!rollout_path.exists());
     assert!(archived_path.exists());
     assert_archived(&profile.state_db_path(), "thread-1", true);
 
-    active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
-        .unwrap();
+    active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(())).unwrap();
 
     assert!(rollout_path.exists());
     assert!(!archived_path.exists());
@@ -112,9 +102,7 @@ fn marks_codex_archived_rollout_active_even_when_sqlite_is_not_archived() {
     write_rollout(&archived_path, "thread-1");
     set_rollout_path(&profile.state_db_path(), "thread-1", &restored_path);
     assert_archived(&profile.state_db_path(), "thread-1", false);
-    let options = SessionApplyOptions {
-        apply: true,
-    };
+    let options = SessionApplyOptions { apply: true };
 
     let report =
         active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
@@ -150,8 +138,7 @@ fn marks_active_uses_windows_path_for_wsl_mount_rollout_path() {
     );
     let options = SessionApplyOptions { apply: true };
 
-    active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(()))
-        .unwrap();
+    active_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || Ok(())).unwrap();
 
     assert!(restored_path.exists());
     assert!(!archived_path.exists());
@@ -162,9 +149,7 @@ fn refuses_to_archive_when_codex_is_running() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
-    let options = SessionApplyOptions {
-        apply: true,
-    };
+    let options = SessionApplyOptions { apply: true };
 
     let result = archive_sessions_with_guard(&profile, &["thread-1".to_string()], &options, || {
         anyhow::bail!("Codex appears to be running")
@@ -211,9 +196,7 @@ fn refreshes_selected_session_rollout_files_without_rewriting_indexes() {
     )
     .unwrap();
     let ids = vec!["thread-1".to_string(), "thread-2".to_string()];
-    let options = SessionApplyOptions {
-        apply: true,
-    };
+    let options = SessionApplyOptions { apply: true };
 
     let report =
         refresh_session_updated_at_with_guard(&profile, &ids, &options, || Ok(())).unwrap();
@@ -272,9 +255,7 @@ fn refreshes_session_rollout_files_while_codex_is_running() {
         .unwrap()
         .set_times(old_times)
         .unwrap();
-    let options = SessionApplyOptions {
-        apply: true,
-    };
+    let options = SessionApplyOptions { apply: true };
 
     let report = refresh_session_updated_at_with_guard(
         &profile,
@@ -362,7 +343,11 @@ fn windows_path_to_wsl_mount(path: &std::path::Path) -> String {
     let Some((drive, rest)) = text.split_once(':') else {
         panic!("test path is missing a drive letter: {text}");
     };
-    format!("/mnt/{}/{}", drive.to_ascii_lowercase(), rest.trim_start_matches('/'))
+    format!(
+        "/mnt/{}/{}",
+        drive.to_ascii_lowercase(),
+        rest.trim_start_matches('/')
+    )
 }
 
 fn set_file_times(path: &std::path::Path, time: SystemTime) {

@@ -21,6 +21,7 @@
 - 管理会话级备份，按快照预览、恢复或删除备份。
 - 预览并保守修复 SQLite 与 JSONL 之间的不一致。
 - 按本地 JSONL 和 `session_index.jsonl` 手动同步 SQLite，也可配置为 Codex 停止后自动同步一次。
+- 可配置显式 Codex CLI 命令路径；Windows 默认会优先通过 `where.exe codex` 找到用户入口 `codex.cmd`。
 - 自动保存输入框内容、筛选条件和项目分组展开状态。
 
 ## 截图
@@ -80,6 +81,8 @@ WSL:     /mnt/c/Users/<用户名>/.codex
 Linux:   ~/.codex
 ```
 
+如果桌面应用无法找到 `codex`，可以打开设置抽屉，在“Codex CLI 命令”中填写完整命令路径，例如 Windows 上的 `C:\Users\<用户名>\AppData\Roaming\npm\codex.cmd`。留空时应用会自动查找。
+
 更详细的日常操作说明见 [使用说明.md](使用说明.md)。
 
 ## 数据模型
@@ -106,7 +109,7 @@ Codex Session Manager 会把 SQLite 中的 threads、`sessions/` 和 `archived_s
 - 筛选、浏览、预览修复项不会修改 Codex 数据。
 - 编辑会话元数据、删除会话和压缩上下文前会自动创建会话级备份。
 - 会话级备份保存在 `<CodexHome>/backups/codex-session-manager/sessions/<session_id>/`。
-- 删除会把会话移动到工具回收区，不直接永久删除。
+- 删除会把 JSONL 移动到工具回收区，移除 `session_index.jsonl` 条目，并删除 SQLite `threads` 主记录；删除前备份会出现在备份页的“回收站”分组中，可用于恢复。
 - 归档和取消归档会移动会话文件并更新索引，但不会自动创建会话级备份。
 - 数据库修复写入前会备份 `state_5.sqlite`、`session_index.jsonl`，并尽量包含 SQLite 的 WAL/SHM 文件。
 - 恢复备份如果会覆盖已有本地 JSONL，会先创建 `restore-preflight` 预检备份。
@@ -118,15 +121,15 @@ Codex Session Manager 会把 SQLite 中的 threads、`sessions/` 和 `archived_s
 
 ### 会话整理
 
-会话管理视图适合日常整理。你可以先用项目、模型、来源、归档状态和关键字缩小范围，再选择单个会话或整个项目分组。批量操作包括归档、设为活动、置顶、删除和元数据编辑。上下文压缩只支持单个会话，会先创建会话级备份，再通过 Codex CLI 恢复该会话并发送 `/compact`。
+会话管理视图适合日常整理。你可以先用项目、模型、来源、归档状态和关键字缩小范围，再选择单个会话或整个项目分组。批量操作包括归档、设为活动、置顶、删除和元数据编辑。上下文压缩只支持单个会话，会先创建会话级备份，再读取该会话 JSONL 中记录的项目目录，并通过 Codex CLI 在该项目目录下恢复会话并发送 `/compact`。
 
 归档会尽量把对应 rollout 文件从 `sessions` 移到 `archived_sessions`。设为活动会执行相反操作，并刷新 rollout 文件时间，帮助 Codex 或列表刷新逻辑感知变化。置顶只刷新文件访问时间和修改时间，不重写会话正文。
 
 ### 备份恢复
 
-恢复备份页面按会话 ID 展示备份组，包括标题、项目、会话 ID、最新备份时间、快照数量和本地 JSONL 是否仍存在。红色备份行表示本地 JSONL 已缺失。
+恢复备份页面按会话 ID 展示备份组，包括标题、项目、会话 ID、最新备份时间、快照数量和本地 JSONL 是否仍存在。删除触发的最新备份会显示在“回收站”分组下；红色备份行表示本地 JSONL 已缺失。
 
-恢复备份会恢复 JSONL，合并缺失的 `session_index.jsonl` 条目，可选恢复收藏状态，并从恢复后的本地文件同步 SQLite。删除某个本地已缺失会话的最后一个备份快照时，界面会要求额外确认。
+恢复备份会恢复 JSONL，合并缺失的 `session_index.jsonl` 条目，可选恢复收藏状态，并从备份清单重建或更新 SQLite `threads` 行；恢复后的 `rollout_path` 会指向实际恢复的 JSONL。删除某个本地已缺失会话的最后一个备份快照时，界面会要求额外确认。
 
 ### 数据库修复
 
@@ -138,8 +141,9 @@ Codex Session Manager 会把 SQLite 中的 threads、`sessions/` 和 `archived_s
 - `rollout_path` 修复：SQLite 中路径为空、不存在或不可用时，改为当前真实 JSONL 路径。
 - 路径归一化：将不可用的 `/mnt/<盘符>/...` 路径修为当前系统可用路径。
 - 归档状态同步：唯一 JSONL 位于 `archived_sessions` 时同步为已归档，位于 `sessions` 时同步为活动。
+- SQLite-only 行：SQLite `threads` 中存在主记录但找不到对应 JSONL 时，可在备份数据库和索引后删除这条主记录。
 
-只报告、不自动修改的情况包括 SQLite-only row 和重复 JSONL，因为这些情况无法仅凭代码安全地判断应该保留哪份数据。
+只报告、不自动修改的情况包括重复 JSONL，因为这些情况无法仅凭代码安全地判断应该保留哪份会话文件。
 
 ## CLI
 
@@ -187,7 +191,7 @@ cargo run -- --codex-home C:\Users\<用户名>\.codex sync-database --apply
 cargo run -- --codex-home C:\Users\<用户名>\.codex compact-session --id <session_id> --apply
 ```
 
-该命令会先拒绝在 Codex 仍运行时写入，再创建会话级备份，然后调用本机 `codex exec resume <session_id> /compact`。如果 Codex CLI 出现更新提示、登录提示或其它交互式阻塞，命令会超时并输出捕获到的 stdout/stderr。
+该命令会先拒绝在 Codex 仍运行时写入，再创建会话级备份，然后读取会话 JSONL 中的项目目录。项目目录存在时会在该目录下调用本机 `codex exec -C <project_dir> resume <session_id> /compact`；项目目录不可用时会退回到普通 `codex exec resume <session_id> /compact`。如果 Codex CLI 出现更新提示、登录提示或其它交互式阻塞，命令会超时并输出捕获到的 stdout/stderr。
 
 ## 项目结构
 
@@ -278,11 +282,11 @@ workflow 当前设置为 `releaseDraft: true`，生成的是草稿 Release。Act
 
 ### 数据库修复会改写会话正文吗？
 
-不会。数据库修复不会重写会话正文 JSONL，也不会删除 SQLite-only 行。它只补充或更新 SQLite 中可以保守确认的索引字段。
+不会。数据库修复不会重写会话正文 JSONL。它会补充或更新 SQLite 中可以保守确认的索引字段；对于 SQLite-only 行，应用修复前会先备份数据库和索引，再删除这条没有对应 JSONL 的主记录。
 
 ### 删除后还能恢复吗？
 
-可以。删除前会自动创建会话级备份，并把会话移动到工具回收区。日常恢复建议使用“恢复备份”页面按会话和快照恢复。
+可以。删除前会自动创建会话级备份，把 JSONL 移动到工具回收区，并从 SQLite 主表移除该会话。日常恢复建议使用“恢复备份”页面中的“回收站”分组按会话和快照恢复；有 SQLite 备份清单的会话会在恢复时重建 `threads` 行。
 
 ## 支持
 

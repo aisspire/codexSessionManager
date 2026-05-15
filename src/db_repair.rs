@@ -167,8 +167,7 @@ pub fn preview_database_repairs(profile: &CodexProfile) -> Result<DatabaseRepair
 
     for item in &mut items {
         if item.kind == DatabaseRepairKind::SqliteOnlyThread {
-            item.summary =
-                "SQLite threads 存在但未找到对应 JSONL，可删除这条主记录".to_string();
+            item.summary = "SQLite threads 存在但未找到对应 JSONL，可删除这条主记录".to_string();
             item.after = Some("delete threads row".to_string());
             item.applicable = true;
             item.skip_reason = None;

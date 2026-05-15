@@ -38,10 +38,7 @@ fn compact_creates_backup_and_invokes_codex_exec_resume_compact() {
     .unwrap();
 
     let invocation = seen.borrow().clone().unwrap();
-    assert!(invocation
-        .program
-        .to_ascii_lowercase()
-        .contains("codex"));
+    assert!(invocation.program.to_ascii_lowercase().contains("codex"));
     assert_eq!(
         invocation.args,
         vec![
@@ -109,7 +106,60 @@ fn compact_uses_configured_codex_command_path() {
     )
     .unwrap();
 
-    assert_eq!(seen.borrow().clone().unwrap().program, r"C:\Tools\codex.cmd");
+    assert_eq!(
+        seen.borrow().clone().unwrap().program,
+        r"C:\Tools\codex.cmd"
+    );
+}
+
+#[test]
+fn compact_runs_codex_from_session_project_directory_when_available() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    let project = dir.path().join("project-a");
+    fs::create_dir_all(&project).unwrap();
+    write_rollout_with_cwd(
+        &profile.sessions_dir().join("thread-1.jsonl"),
+        "thread-1",
+        project.to_str().unwrap(),
+    );
+    let seen = Rc::new(RefCell::new(None));
+    let seen_runner = Rc::clone(&seen);
+
+    compact_session_with_guard_and_runner(
+        &profile,
+        "thread-1",
+        &CompactOptions { apply: true },
+        || Ok(()),
+        move |invocation| {
+            *seen_runner.borrow_mut() = Some(invocation.clone());
+            Ok(CodexCliOutput {
+                exit_code: Some(0),
+                stdout: "compacted".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            })
+        },
+    )
+    .unwrap();
+
+    let invocation = seen.borrow().clone().unwrap();
+    assert_eq!(
+        invocation.current_dir.as_deref(),
+        Some(project.to_str().unwrap())
+    );
+    assert_eq!(
+        invocation.args,
+        vec![
+            "exec",
+            "-C",
+            project.to_str().unwrap(),
+            "resume",
+            "--skip-git-repo-check",
+            "thread-1",
+            "/compact"
+        ]
+    );
 }
 
 #[test]
@@ -208,12 +258,19 @@ fn compact_dry_run_does_not_backup_or_invoke_command() {
 }
 
 fn write_rollout(path: &Path, id: &str) {
+    write_rollout_with_cwd(path, id, "/tmp/project");
+}
+
+fn write_rollout_with_cwd(path: &Path, id: &str, cwd: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(
-        path,
-        format!(
-            r#"{{"type":"session_meta","payload":{{"id":"{id}","cwd":"/tmp/project","source":"cli","model_provider":"cm"}}}}"#
-        ),
-    )
-    .unwrap();
+    let line = serde_json::json!({
+        "type": "session_meta",
+        "payload": {
+            "id": id,
+            "cwd": cwd,
+            "source": "cli",
+            "model_provider": "cm",
+        }
+    });
+    fs::write(path, serde_json::to_string(&line).unwrap()).unwrap();
 }

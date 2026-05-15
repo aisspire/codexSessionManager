@@ -82,7 +82,10 @@ fn expand_home(path: PathBuf) -> PathBuf {
     if value == "~" {
         return home;
     }
-    if let Some(rest) = value.strip_prefix("~/").or_else(|| value.strip_prefix("~\\")) {
+    if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
         return home.join(rest);
     }
 

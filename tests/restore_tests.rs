@@ -115,7 +115,11 @@ fn restore_deleted_session_recreates_original_sqlite_thread() {
 
     assert_eq!(report.sqlite_rows, 1);
     assert!(rollout.exists());
-    assert_thread_rollout_path(&profile.state_db_path(), "thread-1", rollout.to_str().unwrap());
+    assert_thread_rollout_path(
+        &profile.state_db_path(),
+        "thread-1",
+        rollout.to_str().unwrap(),
+    );
     assert!(list_sessions(&profile, &SessionListFilter::default())
         .unwrap()
         .iter()
@@ -310,9 +314,11 @@ fn assert_thread_missing(path: &Path, id: &str) {
 fn assert_thread_rollout_path(path: &Path, id: &str, expected: &str) {
     let conn = Connection::open(path).unwrap();
     let rollout_path: String = conn
-        .query_row("SELECT rollout_path FROM threads WHERE id = ?1", [id], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT rollout_path FROM threads WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(rollout_path, expected);
 }

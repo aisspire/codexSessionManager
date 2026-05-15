@@ -23,9 +23,7 @@ fn migrates_provider_and_returns_serializable_report() {
         &profile,
         "codex-auto-review",
         "cm",
-        &ApplyOptions {
-            apply: true,
-        },
+        &ApplyOptions { apply: true },
     )
     .unwrap();
 

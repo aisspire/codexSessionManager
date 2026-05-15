@@ -7,7 +7,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::backup_store::{self, BackupTrigger};
+use crate::path_map::path_buf_for_current_os;
 use crate::profile::CodexProfile;
+use crate::rollout::read_rollout_meta;
 use crate::safety;
 use crate::settings;
 
@@ -53,6 +55,7 @@ pub struct CodexCliInvocation {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    pub current_dir: Option<String>,
     pub timeout: Duration,
 }
 
@@ -93,7 +96,7 @@ where
         .codex_cli
         .command_path
         .unwrap_or_default();
-    let invocation = compact_invocation(
+    let mut invocation = compact_invocation(
         session_id,
         &resolve_codex_command(Some(configured.as_str()))?,
     );
@@ -115,9 +118,28 @@ where
     }
 
     guard()?;
-    backup_store::locate_unique_local_session(profile, session_id)?
+    let local_session_path = backup_store::locate_unique_local_session(profile, session_id)?
         .with_context(|| format!("cannot compact {session_id}: local JSONL file was not found"))?;
+    if let Some(current_dir) = compact_current_dir(&local_session_path)? {
+        set_compact_current_dir(&mut invocation, current_dir);
+        report.command = std::iter::once(invocation.program.clone())
+            .chain(invocation.args.clone())
+            .collect();
+    }
 
+    compact_after_preflight(profile, session_id, invocation, runner, report)
+}
+
+fn compact_after_preflight<R>(
+    profile: &CodexProfile,
+    session_id: &str,
+    invocation: CodexCliInvocation,
+    runner: R,
+    mut report: CompactReport,
+) -> Result<CompactReport>
+where
+    R: FnOnce(&CodexCliInvocation) -> Result<CodexCliOutput>,
+{
     let manifest =
         backup_store::create_session_backup(profile, session_id, BackupTrigger::Compact)?;
     report.backup_manifest = backup_manifest_path(&manifest)?;
@@ -168,6 +190,41 @@ fn compact_invocation(session_id: &str, program: &str) -> CodexCliInvocation {
             ),
         ],
         timeout: COMPACT_TIMEOUT,
+        current_dir: None,
+    }
+}
+
+fn compact_current_dir(local_session_path: &std::path::Path) -> Result<Option<String>> {
+    let Some(meta) = read_rollout_meta(local_session_path)? else {
+        return Ok(None);
+    };
+    let Some(cwd) = meta
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+    else {
+        return Ok(None);
+    };
+    let path = path_buf_for_current_os(cwd);
+    if path.is_dir() {
+        Ok(Some(path.display().to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn set_compact_current_dir(invocation: &mut CodexCliInvocation, current_dir: String) {
+    invocation.current_dir = Some(current_dir.clone());
+    if invocation.args.first().is_some_and(|arg| arg == "exec")
+        && !invocation
+            .args
+            .iter()
+            .any(|arg| arg == "-C" || arg == "--cd")
+    {
+        invocation
+            .args
+            .splice(1..1, ["-C".to_string(), current_dir]);
     }
 }
 
@@ -238,6 +295,9 @@ fn run_codex_cli(invocation: &CodexCliInvocation) -> Result<CodexCliOutput> {
         .stderr(Stdio::piped());
     for (key, value) in &invocation.env {
         command.env(key, value);
+    }
+    if let Some(current_dir) = &invocation.current_dir {
+        command.current_dir(current_dir);
     }
 
     let mut child = command.spawn().with_context(|| {
