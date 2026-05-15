@@ -1,8 +1,21 @@
-use anyhow::{bail, Result};
-use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::backup_store::{self, BackupTrigger};
+use crate::path_map::path_buf_for_current_os;
 use crate::profile::CodexProfile;
+use crate::rollout::read_rollout_meta;
 use crate::safety;
+use crate::settings;
+
+const COMPACT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactOptions {
@@ -41,6 +54,21 @@ impl CompactReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAppServerInvocation {
+    pub program: String,
+    pub args: Vec<String>,
+    pub thread_id: String,
+    pub cwd: Option<String>,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAppServerOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
 pub fn compact_session(
     profile: &CodexProfile,
     session_id: &str,
@@ -51,27 +79,40 @@ pub fn compact_session(
         session_id,
         options,
         safety::ensure_codex_not_running,
-        || Ok(()),
+        run_codex_app_server_compact,
     )
 }
 
 pub fn compact_session_with_guard_and_runner<G, R>(
-    _profile: &CodexProfile,
+    profile: &CodexProfile,
     session_id: &str,
     options: &CompactOptions,
-    _guard: G,
-    _runner: R,
+    guard: G,
+    runner: R,
 ) -> Result<CompactReport>
 where
     G: FnOnce() -> Result<()>,
-    R: FnOnce() -> Result<()>,
+    R: FnOnce(&CodexAppServerInvocation) -> Result<CodexAppServerOutput>,
 {
-    let report = CompactReport {
+    let configured = settings::load_settings(profile)?
+        .codex_cli
+        .command_path
+        .unwrap_or_default();
+    let invocation = CodexAppServerInvocation {
+        program: resolve_codex_command(Some(configured.as_str()))?,
+        args: vec!["app-server".to_string()],
+        thread_id: session_id.to_string(),
+        cwd: None,
+        timeout: COMPACT_TIMEOUT,
+    };
+    let mut report = CompactReport {
         action: "compact session context".to_string(),
         applied: options.apply,
         session_id: session_id.to_string(),
         backup_manifest: String::new(),
-        command: Vec::new(),
+        command: std::iter::once(invocation.program.clone())
+            .chain(invocation.args.clone())
+            .collect(),
         exit_code: None,
         stdout: String::new(),
         stderr: String::new(),
@@ -81,7 +122,353 @@ where
         return Ok(report);
     }
 
-    bail!(
-        "cannot compact {session_id}: Codex CLI does not expose a non-interactive compact command. /compact must be run inside an interactive Codex session. Open the target session in Codex from its project directory, then run /compact manually."
-    )
+    guard()?;
+    let local_session_path = backup_store::locate_unique_local_session(profile, session_id)?
+        .with_context(|| format!("cannot compact {session_id}: local JSONL file was not found"))?;
+    let invocation = CodexAppServerInvocation {
+        cwd: compact_current_dir(&local_session_path)?,
+        ..invocation
+    };
+    let manifest =
+        backup_store::create_session_backup(profile, session_id, BackupTrigger::Compact)?;
+    report.backup_manifest = backup_manifest_path(&manifest)?;
+
+    let output = runner(&invocation)?;
+    report.stdout = output.stdout;
+    report.stderr = output.stderr;
+    Ok(report)
+}
+
+fn compact_current_dir(local_session_path: &std::path::Path) -> Result<Option<String>> {
+    let Some(meta) = read_rollout_meta(local_session_path)? else {
+        return Ok(None);
+    };
+    let Some(cwd) = meta
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+    else {
+        return Ok(None);
+    };
+    let path = path_buf_for_current_os(cwd);
+    if path.is_dir() {
+        Ok(Some(path.display().to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn resolve_codex_command(configured: Option<&str>) -> Result<String> {
+    let configured = configured.and_then(non_empty_trimmed);
+    if let Some(path) = configured {
+        return Ok(path.to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = Command::new("where.exe").arg("codex").output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return resolve_codex_command_from_where_output(None, &stdout);
+            }
+        }
+    }
+
+    Ok("codex".to_string())
+}
+
+pub fn resolve_codex_command_from_where_output(
+    configured: Option<&str>,
+    stdout: &str,
+) -> Result<String> {
+    if let Some(path) = configured.and_then(non_empty_trimmed) {
+        return Ok(path.to_string());
+    }
+
+    let paths = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    if let Some(path) = paths
+        .iter()
+        .find(|path| path.to_ascii_lowercase().ends_with("codex.cmd"))
+    {
+        return Ok((*path).to_string());
+    }
+
+    if let Some(path) = paths
+        .iter()
+        .find(|path| !path.to_ascii_lowercase().contains("node_modules"))
+    {
+        return Ok((*path).to_string());
+    }
+
+    Ok("codex".to_string())
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn run_codex_app_server_compact(
+    invocation: &CodexAppServerInvocation,
+) -> Result<CodexAppServerOutput> {
+    let mut command = Command::new(&invocation.program);
+    command
+        .args(&invocation.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = &invocation.cwd {
+        command.current_dir(cwd);
+    }
+
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "failed to start codex app-server command: {} {}. Set Codex CLI command path in settings or ensure `where.exe codex` finds codex.cmd.",
+            invocation.program,
+            invocation.args.join(" ")
+        )
+    })?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("failed to capture codex app-server stdin")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture codex app-server stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture codex app-server stderr")?;
+    let (line_rx, stdout_handle) = spawn_stdout_reader(stdout);
+    let stderr_handle = thread::spawn(move || read_pipe(stderr));
+    let deadline = Instant::now() + invocation.timeout;
+    let mut raw_stdout = String::new();
+
+    let result =
+        run_app_server_protocol(invocation, &mut stdin, &line_rx, &mut raw_stdout, deadline);
+    drop(stdin);
+    let stderr = finish_child(child, stdout_handle, stderr_handle)?;
+
+    match result {
+        Ok(()) => Ok(CodexAppServerOutput {
+            stdout: raw_stdout,
+            stderr,
+        }),
+        Err(error) => bail!(
+            "codex app-server compact failed: {error}\nstdout:\n{raw_stdout}\nstderr:\n{stderr}"
+        ),
+    }
+}
+
+fn run_app_server_protocol(
+    invocation: &CodexAppServerInvocation,
+    stdin: &mut impl Write,
+    line_rx: &Receiver<std::io::Result<String>>,
+    raw_stdout: &mut String,
+    deadline: Instant,
+) -> Result<()> {
+    send_json(
+        stdin,
+        &json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "codex-session-manager",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {
+                    "experimentalApi": true
+                }
+            }
+        }),
+    )?;
+    wait_for_response(line_rx, raw_stdout, 1, deadline)?;
+    send_json(stdin, &json!({"method": "initialized"}))?;
+
+    send_json(
+        stdin,
+        &json!({
+            "id": 2,
+            "method": "thread/resume",
+            "params": {
+                "threadId": invocation.thread_id,
+                "cwd": invocation.cwd,
+                "persistExtendedHistory": false
+            }
+        }),
+    )?;
+    wait_for_response(line_rx, raw_stdout, 2, deadline)?;
+
+    send_json(
+        stdin,
+        &json!({
+            "id": 3,
+            "method": "thread/compact/start",
+            "params": {
+                "threadId": invocation.thread_id
+            }
+        }),
+    )?;
+    wait_for_response(line_rx, raw_stdout, 3, deadline)?;
+    wait_for_compaction(line_rx, raw_stdout, &invocation.thread_id, deadline)
+}
+
+fn send_json(stdin: &mut impl Write, value: &Value) -> Result<()> {
+    serde_json::to_writer(&mut *stdin, value)
+        .context("failed to serialize codex app-server request")?;
+    stdin
+        .write_all(b"\n")
+        .context("failed to write codex app-server request")?;
+    stdin
+        .flush()
+        .context("failed to flush codex app-server request")
+}
+
+fn wait_for_response(
+    line_rx: &Receiver<std::io::Result<String>>,
+    raw_stdout: &mut String,
+    id: i64,
+    deadline: Instant,
+) -> Result<Value> {
+    loop {
+        let value = recv_json_line(line_rx, raw_stdout, deadline)?;
+        if value.get("id").and_then(Value::as_i64) == Some(id) {
+            if let Some(error) = value.get("error") {
+                bail!("request {id} returned error: {error}");
+            }
+            return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+        }
+        if value.get("method").and_then(Value::as_str) == Some("error") {
+            bail!("app-server error notification: {value}");
+        }
+    }
+}
+
+fn wait_for_compaction(
+    line_rx: &Receiver<std::io::Result<String>>,
+    raw_stdout: &mut String,
+    thread_id: &str,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        let value = recv_json_line(line_rx, raw_stdout, deadline)?;
+        if value.get("method").and_then(Value::as_str) == Some("thread/compacted")
+            && value
+                .get("params")
+                .and_then(|params| params.get("threadId"))
+                .and_then(Value::as_str)
+                == Some(thread_id)
+        {
+            return Ok(());
+        }
+        if contains_context_compaction(&value) {
+            return Ok(());
+        }
+        if value.get("method").and_then(Value::as_str) == Some("error") {
+            bail!("app-server error notification: {value}");
+        }
+    }
+}
+
+fn recv_json_line(
+    line_rx: &Receiver<std::io::Result<String>>,
+    raw_stdout: &mut String,
+    deadline: Instant,
+) -> Result<Value> {
+    let now = Instant::now();
+    if now >= deadline {
+        bail!("timed out waiting for codex app-server response");
+    }
+    let line = line_rx
+        .recv_timeout(deadline.saturating_duration_since(now))
+        .context("timed out waiting for codex app-server response")?
+        .context("failed to read codex app-server stdout")?;
+    raw_stdout.push_str(&line);
+    serde_json::from_str(line.trim())
+        .with_context(|| format!("failed to parse codex app-server JSON line: {line}"))
+}
+
+fn contains_context_compaction(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            matches!(
+                map.get("type").and_then(Value::as_str),
+                Some("contextCompaction" | "compaction")
+            ) || map.values().any(contains_context_compaction)
+        }
+        Value::Array(items) => items.iter().any(contains_context_compaction),
+        _ => false,
+    }
+}
+
+fn spawn_stdout_reader<R: Read + Send + 'static>(
+    reader: R,
+) -> (
+    Receiver<std::io::Result<String>>,
+    thread::JoinHandle<std::io::Result<()>>,
+) {
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        loop {
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 {
+                break;
+            }
+            if tx.send(Ok(line)).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    });
+    (rx, handle)
+}
+
+fn finish_child(
+    mut child: Child,
+    stdout_handle: thread::JoinHandle<std::io::Result<()>>,
+    stderr_handle: thread::JoinHandle<std::io::Result<String>>,
+) -> Result<String> {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = stdout_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("stdout reader panicked")));
+    stderr_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("stderr reader panicked")))
+        .context("failed to read codex app-server stderr")
+}
+
+fn read_pipe<R: Read>(mut reader: R) -> std::io::Result<String> {
+    let mut text = String::new();
+    reader.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn backup_manifest_path(manifest: &backup_store::SessionBackupManifest) -> Result<String> {
+    let session_path = manifest
+        .backup_session_path
+        .as_deref()
+        .context("compact backup did not include a copied session JSONL path")?;
+    Ok(std::path::PathBuf::from(session_path)
+        .parent()
+        .context("backup session path has no parent")?
+        .join("manifest.json")
+        .display()
+        .to_string())
 }

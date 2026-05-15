@@ -149,7 +149,7 @@ pub enum Command {
         apply: bool,
     },
 
-    /// Report that automatic context compact is not available.
+    /// Compact one session context through the Codex app-server protocol.
     CompactSession {
         #[arg(long)]
         id: String,

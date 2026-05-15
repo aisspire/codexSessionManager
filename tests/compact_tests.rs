@@ -1,33 +1,17 @@
 use std::fs;
 use std::path::Path;
 
-use codex_session_manager::compact::{compact_session_with_guard_and_runner, CompactOptions};
+use anyhow::bail;
+use codex_session_manager::compact::{
+    compact_session_with_guard_and_runner, resolve_codex_command_from_where_output,
+    CodexAppServerOutput, CompactOptions,
+};
 use codex_session_manager::profile::CodexProfile;
+use codex_session_manager::settings::{save_settings, AppSettings};
 use tempfile::tempdir;
 
 #[test]
-fn compact_apply_refuses_unsupported_noninteractive_codex_compact_before_backup_or_command() {
-    let dir = tempdir().unwrap();
-    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
-    write_rollout(&profile.sessions_dir().join("thread-1.jsonl"), "thread-1");
-
-    let error = compact_session_with_guard_and_runner(
-        &profile,
-        "thread-1",
-        &CompactOptions { apply: true },
-        || panic!("guard should not run when compact cannot be automated"),
-        || panic!("runner should not be called when compact cannot be automated"),
-    )
-    .unwrap_err();
-
-    let message = format!("{error:?}");
-    assert!(message.contains("Codex CLI does not expose a non-interactive compact command"));
-    assert!(message.contains("/compact must be run inside an interactive Codex session"));
-    assert!(!profile.codex_home.join("backups").exists());
-}
-
-#[test]
-fn compact_apply_refuses_before_reading_session_project_directory() {
+fn compact_creates_backup_and_invokes_codex_app_server_compact() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     let project = dir.path().join("project-a");
@@ -38,16 +22,115 @@ fn compact_apply_refuses_before_reading_session_project_directory() {
         project.to_str().unwrap(),
     );
 
+    let report = compact_session_with_guard_and_runner(
+        &profile,
+        "thread-1",
+        &CompactOptions { apply: true },
+        || Ok(()),
+        |invocation| {
+            assert!(invocation.program.to_ascii_lowercase().contains("codex"));
+            assert_eq!(invocation.args, vec!["app-server"]);
+            assert_eq!(invocation.thread_id, "thread-1");
+            assert_eq!(invocation.cwd.as_deref(), Some(project.to_str().unwrap()));
+            Ok(CodexAppServerOutput {
+                stdout: "thread compacted".to_string(),
+                stderr: String::new(),
+            })
+        },
+    )
+    .unwrap();
+
+    assert!(Path::new(&report.backup_manifest).exists());
+    assert!(report.command[0].to_ascii_lowercase().contains("codex"));
+    assert_eq!(report.command[1], "app-server");
+    assert!(report.stdout.contains("thread compacted"));
+}
+
+#[test]
+fn compact_uses_configured_codex_command_path() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    write_rollout(&profile.sessions_dir().join("thread-1.jsonl"), "thread-1");
+    let mut settings = AppSettings::default();
+    settings.codex_cli.command_path = Some(r"C:\Tools\codex.cmd".to_string());
+    save_settings(&profile, &settings).unwrap();
+
+    compact_session_with_guard_and_runner(
+        &profile,
+        "thread-1",
+        &CompactOptions { apply: true },
+        || Ok(()),
+        |invocation| {
+            assert_eq!(invocation.program, r"C:\Tools\codex.cmd");
+            Ok(CodexAppServerOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn configured_codex_command_path_wins() {
+    let resolved =
+        resolve_codex_command_from_where_output(Some(" C:\\Tools\\codex.cmd "), "").unwrap();
+
+    assert_eq!(resolved, "C:\\Tools\\codex.cmd");
+}
+
+#[test]
+fn where_resolver_prefers_codex_cmd_over_internal_node_binary() {
+    let output = [
+        r"C:\project\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex\codex.exe",
+        r"C:\Users\me\AppData\Roaming\npm\codex.cmd",
+    ]
+    .join("\r\n");
+
+    let resolved = resolve_codex_command_from_where_output(None, &output).unwrap();
+
+    assert_eq!(resolved, r"C:\Users\me\AppData\Roaming\npm\codex.cmd");
+}
+
+#[test]
+fn compact_refuses_when_codex_is_running_before_backup_or_app_server() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    write_rollout(&profile.sessions_dir().join("thread-1.jsonl"), "thread-1");
+
     let error = compact_session_with_guard_and_runner(
         &profile,
         "thread-1",
         &CompactOptions { apply: true },
-        || panic!("guard should not run when compact cannot be automated"),
-        || panic!("runner should not be called when compact cannot be automated"),
+        || bail!("Codex appears to be running"),
+        |_| panic!("runner should not be called when guard fails"),
     )
     .unwrap_err();
 
-    assert!(format!("{error:?}").contains("interactive Codex session"));
+    assert!(format!("{error:?}").contains("Codex appears to be running"));
+    assert!(!profile.codex_home.join("backups").exists());
+}
+
+#[test]
+fn compact_app_server_failure_reports_captured_output() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    write_rollout(&profile.sessions_dir().join("thread-1.jsonl"), "thread-1");
+
+    let error = compact_session_with_guard_and_runner(
+        &profile,
+        "thread-1",
+        &CompactOptions { apply: true },
+        || Ok(()),
+        |_invocation| {
+            bail!("codex app-server compact failed\nstdout:\npartial\nstderr:\nlogin required")
+        },
+    )
+    .unwrap_err();
+
+    let message = format!("{error:?}");
+    assert!(message.contains("app-server compact failed"));
+    assert!(message.contains("login required"));
 }
 
 #[test]
@@ -61,7 +144,7 @@ fn compact_dry_run_does_not_backup_or_invoke_command() {
         "thread-1",
         &CompactOptions { apply: false },
         || panic!("guard should not run during dry run"),
-        || panic!("runner should not run during dry run"),
+        |_| panic!("runner should not run during dry run"),
     )
     .unwrap();
 

@@ -110,6 +110,7 @@ type DatabaseSyncMode = "never" | "auto-when-codex-stops";
 interface AppSettings {
   backup: BackupSettings;
   database_sync: DatabaseSyncSettings;
+  codex_cli: CodexCliSettings;
 }
 
 interface BackupSettings {
@@ -122,6 +123,10 @@ interface BackupSettings {
 
 interface DatabaseSyncSettings {
   mode: DatabaseSyncMode;
+}
+
+interface CodexCliSettings {
+  command_path?: string | null;
 }
 
 interface SessionBackupSummary {
@@ -387,6 +392,9 @@ function settingsDrawer() {
             <option value="never" ${draft.database_sync.mode === "never" ? "selected" : ""}>从不自动同步</option>
             <option value="auto-when-codex-stops" ${draft.database_sync.mode === "auto-when-codex-stops" ? "selected" : ""}>Codex 停止后自动同步</option>
           </select>
+        </label>
+        <label>Codex CLI 命令
+          <input id="setting-codex-cli" placeholder="留空自动查找；Windows 优先 where.exe codex 的 codex.cmd" value="${escapeHtml(draft.codex_cli.command_path ?? "")}" />
         </label>
       </div>
       <div class="settings-summary">
@@ -890,6 +898,10 @@ function bindSettingsInputs() {
   });
   document.querySelector<HTMLSelectElement>("#setting-sync-mode")?.addEventListener("change", (event) => {
     draft.database_sync.mode = (event.target as HTMLSelectElement).value as DatabaseSyncMode;
+  });
+  document.querySelector<HTMLInputElement>("#setting-codex-cli")?.addEventListener("input", (event) => {
+    const value = (event.target as HTMLInputElement).value.trim();
+    draft.codex_cli.command_path = value.length > 0 ? value : null;
   });
 }
 
@@ -1509,6 +1521,9 @@ function defaultSettings(): AppSettings {
     },
     database_sync: {
       mode: "never",
+    },
+    codex_cli: {
+      command_path: null,
     },
   };
 }

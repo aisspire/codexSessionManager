@@ -16,11 +16,12 @@
 - 按项目、提供方、模型、来源、归档状态、收藏状态和关键字筛选。
 - 查看会话详情，包括标题、项目、模型、状态、更新时间、会话文件和索引状态。
 - 批量编辑标题前缀、提供方和项目路径。
-- 单个或批量归档、设为活动、置顶、删除到工具回收区；单个会话上下文压缩入口会在当前 Codex CLI 限制下提示手动执行。
+- 单个或批量归档、设为活动、置顶、删除到工具回收区，并通过 Codex app-server 自动压缩单个会话上下文。
 - 收藏重点会话，并用收藏范围快速过滤。
 - 管理会话级备份，按快照预览、恢复或删除备份。
 - 预览并保守修复 SQLite 与 JSONL 之间的不一致。
 - 按本地 JSONL 和 `session_index.jsonl` 手动同步 SQLite，也可配置为 Codex 停止后自动同步一次。
+- 可配置显式 Codex CLI 命令路径；Windows 默认会优先通过 `where.exe codex` 找到用户入口 `codex.cmd`。
 - 自动保存输入框内容、筛选条件和项目分组展开状态。
 
 ## 截图
@@ -80,6 +81,8 @@ WSL:     /mnt/c/Users/<用户名>/.codex
 Linux:   ~/.codex
 ```
 
+如果桌面应用无法找到 `codex`，可以打开设置抽屉，在“Codex CLI 命令”中填写完整命令路径，例如 Windows 上的 `C:\Users\<用户名>\AppData\Roaming\npm\codex.cmd`。留空时应用会自动查找。
+
 更详细的日常操作说明见 [使用说明.md](使用说明.md)。
 
 ## 数据模型
@@ -118,7 +121,7 @@ Codex Session Manager 会把 SQLite 中的 threads、`sessions/` 和 `archived_s
 
 ### 会话整理
 
-会话管理视图适合日常整理。你可以先用项目、模型、来源、归档状态和关键字缩小范围，再选择单个会话或整个项目分组。批量操作包括归档、设为活动、置顶、删除和元数据编辑。上下文压缩只支持 Codex 交互式会话内的 `/compact` slash command；当前 Codex CLI 没有可用的非交互压缩入口，因此工具会拒绝自动执行并提示手动处理，避免把 `/compact` 当成普通消息发出去造成假成功。
+会话管理视图适合日常整理。你可以先用项目、模型、来源、归档状态和关键字缩小范围，再选择单个会话或整个项目分组。批量操作包括归档、设为活动、置顶、删除和元数据编辑。上下文压缩只支持单个会话，会先创建会话级备份，再读取该会话 JSONL 中记录的项目目录，并通过 `codex app-server` 的 `thread/resume` 和 `thread/compact/start` 协议执行真正的 compact；工具不会把 `/compact` 当普通 prompt 发送。
 
 归档会尽量把对应 rollout 文件从 `sessions` 移到 `archived_sessions`。设为活动会执行相反操作，并刷新 rollout 文件时间，帮助 Codex 或列表刷新逻辑感知变化。置顶只刷新文件访问时间和修改时间，不重写会话正文。
 
@@ -182,13 +185,13 @@ cargo run -- --codex-home C:\Users\<用户名>\.codex backup-list
 cargo run -- --codex-home C:\Users\<用户名>\.codex sync-database --apply
 ```
 
-尝试压缩单个会话上下文：
+压缩单个会话上下文：
 
 ```powershell
 cargo run -- --codex-home C:\Users\<用户名>\.codex compact-session --id <session_id> --apply
 ```
 
-该命令目前会明确失败并说明原因：`/compact` 是 Codex 交互式界面里的 slash command，`codex exec resume <session_id> /compact` 会把它作为普通 prompt 发送，并不会触发真正压缩。需要压缩时，请在对应项目目录中恢复或打开目标 Codex 会话，然后在交互式 Codex 界面里手动输入 `/compact`。工具宁可报错，也不会再报告一个没有实际效果的假成功。
+该命令会先拒绝在 Codex 仍运行时写入，再创建会话级备份，然后读取会话 JSONL 中记录的项目目录。项目目录存在时会以该目录作为 Codex 工作目录启动 `codex app-server`，依次发送 `initialize`、`thread/resume` 和 `thread/compact/start` JSON-RPC 请求，并等待 compact 完成通知。这样触发的是 Codex 内部 compact 协议，而不是把 `/compact` 当成普通 prompt 发送。若 Codex CLI 版本不支持该 app-server 方法，错误会保留 stdout/stderr 便于定位。
 
 ## 项目结构
 
