@@ -160,7 +160,7 @@ fn refuses_to_archive_when_codex_is_running() {
 }
 
 #[test]
-fn refreshes_selected_session_rollout_files_without_rewriting_indexes() {
+fn refreshes_selected_session_time_sources_for_codex_sorting() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
@@ -202,34 +202,31 @@ fn refreshes_selected_session_rollout_files_without_rewriting_indexes() {
         refresh_session_updated_at_with_guard(&profile, &ids, &options, || Ok(())).unwrap();
 
     assert!(report.applied);
-    assert_eq!(report.sqlite_rows, 0);
-    assert_eq!(report.index_entries, 0);
+    assert_eq!(report.sqlite_rows, 2);
+    assert_eq!(report.index_entries, 2);
     assert!(rollout_1.metadata().unwrap().modified().unwrap() > old_time);
     assert!(rollout_2.metadata().unwrap().modified().unwrap() > old_time);
-    assert_updated_at(
+    assert_updated_after(
         &profile.state_db_path(),
         "thread-1",
-        1770790115,
         1770794029,
-        1770790115043,
         1770794029123,
     );
-    assert_updated_at(
+    assert_updated_after(
         &profile.state_db_path(),
         "thread-2",
-        1770790115,
         1770794029,
-        1770790115043,
         1770794029122,
     );
 
     let index = fs::read_to_string(profile.session_index_path()).unwrap();
     let lines = index.lines().collect::<Vec<_>>();
-    assert_eq!(lines.len(), 2);
-    assert_eq!(
-        lines[0],
-        r#"{"id":"thread-1","thread_name":"Old title","updated_at":"2026-01-01T00:00:00Z"}"#
-    );
+    assert_eq!(lines.len(), 3);
+    let thread_1_index = session_index_updated_at(&index, "thread-1");
+    let thread_2_index = session_index_updated_at(&index, "thread-2");
+    assert_ne!(thread_1_index.as_deref(), Some("2026-01-01T00:00:00Z"));
+    assert!(thread_1_index.is_some());
+    assert!(thread_2_index.is_some());
     assert_eq!(
         lines[1],
         r#"{"id":"other","thread_name":"Other","updated_at":"2026-01-02T00:00:00Z"}"#
@@ -237,7 +234,7 @@ fn refreshes_selected_session_rollout_files_without_rewriting_indexes() {
 }
 
 #[test]
-fn refreshes_session_rollout_files_while_codex_is_running() {
+fn refuses_to_refresh_session_time_sources_when_codex_is_running() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
@@ -257,16 +254,23 @@ fn refreshes_session_rollout_files_while_codex_is_running() {
         .unwrap();
     let options = SessionApplyOptions { apply: true };
 
-    let report = refresh_session_updated_at_with_guard(
+    let result = refresh_session_updated_at_with_guard(
         &profile,
         &["thread-1".to_string()],
         &options,
         || anyhow::bail!("Codex appears to be running"),
-    )
-    .unwrap();
+    );
 
-    assert!(report.applied);
-    assert!(rollout_path.metadata().unwrap().modified().unwrap() > old_time);
+    assert!(result.is_err());
+    assert!(rollout_path.metadata().unwrap().modified().unwrap() <= old_time);
+    assert_updated_at(
+        &profile.state_db_path(),
+        "thread-1",
+        1770790115,
+        1770794029,
+        1770790115043,
+        1770794029123,
+    );
 }
 
 fn create_state_db(path: &std::path::Path) {
@@ -390,4 +394,36 @@ fn assert_updated_at(
     assert_eq!(updated_at, expected_updated_at);
     assert_eq!(created_at_ms, expected_created_at_ms);
     assert_eq!(updated_at_ms, expected_updated_at_ms);
+}
+
+fn assert_updated_after(
+    path: &std::path::Path,
+    id: &str,
+    old_updated_at: i64,
+    old_updated_at_ms: i64,
+) {
+    let conn = Connection::open(path).unwrap();
+    let (updated_at, updated_at_ms): (i64, i64) = conn
+        .query_row(
+            "SELECT updated_at, updated_at_ms FROM threads WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(updated_at > old_updated_at);
+    assert!(updated_at_ms > old_updated_at_ms);
+}
+
+fn session_index_updated_at(index: &str, id: &str) -> Option<String> {
+    index.lines().find_map(|line| {
+        let value = serde_json::from_str::<serde_json::Value>(line).unwrap();
+        if value.get("id").and_then(|value| value.as_str()) == Some(id) {
+            value
+                .get("updated_at")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        } else {
+            None
+        }
+    })
 }

@@ -1188,7 +1188,6 @@ async function mutateIds(command: SessionCommand, ids: string[]) {
   if (commandRequiresCodexExit(command)) {
     const ready = await ensureCodexStoppedBefore(commandLabel(command));
     if (!ready) return;
-    if (!confirmDangerousAction(commandLabel(command), ids.length, commandCreatesBackup(command))) return;
   }
   await runWithProgress(`正在${commandLabel(command)}会话`, async () => {
     const report = await invoke(command, { profile: state.profile, ids, apply: true });
@@ -1209,16 +1208,6 @@ async function compactIds(ids: string[]) {
     return;
   }
   if (!(await ensureCodexStoppedBefore("压缩上下文"))) {
-    return;
-  }
-  if (
-    !confirmDangerousAction(
-      "压缩上下文",
-      1,
-      true,
-      "将通过 Codex CLI 恢复该会话并执行 /compact；若 CLI 出现更新、登录或其它交互提示，应用会显示错误输出。",
-    )
-  ) {
     return;
   }
 
@@ -1251,7 +1240,6 @@ async function editSelected(apply: boolean) {
   if (apply) {
     const ready = await ensureCodexStoppedBefore("修改会话元数据");
     if (!ready) return;
-    if (!confirmDangerousAction("修改会话元数据", ids.length, true)) return;
   }
 
   await runWithProgress(apply ? "正在应用批量编辑" : "正在预览批量编辑", async () => {
@@ -1316,7 +1304,6 @@ async function saveDetailEdits() {
   const provider = detailPendingValue(active, "provider");
   const ready = await ensureCodexStoppedBefore("修改会话元数据");
   if (!ready) return;
-  if (!confirmDangerousAction("修改会话元数据", 1, true)) return;
   await runWithProgress("正在修改会话", async () => {
     const report = await invoke<MutationReport>("edit_selected_sessions", {
       profile: state.profile,
@@ -1446,7 +1433,6 @@ async function applySelectedRepairs() {
   }
   const ready = await ensureCodexStoppedBefore("应用数据库修复");
   if (!ready) return;
-  if (!confirmDangerousAction("应用数据库修复", selected.length, true)) return;
 
   await runWithProgress("正在应用数据库修复", async () => {
     const report = await invoke<DatabaseRepairApplyReport>("apply_database_repairs", {
@@ -1486,17 +1472,6 @@ async function restoreSelectedBackup(sessionId: string) {
       backupId: snapshot.backup_id,
     });
     state.restorePreview = preview;
-    const overwriteText = preview.overwrites_existing ? "\n目标 JSONL 已存在，将先创建预检备份。" : "";
-    const favoriteText = preview.favorite ? "\n将恢复收藏状态。" : "";
-    const confirmed = window.confirm(
-      `${dangerousActionConfirmationMessage({
-        action: "恢复备份",
-        count: 1,
-        backup: preview.overwrites_existing,
-        extra: `会话 ${preview.session_id}\n目标：${preview.restore_session_path || "无 JSONL 文件"}${overwriteText}${favoriteText}`,
-      })}`,
-    );
-    if (!confirmed) return;
     const report = await invoke<RestoreReport>("restore_session_backup", {
       profile: state.profile,
       backupId: snapshot.backup_id,
@@ -1574,7 +1549,6 @@ async function deleteSelectedBackupGroups() {
 async function applyDatabaseSyncFromLocal() {
   const ready = await ensureCodexStoppedBefore("按本地文件同步数据库");
   if (!ready) return;
-  if (!confirmDangerousAction("按本地文件同步数据库", 1, true)) return;
   await runWithProgress("正在同步数据库", async () => {
     const report = await invoke<DatabaseRepairApplyReport>("apply_database_sync_from_local", {
       profile: state.profile,
@@ -1737,11 +1711,12 @@ function formatCompactReport(report: CompactReport) {
 }
 
 function commandRequiresCodexExit(command: SessionCommand) {
-  return command === "archive_sessions" || command === "active_sessions" || command === "delete_sessions";
-}
-
-function commandCreatesBackup(command: SessionCommand) {
-  return command === "delete_sessions";
+  return (
+    command === "archive_sessions" ||
+    command === "active_sessions" ||
+    command === "delete_sessions" ||
+    command === "refresh_session_updated_at"
+  );
 }
 
 function commandLabel(command: SessionCommand) {
@@ -1771,29 +1746,6 @@ async function ensureCodexStoppedBefore(action: string) {
     render({ preserveTableScroll: true });
     return false;
   }
-}
-
-function confirmDangerousAction(action: string, count: number, backup: boolean, extra?: string) {
-  return window.confirm(
-    dangerousActionConfirmationMessage({
-      action,
-      count,
-      backup,
-      extra,
-    }),
-  );
-}
-
-function dangerousActionConfirmationMessage(options: { action: string; count: number; backup: boolean; extra?: string }) {
-  const lines = [`将${options.action} ${options.count} 个会话。`];
-  if (options.backup) {
-    lines.push("执行前会自动创建备份。");
-  }
-  if (options.extra) {
-    lines.push(options.extra);
-  }
-  lines.push("继续？");
-  return lines.join("\n");
 }
 
 function optionalNumber(value: number | null | undefined) {

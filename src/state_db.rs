@@ -300,6 +300,50 @@ impl StateDb {
             .context("failed to update rollout_path")
     }
 
+    pub fn update_thread_timestamps(
+        &mut self,
+        ids: &[String],
+        updated_at: i64,
+        updated_at_ms: i64,
+    ) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let columns = self.thread_columns()?;
+        let mut assignments = Vec::new();
+        if columns.contains(&"updated_at".to_string()) {
+            assignments.push("updated_at = :updated_at");
+        }
+        if columns.contains(&"updated_at_ms".to_string()) {
+            assignments.push("updated_at_ms = :updated_at_ms");
+        }
+        if assignments.is_empty() {
+            return Ok(0);
+        }
+
+        let sql = format!(
+            "UPDATE threads SET {} WHERE id = :id",
+            assignments.join(", ")
+        );
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        for id in ids {
+            changed += tx
+                .execute(
+                    &sql,
+                    named_params! {
+                        ":id": id,
+                        ":updated_at": updated_at,
+                        ":updated_at_ms": updated_at_ms,
+                    },
+                )
+                .context("failed to update thread timestamps")?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn repair_has_user_event(&mut self) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let changed = tx.execute(

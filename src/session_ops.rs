@@ -12,6 +12,7 @@ use crate::path_map::path_buf_for_current_os;
 use crate::profile::CodexProfile;
 use crate::rollout::read_all_rollout_meta;
 use crate::safety;
+use crate::session_index;
 use crate::state_db::StateDb;
 use crate::trash::{self, TrashManifest};
 
@@ -118,18 +119,25 @@ pub fn refresh_session_updated_at_with_guard<F>(
     profile: &CodexProfile,
     ids: &[String],
     options: &SessionApplyOptions,
-    _guard: F,
+    guard: F,
 ) -> Result<SessionMutationReport>
 where
     F: FnOnce() -> Result<()>,
 {
+    let selected_ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let threads = read_threads_if_present(profile)?;
+    let selected_threads = threads
+        .iter()
+        .filter(|thread| selected_ids.contains(thread.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
     let rollout_paths = refreshable_rollout_paths(profile, ids)?;
 
-    let report = SessionMutationReport {
-        action: "touch session rollout files".to_string(),
+    let mut report = SessionMutationReport {
+        action: "refresh session updated time".to_string(),
         applied: options.apply,
         requested_ids: ids.to_vec(),
-        sqlite_rows: 0,
+        sqlite_rows: selected_threads.len(),
         index_entries: 0,
         trash_manifest_path: None,
         backup_manifests: Vec::new(),
@@ -141,7 +149,23 @@ where
         return Ok(report);
     }
 
-    touch_rollout_files(&rollout_paths)?;
+    guard()?;
+
+    let timestamp = current_session_timestamp()?;
+    touch_rollout_files_at(&rollout_paths, timestamp.system_time)?;
+    if profile.state_db_path().exists() {
+        let mut db = StateDb::open(&profile.state_db_path())?;
+        report.sqlite_rows =
+            db.update_thread_timestamps(ids, timestamp.updated_at, timestamp.updated_at_ms)?;
+    } else {
+        report.sqlite_rows = 0;
+    }
+    report.index_entries = session_index::update_session_index_updated_at(
+        &profile.session_index_path(),
+        &selected_threads,
+        ids,
+        &timestamp.updated_at_iso,
+    )?;
     Ok(report)
 }
 
@@ -534,12 +558,43 @@ fn is_cross_device_error(error: &io::Error) -> bool {
 }
 
 fn touch_rollout_files(paths: &[PathBuf]) -> Result<()> {
-    let now = SystemTime::now();
+    touch_rollout_files_at(paths, SystemTime::now())
+}
+
+fn touch_rollout_files_at(paths: &[PathBuf], now: SystemTime) -> Result<()> {
     let times = FileTimes::new().set_accessed(now).set_modified(now);
     for path in paths {
         touch_rollout_file(path, times)?;
     }
     Ok(())
+}
+
+struct SessionTimestamp {
+    system_time: SystemTime,
+    updated_at: i64,
+    updated_at_ms: i64,
+    updated_at_iso: String,
+}
+
+fn current_session_timestamp() -> Result<SessionTimestamp> {
+    let system_time = SystemTime::now();
+    let duration = system_time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .context("system time is before unix epoch")?;
+    let updated_at =
+        i64::try_from(duration.as_secs()).context("session timestamp seconds overflowed i64")?;
+    let updated_at_ms =
+        i64::try_from(duration.as_millis()).context("session timestamp millis overflowed i64")?;
+    let updated_at_iso = time::OffsetDateTime::from_unix_timestamp(updated_at)
+        .context("failed to convert session timestamp")?
+        .format(&time::format_description::well_known::Rfc3339)
+        .context("failed to format session timestamp")?;
+    Ok(SessionTimestamp {
+        system_time,
+        updated_at,
+        updated_at_ms,
+        updated_at_iso,
+    })
 }
 
 fn touch_rollout_file(path: &Path, times: FileTimes) -> Result<()> {
