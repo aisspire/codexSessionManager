@@ -2,7 +2,9 @@
 
 use std::process::Command;
 
-use codex_session_manager::backup_store::{self, BackupDeleteReport, SessionBackupSummary};
+use codex_session_manager::backup_store::{
+    self, BackupDeleteReport, BackupGroupDeleteReport, SessionBackupSummary,
+};
 use codex_session_manager::compact::{self, CompactOptions, CompactReport};
 use codex_session_manager::db_repair::{
     self, DatabaseRepairApplyReport, DatabaseRepairOptions, DatabaseRepairPreview,
@@ -89,6 +91,17 @@ fn delete_session_backup(
         confirmed_last_archive,
     )
     .map_err(format_error)
+}
+
+#[tauri::command]
+fn delete_session_backup_groups(
+    profile: ProfileInput,
+    session_ids: Vec<String>,
+    confirmed_last_archives: bool,
+) -> Result<BackupGroupDeleteReport, String> {
+    let profile = build_profile(profile)?;
+    backup_store::delete_backup_groups(&profile, &session_ids, confirmed_last_archives)
+        .map_err(format_error)
 }
 
 #[tauri::command]
@@ -300,6 +313,7 @@ fn main() {
             preview_restore_session_backup,
             restore_session_backup,
             delete_session_backup,
+            delete_session_backup_groups,
             toggle_favorite,
             set_favorite,
             archive_sessions,

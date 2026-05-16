@@ -260,6 +260,46 @@ fn title_priority_is_index_then_sqlite_then_first_user_message() {
     assert_eq!(with_first_message[0].title.as_deref(), Some("hello"));
 }
 
+#[test]
+fn sorts_sessions_by_rollout_file_modified_time_before_sqlite_updated_at() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let older_rollout = profile.sessions_dir().join("active-1.jsonl");
+    create_rollout(
+        &older_rollout,
+        "active-1",
+        "/mnt/e/code/project-a",
+        "cm",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let newer_rollout = profile.sessions_dir().join("archived-1.jsonl");
+    create_rollout(
+        &newer_rollout,
+        "archived-1",
+        "/mnt/e/code/project-b",
+        "openai",
+    );
+
+    let sessions = list_sessions(
+        &profile,
+        &SessionListFilter {
+            archived: ArchivedFilter::All,
+            ..SessionListFilter::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["archived-1", "active-1"]
+    );
+    assert!(sessions[0].sort_updated_at_ms.unwrap() > sessions[1].sort_updated_at_ms.unwrap());
+}
+
 fn create_state_db(path: &std::path::Path) {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch(

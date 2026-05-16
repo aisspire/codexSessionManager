@@ -1,8 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import {
-  codexExitConfirmationMessage,
-  singleSelectionForCodexAction,
-} from "./codexExitConfirm";
+import { singleSelectionForCodexAction } from "./codexExitConfirm";
 import { loadInputCache, saveInputCache } from "./inputCache";
 import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectExpansionCache";
 import {
@@ -40,6 +37,7 @@ interface SessionSummary {
   archived: boolean;
   favorite: boolean;
   updated_at?: string;
+  sort_updated_at_ms?: number;
   rollout_path?: string;
   in_session_index: boolean;
 }
@@ -134,6 +132,7 @@ interface SessionBackupSummary {
   title?: string;
   project?: string;
   group?: string | null;
+  latest_created_at_unix: number;
   local_exists: boolean;
   snapshots: SessionBackupSnapshot[];
 }
@@ -167,6 +166,12 @@ interface RestoreReport {
   favorite_restored: boolean;
 }
 
+interface BackupGroupDeleteReport {
+  session_ids: string[];
+  deleted_backup_ids: string[];
+  deleted_dirs: string[];
+}
+
 type DetailEditField = "title" | "project" | "provider";
 
 interface DetailEditState {
@@ -176,6 +181,19 @@ interface DetailEditState {
   pendingTitle: string;
   pendingProject: string;
   pendingProvider: string;
+}
+
+interface BusyState {
+  active: boolean;
+  label: string;
+  processed: number;
+}
+
+interface AppDialog {
+  kind: "codex-running";
+  title: string;
+  message: string;
+  primaryLabel: string;
 }
 
 const pageLabels: Record<AppPage, string> = {
@@ -231,6 +249,7 @@ const state = {
   backupSummary: null as { sessions: number; snapshots: number; bytes: number } | null,
   backupRows: [] as SessionBackupSummary[],
   selectedSnapshotBySession: {} as Record<string, number>,
+  selectedBackupSessionIds: new Set<string>(),
   restorePreview: null as RestorePreview | null,
   syncStatus: "",
   codexWasRunning: null as boolean | null,
@@ -238,6 +257,12 @@ const state = {
   activeId: "",
   detailOpen: false,
   status: "就绪",
+  dialog: null as AppDialog | null,
+  busy: {
+    active: false,
+    label: "",
+    processed: 0,
+  } as BusyState,
   // 展开状态按项目 key 保存。首次加载时会自动展开全部项目，用户操作后保持本地状态。
   expandedProjects: cachedExpandedProjects ?? new Set<string>(),
 };
@@ -270,15 +295,54 @@ function render(options: RenderOptions = {}) {
         ${actionBar()}
         ${mainContent}
         <div class="status">${escapeHtml(state.status)}</div>
+        ${bottomProgress()}
       </section>
       ${active && state.detailOpen ? detailDrawer(active) : ""}
       ${state.settingsOpen ? settingsDrawer() : ""}
+      ${state.dialog ? appDialog(state.dialog) : ""}
     </main>
   `;
   bindEvents(groups);
   if (tableScroll) {
     restoreTableScroll(tableScroll);
   }
+}
+
+function bottomProgress() {
+  const blockCount = Math.max(8, Math.min(18, state.busy.processed || 8));
+  const blocks = Array.from({ length: blockCount }, (_, index) => `<span style="--i:${index}"></span>`).join("");
+  return `
+    <div class="bottom-progress ${state.busy.active ? "active" : ""}" role="status" aria-live="polite">
+      <span class="bottom-progress-label">${escapeHtml(state.busy.label)}</span>
+      <span class="progress-blocks" aria-hidden="true">${blocks}</span>
+    </div>
+  `;
+}
+
+function appDialog(dialog: AppDialog) {
+  return `
+    <div class="dialog-backdrop" data-close-dialog></div>
+    <section class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title">
+      <h2 id="app-dialog-title">${escapeHtml(dialog.title)}</h2>
+      <p>${escapeHtml(dialog.message)}</p>
+      <div class="dialog-actions">
+        <button class="primary" data-close-dialog>${escapeHtml(dialog.primaryLabel)}</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderProgressOnly() {
+  const current = document.querySelector<HTMLElement>(".bottom-progress");
+  if (!current) {
+    render({ preserveTableScroll: true });
+    return;
+  }
+  current.outerHTML = bottomProgress();
+}
+
+function disabledWhenBusy(disabled = false) {
+  return state.busy.active || disabled ? "disabled" : "";
 }
 
 function navigation() {
@@ -341,7 +405,7 @@ function pageHeader() {
     state.activePage === "database-repair"
       ? state.selectedRepairIds.size
       : state.activePage === "restore-backups"
-        ? state.backupRows.reduce((count, row) => count + row.snapshots.length, 0)
+        ? state.selectedBackupSessionIds.size
         : state.selectedIds.size;
   const totalLabel = state.activePage === "database-repair" ? "项目" : "会话";
   return `
@@ -401,8 +465,8 @@ function settingsDrawer() {
         ${summary ? `${summary.sessions} 个会话备份 · ${summary.snapshots} 个快照 · ${formatBytes(summary.bytes)}` : "备份统计未加载"}
       </div>
       <div class="settings-actions">
-        <button id="reload-settings">重新加载</button>
-        <button id="save-settings" class="primary">保存设置</button>
+        <button id="reload-settings" ${disabledWhenBusy()}>重新加载</button>
+        <button id="save-settings" class="primary" ${disabledWhenBusy()}>保存设置</button>
       </div>
     </aside>
   `;
@@ -420,7 +484,7 @@ function filterBar() {
     <section class="toolbar filter-toolbar" aria-label="搜索筛选">
       <div class="filter-path-row">
         <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
-        <button id="refresh" class="primary">刷新</button>
+        <button id="refresh" class="primary" ${disabledWhenBusy()}>刷新</button>
       </div>
       <div class="filter-grid">
         <div class="filter-status">
@@ -446,7 +510,7 @@ function repairFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="数据库修复范围">
       <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
-      <button id="refresh" class="primary">预览修复项</button>
+      <button id="refresh" class="primary" ${disabledWhenBusy()}>预览修复项</button>
     </section>
   `;
 }
@@ -455,7 +519,7 @@ function backupFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="备份范围">
       <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
-      <button id="refresh" class="primary">刷新备份</button>
+      <button id="refresh" class="primary" ${disabledWhenBusy()}>刷新备份</button>
     </section>
   `;
 }
@@ -477,8 +541,8 @@ function repairActionBar() {
       <div class="repair-note">${escapeHtml(state.repairBackupNote || "默认仅预览。应用前会检查 Codex 是否仍在运行，并创建数据库与索引备份。")}</div>
       <div class="action-buttons">
         <button id="select-all-repairs" ${applicable === 0 ? "disabled" : ""}>全选可修复</button>
-        <button id="apply-repairs" class="primary" ${state.selectedRepairIds.size === 0 ? "disabled" : ""}>应用已选修复</button>
-        <button id="sync-database-local">按本地文件同步数据库</button>
+        <button id="apply-repairs" class="primary" ${disabledWhenBusy(state.selectedRepairIds.size === 0)}>应用已选修复</button>
+        <button id="sync-database-local" ${disabledWhenBusy()}>按本地文件同步数据库</button>
       </div>
       <div class="sync-note">${escapeHtml(state.syncStatus)}</div>
     </section>
@@ -486,9 +550,16 @@ function repairActionBar() {
 }
 
 function backupActionBar() {
+  const selectedCount = state.selectedBackupSessionIds.size;
   return `
     <section class="toolbar action-toolbar management-toolbar" aria-label="备份操作">
-      <button id="refresh-backups" class="primary">刷新备份</button>
+      <label class="global-select">
+        <input id="select-all-backups" type="checkbox" aria-label="全选备份条目" ${allBackupRowsSelected() ? "checked" : ""} />
+        <span>全选备份条目</span>
+      </label>
+      <button id="delete-selected-backup-groups" class="danger" ${disabledWhenBusy(selectedCount === 0)}>
+        删除所选条目的所有备份
+      </button>
       <span class="repair-note">红色行表示本地 JSONL 已缺失。删除这种会话最后一个快照时会要求确认。</span>
     </section>
   `;
@@ -501,8 +572,8 @@ function batchEditBar() {
       <label>提供方<input id="edit-provider" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.provider)}" /></label>
       <label>项目路径<input id="edit-project" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.project)}" /></label>
       <div class="action-buttons">
-        <button id="preview-selected-edit">预览</button>
-        <button id="apply-selected-edit" class="primary">应用</button>
+        <button id="preview-selected-edit" ${disabledWhenBusy()}>预览</button>
+        <button id="apply-selected-edit" class="primary" ${disabledWhenBusy()}>应用</button>
       </div>
     </section>
   `;
@@ -511,17 +582,17 @@ function batchEditBar() {
 function sessionManagementBar() {
   return `
     <section class="toolbar action-toolbar management-toolbar" aria-label="会话管理操作">
-      <button id="archive">归档</button>
-      <button id="active">活动</button>
-      <button id="refresh-time">置顶</button>
-      <button id="compact-context">压缩上下文</button>
-      <button id="delete" class="danger">删除</button>
+      <button id="archive" ${disabledWhenBusy()}>归档</button>
+      <button id="active" ${disabledWhenBusy()}>活动</button>
+      <button id="refresh-time" ${disabledWhenBusy()}>置顶</button>
+      <button id="compact-context" ${disabledWhenBusy()}>压缩上下文</button>
+      <button id="delete" class="danger" ${disabledWhenBusy()}>删除</button>
     </section>
   `;
 }
 
 function archivedButton(value: SessionScope, label: string) {
-  return `<button data-archived="${value}" class="${state.filter.archived === value ? "selected" : ""}">${label}</button>`;
+  return `<button data-archived="${value}" class="${state.filter.archived === value ? "selected" : ""}" ${disabledWhenBusy()}>${label}</button>`;
 }
 
 function groupedTable(groups: ProjectGroup<SessionSummary>[]) {
@@ -618,6 +689,9 @@ function backupRow(row: SessionBackupSummary) {
   const missing = !row.local_exists;
   return `
     <div class="backup-row ${missing ? "missing" : ""}">
+      <label class="backup-select">
+        <input type="checkbox" data-select-backup-session="${escapeHtml(row.session_id)}" ${state.selectedBackupSessionIds.has(row.session_id) ? "checked" : ""} />
+      </label>
       <div class="backup-main">
         <strong title="${escapeHtml(row.title || row.session_id)}">${escapeHtml(row.title || row.session_id)}</strong>
         <span title="${escapeHtml(row.project || "")}">${escapeHtml(row.project || "")}</span>
@@ -633,8 +707,8 @@ function backupRow(row: SessionBackupSummary) {
         <button data-backup-prev="${escapeHtml(row.session_id)}" ${snapshotIndex <= 0 ? "disabled" : ""}>上一个</button>
         <span>${row.snapshots.length ? `${snapshotIndex + 1} / ${row.snapshots.length}` : "0 / 0"}</span>
         <button data-backup-next="${escapeHtml(row.session_id)}" ${snapshotIndex >= row.snapshots.length - 1 ? "disabled" : ""}>下一个</button>
-        <button data-backup-restore="${escapeHtml(row.session_id)}" ${snapshot ? "" : "disabled"} class="primary">恢复</button>
-        <button data-backup-delete="${escapeHtml(row.session_id)}" ${snapshot ? "" : "disabled"} class="danger">删除快照</button>
+        <button data-backup-restore="${escapeHtml(row.session_id)}" ${disabledWhenBusy(!snapshot)} class="primary">恢复</button>
+        <button data-backup-delete="${escapeHtml(row.session_id)}" ${disabledWhenBusy(!snapshot)} class="danger">删除快照</button>
       </div>
     </div>
   `;
@@ -695,7 +769,7 @@ function sessionRow(session: SessionSummary) {
         <span class="session-card-top">
           <span class="session-title" title="${escapeHtml(sessionTitle(session))}">${escapeHtml(sessionTitle(session))}</span>
           <span class="session-card-tools">
-            <button class="favorite-button ${session.favorite ? "active" : ""}" data-toggle-favorite="${escapeHtml(session.id)}" title="${session.favorite ? "取消收藏" : "收藏"}" aria-label="${session.favorite ? "取消收藏" : "收藏"}">${session.favorite ? "★" : "☆"}</button>
+            <button class="favorite-button ${session.favorite ? "active" : ""}" data-toggle-favorite="${escapeHtml(session.id)}" title="${session.favorite ? "取消收藏" : "收藏"}" aria-label="${session.favorite ? "取消收藏" : "收藏"}" ${disabledWhenBusy()}>${session.favorite ? "★" : "☆"}</button>
             <span class="session-state session-state-${stateDisplay.tone}">${escapeHtml(stateDisplay.label)}</span>
           </span>
         </span>
@@ -735,13 +809,13 @@ function detailDrawer(session: SessionSummary) {
         <dt>会话索引</dt><dd>${session.in_session_index ? "存在" : "缺失"}</dd>
       </dl>
       <div class="detail-actions">
-        <button id="save-detail-title" class="primary" ${dirty ? "" : "disabled"}>保存</button>
-        <button data-toggle-favorite="${escapeHtml(session.id)}">${session.favorite ? "取消收藏" : "收藏"}</button>
-        <button data-single-command="refresh_session_updated_at">置顶</button>
-        <button data-compact-single>压缩上下文</button>
-        <button data-single="archive">归档</button>
-        <button data-single="active">活动</button>
-        <button data-single="delete" class="danger">删除</button>
+        <button id="save-detail-title" class="primary" ${disabledWhenBusy(!dirty)}>保存</button>
+        <button data-toggle-favorite="${escapeHtml(session.id)}" ${disabledWhenBusy()}>${session.favorite ? "取消收藏" : "收藏"}</button>
+        <button data-single-command="refresh_session_updated_at" ${disabledWhenBusy()}>置顶</button>
+        <button data-compact-single ${disabledWhenBusy()}>压缩上下文</button>
+        <button data-single="archive" ${disabledWhenBusy()}>归档</button>
+        <button data-single="active" ${disabledWhenBusy()}>活动</button>
+        <button data-single="delete" class="danger" ${disabledWhenBusy()}>删除</button>
       </div>
     </aside>
   `;
@@ -762,6 +836,7 @@ function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
     bindDetailEvents();
   }
   bindSettingsEvents();
+  bindDialogEvents();
 
   document.querySelector("#refresh")?.addEventListener("click", () => {
     state.activePage === "database-repair"
@@ -777,6 +852,15 @@ function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
   document.querySelector("#refresh-time")?.addEventListener("click", () => mutateSelected("refresh_session_updated_at"));
   document.querySelector("#compact-context")?.addEventListener("click", compactSelected);
   document.querySelector("#delete")?.addEventListener("click", () => mutateSelected("delete_sessions"));
+}
+
+function bindDialogEvents() {
+  document.querySelectorAll<HTMLElement>("[data-close-dialog]").forEach((target) => {
+    target.addEventListener("click", () => {
+      state.dialog = null;
+      render({ preserveTableScroll: true });
+    });
+  });
 }
 
 function bindSettingsEvents() {
@@ -817,7 +901,23 @@ function bindRepairEvents() {
 }
 
 function bindBackupEvents() {
-  document.querySelector("#refresh-backups")?.addEventListener("click", refreshBackups);
+  const selectAll = document.querySelector<HTMLInputElement>("#select-all-backups");
+  if (selectAll) {
+    selectAll.indeterminate = someBackupRowsSelected() && !allBackupRowsSelected();
+    selectAll.addEventListener("change", () => toggleAllBackupRows(selectAll.checked));
+  }
+  document
+    .querySelector("#delete-selected-backup-groups")
+    ?.addEventListener("click", deleteSelectedBackupGroups);
+  document.querySelectorAll<HTMLInputElement>("[data-select-backup-session]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const sessionId = checkbox.dataset.selectBackupSession || "";
+      checkbox.checked
+        ? state.selectedBackupSessionIds.add(sessionId)
+        : state.selectedBackupSessionIds.delete(sessionId);
+      render({ preserveTableScroll: true });
+    });
+  });
   document.querySelectorAll<HTMLElement>("[data-backup-prev], [data-backup-next]").forEach((button) => {
     button.addEventListener("click", () => {
       const sessionId = button.dataset.backupPrev || button.dataset.backupNext || "";
@@ -1056,16 +1156,23 @@ function saveCurrentInputCache() {
 }
 
 async function refresh() {
-  await run(async () => {
-    state.sessions = await invoke<SessionSummary[]>("list_sessions", {
-      profile: state.profile,
-      filter: state.filter,
-    });
-    state.selectedIds.clear();
-    state.activeId = state.sessions[0]?.id || "";
-    state.detailOpen = false;
+  await runWithProgress("正在加载会话", async () => {
+    await loadSessions();
     state.status = "已加载会话";
   });
+}
+
+async function loadSessions(activeId?: string) {
+  state.sessions = await invoke<SessionSummary[]>("list_sessions", {
+    profile: state.profile,
+    filter: state.filter,
+  });
+  state.selectedIds.clear();
+  state.activeId =
+    activeId && state.sessions.some((session) => session.id === activeId)
+      ? activeId
+      : state.sessions[0]?.id || "";
+  state.detailOpen = Boolean(activeId && state.activeId);
 }
 
 async function mutateSelected(command: SessionCommand) {
@@ -1078,13 +1185,15 @@ async function mutateIds(command: SessionCommand, ids: string[]) {
     render({ preserveTableScroll: true });
     return;
   }
-  if (commandRequiresCodexExit(command) && !confirmCodexExitAction(commandLabel(command), ids.length, commandCreatesBackup(command))) {
-    return;
+  if (commandRequiresCodexExit(command)) {
+    const ready = await ensureCodexStoppedBefore(commandLabel(command));
+    if (!ready) return;
+    if (!confirmDangerousAction(commandLabel(command), ids.length, commandCreatesBackup(command))) return;
   }
-  await run(async () => {
+  await runWithProgress(`正在${commandLabel(command)}会话`, async () => {
     const report = await invoke(command, { profile: state.profile, ids, apply: true });
     state.status = JSON.stringify(report);
-    await refresh();
+    await loadSessions();
   });
 }
 
@@ -1099,8 +1208,11 @@ async function compactIds(ids: string[]) {
     render({ preserveTableScroll: true });
     return;
   }
+  if (!(await ensureCodexStoppedBefore("压缩上下文"))) {
+    return;
+  }
   if (
-    !confirmCodexExitAction(
+    !confirmDangerousAction(
       "压缩上下文",
       1,
       true,
@@ -1110,14 +1222,14 @@ async function compactIds(ids: string[]) {
     return;
   }
 
-  await run(async () => {
+  await runWithProgress("正在压缩上下文", async () => {
     const report = await invoke<CompactReport>("compact_session", {
       profile: state.profile,
       id: selection.id,
       apply: true,
     });
     state.status = formatCompactReport(report);
-    await refresh();
+    await loadSessions();
   });
 }
 
@@ -1136,11 +1248,13 @@ async function editSelected(apply: boolean) {
     render({ preserveTableScroll: true });
     return;
   }
-  if (apply && !confirmCodexExitAction("修改会话元数据", ids.length, true)) {
-    return;
+  if (apply) {
+    const ready = await ensureCodexStoppedBefore("修改会话元数据");
+    if (!ready) return;
+    if (!confirmDangerousAction("修改会话元数据", ids.length, true)) return;
   }
 
-  await run(async () => {
+  await runWithProgress(apply ? "正在应用批量编辑" : "正在预览批量编辑", async () => {
     const report = await invoke<MutationReport>("edit_selected_sessions", {
       profile: state.profile,
       ids,
@@ -1152,13 +1266,7 @@ async function editSelected(apply: boolean) {
       apply,
     });
     if (apply) {
-      state.sessions = await invoke<SessionSummary[]>("list_sessions", {
-        profile: state.profile,
-        filter: state.filter,
-      });
-      state.selectedIds.clear();
-      state.activeId = state.sessions[0]?.id || "";
-      state.detailOpen = false;
+      await loadSessions();
     }
     state.status = formatMutationReport(report);
   });
@@ -1206,7 +1314,10 @@ async function saveDetailEdits() {
   const title = detailPendingValue(active, "title");
   const project = detailPendingValue(active, "project");
   const provider = detailPendingValue(active, "provider");
-  await run(async () => {
+  const ready = await ensureCodexStoppedBefore("修改会话元数据");
+  if (!ready) return;
+  if (!confirmDangerousAction("修改会话元数据", 1, true)) return;
+  await runWithProgress("正在修改会话", async () => {
     const report = await invoke<MutationReport>("edit_selected_sessions", {
       profile: state.profile,
       ids: [active.id],
@@ -1217,15 +1328,7 @@ async function saveDetailEdits() {
       },
       apply: true,
     });
-    const activeId = active.id;
-    state.sessions = await invoke<SessionSummary[]>("list_sessions", {
-      profile: state.profile,
-      filter: state.filter,
-    });
-    state.activeId = state.sessions.some((session) => session.id === activeId)
-      ? activeId
-      : state.sessions[0]?.id || "";
-    state.detailOpen = Boolean(state.activeId);
+    await loadSessions(active.id);
     state.detailEdit = blankDetailEdit();
     state.status = formatMutationReport(report);
   });
@@ -1238,16 +1341,11 @@ function sessionTitle(session: SessionSummary) {
 async function toggleFavorite(id: string) {
   if (!id) return;
   const activeId = state.activeId;
-  await run(async () => {
+  const wasDetailOpen = state.detailOpen;
+  await runWithProgress("正在更新收藏", async () => {
     await invoke("toggle_favorite", { profile: state.profile, sessionId: id });
-    state.sessions = await invoke<SessionSummary[]>("list_sessions", {
-      profile: state.profile,
-      filter: state.filter,
-    });
-    state.activeId = state.sessions.some((session) => session.id === activeId)
-      ? activeId
-      : state.sessions[0]?.id || "";
-    state.detailOpen = state.detailOpen && Boolean(state.activeId);
+    await loadSessions(activeId);
+    state.detailOpen = wasDetailOpen && Boolean(state.activeId);
     state.status = "收藏状态已更新";
   });
 }
@@ -1287,7 +1385,7 @@ function detailEditDirty(session: SessionSummary) {
 }
 
 async function openGithubRepository() {
-  await run(async () => {
+  await runWithProgress("正在打开 GitHub 仓库", async () => {
     await invoke("open_external_url", { url: GITHUB_REPOSITORY_URL });
     state.status = "已在默认浏览器打开 GitHub 仓库";
   });
@@ -1300,7 +1398,7 @@ async function openSettings() {
 }
 
 async function loadAppSettings(showStatus: boolean) {
-  await run(async () => {
+  await runWithProgress(showStatus ? "正在加载设置" : "正在加载备份设置", async () => {
     const settings = await invoke<AppSettings>("load_settings", { profile: state.profile });
     state.settings = settings;
     state.settingsDraft = cloneSettings(settings);
@@ -1316,7 +1414,7 @@ async function loadAppSettings(showStatus: boolean) {
 
 async function saveAppSettings() {
   if (!state.settingsDraft) return;
-  await run(async () => {
+  await runWithProgress("正在保存设置", async () => {
     const saved = await invoke<AppSettings>("save_settings", {
       profile: state.profile,
       settings: state.settingsDraft,
@@ -1328,7 +1426,7 @@ async function saveAppSettings() {
 }
 
 async function refreshDatabaseRepairs() {
-  await run(async () => {
+  await runWithProgress("正在预览数据库修复", async () => {
     const preview = await invoke<DatabaseRepairPreview>("preview_database_repairs", {
       profile: state.profile,
     });
@@ -1346,11 +1444,11 @@ async function applySelectedRepairs() {
     render({ preserveTableScroll: true });
     return;
   }
-  if (!confirmCodexExitAction("应用数据库修复", selected.length, true)) {
-    return;
-  }
+  const ready = await ensureCodexStoppedBefore("应用数据库修复");
+  if (!ready) return;
+  if (!confirmDangerousAction("应用数据库修复", selected.length, true)) return;
 
-  await run(async () => {
+  await runWithProgress("正在应用数据库修复", async () => {
     const report = await invoke<DatabaseRepairApplyReport>("apply_database_repairs", {
       profile: state.profile,
       options: { selected },
@@ -1366,11 +1464,12 @@ async function applySelectedRepairs() {
 }
 
 async function refreshBackups() {
-  await run(async () => {
+  await runWithProgress("正在加载备份", async () => {
     state.backupRows = await invoke<SessionBackupSummary[]>("list_session_backups", {
       profile: state.profile,
     });
     state.backupSummary = summarizeBackups(state.backupRows);
+    state.selectedBackupSessionIds.clear();
     state.restorePreview = null;
     state.status = `已加载 ${state.backupRows.length} 个会话备份`;
   });
@@ -1379,7 +1478,9 @@ async function refreshBackups() {
 async function restoreSelectedBackup(sessionId: string) {
   const snapshot = selectedSnapshot(sessionId);
   if (!snapshot) return;
-  await run(async () => {
+  const ready = await ensureCodexStoppedBefore("恢复备份");
+  if (!ready) return;
+  await runWithProgress("正在恢复备份", async () => {
     const preview = await invoke<RestorePreview>("preview_restore_session_backup", {
       profile: state.profile,
       backupId: snapshot.backup_id,
@@ -1388,7 +1489,7 @@ async function restoreSelectedBackup(sessionId: string) {
     const overwriteText = preview.overwrites_existing ? "\n目标 JSONL 已存在，将先创建预检备份。" : "";
     const favoriteText = preview.favorite ? "\n将恢复收藏状态。" : "";
     const confirmed = window.confirm(
-      `${codexExitConfirmationMessage({
+      `${dangerousActionConfirmationMessage({
         action: "恢复备份",
         count: 1,
         backup: preview.overwrites_existing,
@@ -1409,10 +1510,7 @@ async function restoreSelectedBackup(sessionId: string) {
     state.backupRows = await invoke<SessionBackupSummary[]>("list_session_backups", {
       profile: state.profile,
     });
-    state.sessions = await invoke<SessionSummary[]>("list_sessions", {
-      profile: state.profile,
-      filter: state.filter,
-    });
+    await loadSessions();
   });
 }
 
@@ -1427,7 +1525,7 @@ async function deleteSelectedBackup(sessionId: string) {
     );
     if (!confirmed) return;
   }
-  await run(async () => {
+  await runWithProgress("正在删除备份", async () => {
     await invoke("delete_session_backup", {
       profile: state.profile,
       backupId: snapshot.backup_id,
@@ -1441,15 +1539,54 @@ async function deleteSelectedBackup(sessionId: string) {
   });
 }
 
+async function deleteSelectedBackupGroups() {
+  const sessionIds = [...state.selectedBackupSessionIds];
+  if (sessionIds.length === 0) {
+    state.status = "请至少选择一个备份条目";
+    render({ preserveTableScroll: true });
+    return;
+  }
+  const selectedRows = state.backupRows.filter((row) => state.selectedBackupSessionIds.has(row.session_id));
+  const includesMissingLocal = selectedRows.some((row) => !row.local_exists);
+  const warning = includesMissingLocal
+    ? "\n其中包含本地 JSONL 已缺失的条目。删除后这些会话可能无法再恢复。"
+    : "";
+  const confirmed = window.confirm(
+    `删除 ${sessionIds.length} 个备份条目？\n这会永久删除这些条目下的全部快照，不能从本工具恢复。${warning}`,
+  );
+  if (!confirmed) return;
+
+  await runWithProgress("正在删除备份", async () => {
+    const report = await invoke<BackupGroupDeleteReport>("delete_session_backup_groups", {
+      profile: state.profile,
+      sessionIds,
+      confirmedLastArchives: includesMissingLocal,
+    });
+    state.status = `已删除 ${report.session_ids.length} 个备份条目 · ${report.deleted_backup_ids.length} 个快照`;
+    state.backupRows = await invoke<SessionBackupSummary[]>("list_session_backups", {
+      profile: state.profile,
+    });
+    state.backupSummary = summarizeBackups(state.backupRows);
+    state.selectedBackupSessionIds.clear();
+  });
+}
+
 async function applyDatabaseSyncFromLocal() {
-  if (!confirmCodexExitAction("按本地文件同步数据库", 1, true)) return;
-  await run(async () => {
+  const ready = await ensureCodexStoppedBefore("按本地文件同步数据库");
+  if (!ready) return;
+  if (!confirmDangerousAction("按本地文件同步数据库", 1, true)) return;
+  await runWithProgress("正在同步数据库", async () => {
     const report = await invoke<DatabaseRepairApplyReport>("apply_database_sync_from_local", {
       profile: state.profile,
     });
     state.syncStatus = "已按本地文件同步 SQLite";
     state.status = formatRepairApplyReport(report);
-    await refreshDatabaseRepairs();
+    const preview = await invoke<DatabaseRepairPreview>("preview_database_repairs", {
+      profile: state.profile,
+    });
+    state.repairItems = preview.items;
+    state.repairBackupNote = preview.backup_note;
+    state.selectedRepairIds.clear();
   });
 }
 
@@ -1488,14 +1625,25 @@ async function pollCodexProcess() {
   }
 }
 
-async function run(task: () => Promise<void>) {
+async function runWithProgress(label: string, task: () => Promise<void>) {
+  let timer = 0;
   try {
-    state.status = "正在处理...";
+    state.busy = { active: true, label, processed: 8 };
+    state.status = label;
     render({ preserveTableScroll: true });
+    timer = window.setInterval(() => {
+      if (!state.busy.active) return;
+      state.busy.processed += 1;
+      renderProgressOnly();
+    }, 700);
     await task();
   } catch (error) {
     state.status = String(error);
   } finally {
+    if (timer) {
+      window.clearInterval(timer);
+    }
+    state.busy = { active: false, label: "", processed: 0 };
     render({ preserveTableScroll: true });
   }
 }
@@ -1606,15 +1754,46 @@ function commandLabel(command: SessionCommand) {
   return labels[command];
 }
 
-function confirmCodexExitAction(action: string, count: number, backup: boolean, extra?: string) {
+async function ensureCodexStoppedBefore(action: string) {
+  try {
+    const running = await invoke<boolean>("detect_codex_running");
+    if (!running) return true;
+    state.dialog = {
+      kind: "codex-running",
+      title: "Codex 正在运行",
+      message: `为避免数据被同时写入，请先关闭正在使用同一份数据的 Codex 后再${action}。`,
+      primaryLabel: "知道了",
+    };
+    render({ preserveTableScroll: true });
+    return false;
+  } catch (error) {
+    state.status = `无法检测 Codex 运行状态：${String(error)}`;
+    render({ preserveTableScroll: true });
+    return false;
+  }
+}
+
+function confirmDangerousAction(action: string, count: number, backup: boolean, extra?: string) {
   return window.confirm(
-    codexExitConfirmationMessage({
+    dangerousActionConfirmationMessage({
       action,
       count,
       backup,
       extra,
     }),
   );
+}
+
+function dangerousActionConfirmationMessage(options: { action: string; count: number; backup: boolean; extra?: string }) {
+  const lines = [`将${options.action} ${options.count} 个会话。`];
+  if (options.backup) {
+    lines.push("执行前会自动创建备份。");
+  }
+  if (options.extra) {
+    lines.push(options.extra);
+  }
+  lines.push("继续？");
+  return lines.join("\n");
 }
 
 function optionalNumber(value: number | null | undefined) {
@@ -1675,6 +1854,21 @@ function toggleAllRepairs(selected: boolean) {
   render({ preserveTableScroll: true });
 }
 
+function allBackupRowsSelected() {
+  return state.backupRows.length > 0 && state.backupRows.every((row) => state.selectedBackupSessionIds.has(row.session_id));
+}
+
+function someBackupRowsSelected() {
+  return state.backupRows.some((row) => state.selectedBackupSessionIds.has(row.session_id));
+}
+
+function toggleAllBackupRows(selected: boolean) {
+  for (const row of state.backupRows) {
+    selected ? state.selectedBackupSessionIds.add(row.session_id) : state.selectedBackupSessionIds.delete(row.session_id);
+  }
+  render({ preserveTableScroll: true });
+}
+
 function repairKindLabel(kind: DatabaseRepairKind) {
   const labels: Record<DatabaseRepairKind, string> = {
     "missing-thread-row": "补 threads 行",
@@ -1722,6 +1916,12 @@ function escapeHtml(value: string) {
 
 render();
 void loadAppSettings(false);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.dialog) {
+    state.dialog = null;
+    render({ preserveTableScroll: true });
+  }
+});
 window.setInterval(() => {
   void pollCodexProcess();
 }, 30_000);

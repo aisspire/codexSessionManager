@@ -1,6 +1,7 @@
 export interface GroupableSession {
   id: string;
   project?: string;
+  sort_updated_at_ms?: number;
 }
 
 export interface ProjectGroup<TSession extends GroupableSession> {
@@ -14,8 +15,7 @@ export const FALLBACK_PROJECT_NAME = "未分组项目";
 /**
  * 按项目路径对会话进行稳定分组。
  *
- * 这里保持“首次出现”的项目顺序，而不是重新排序，是为了让后端已经按更新时间
- * 排好的结果不被前端二次打乱；同一项目下的会话也保留原始列表顺序。
+ * 项目和项目内会话都按最新修改时间倒序排列，便于优先处理最近活动。
  */
 export function buildProjectGroups<TSession extends GroupableSession>(
   sessions: TSession[],
@@ -40,5 +40,28 @@ export function buildProjectGroups<TSession extends GroupableSession>(
     group.sessions.push(session);
   }
 
-  return groups;
+  for (const group of groups) {
+    group.sessions.sort(compareSessionsByNewest);
+  }
+
+  return groups.sort((left, right) => {
+    const byNewest = newestInGroup(right) - newestInGroup(left);
+    if (byNewest !== 0) return byNewest;
+    return left.project.localeCompare(right.project);
+  });
+}
+
+function compareSessionsByNewest(left: GroupableSession, right: GroupableSession) {
+  return sortValue(right) - sortValue(left);
+}
+
+function newestInGroup(group: ProjectGroup<GroupableSession>) {
+  return group.sessions.reduce(
+    (newest, session) => Math.max(newest, sortValue(session)),
+    Number.NEGATIVE_INFINITY,
+  );
+}
+
+function sortValue(session: GroupableSession) {
+  return session.sort_updated_at_ms ?? Number.NEGATIVE_INFINITY;
 }

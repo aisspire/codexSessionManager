@@ -65,6 +65,7 @@ pub struct SessionBackupSummary {
     pub title: Option<String>,
     pub project: Option<String>,
     pub group: Option<String>,
+    pub latest_created_at_unix: i64,
     pub local_exists: bool,
     pub snapshots: Vec<SessionBackupSnapshot>,
 }
@@ -91,6 +92,13 @@ pub struct RetentionReport {
 pub struct BackupDeleteReport {
     pub backup_id: String,
     pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupGroupDeleteReport {
+    pub session_ids: Vec<String>,
+    pub deleted_backup_ids: Vec<String>,
+    pub deleted_dirs: Vec<String>,
 }
 
 pub fn create_session_backup(
@@ -234,6 +242,10 @@ pub fn list_session_backups(profile: &CodexProfile) -> Result<Vec<SessionBackupS
         let group = manifests
             .first()
             .and_then(|(_, manifest, _)| backup_group(manifest));
+        let latest_created_at_unix = manifests
+            .first()
+            .map(|(_, manifest, _)| manifest.created_at_unix)
+            .unwrap_or_default();
         let snapshots = manifests
             .into_iter()
             .map(|(backup_id, manifest, path)| SessionBackupSnapshot {
@@ -249,10 +261,17 @@ pub fn list_session_backups(profile: &CodexProfile) -> Result<Vec<SessionBackupS
             title,
             project,
             group,
+            latest_created_at_unix,
             local_exists,
             snapshots,
         });
     }
+    summaries.sort_by(|left, right| {
+        right
+            .latest_created_at_unix
+            .cmp(&left.latest_created_at_unix)
+            .then(left.session_id.cmp(&right.session_id))
+    });
     Ok(summaries)
 }
 
@@ -266,6 +285,66 @@ fn backup_group(manifest: &SessionBackupManifest) -> Option<String> {
 
 pub fn delete_backup_snapshot(profile: &CodexProfile, backup_id: &str) -> Result<()> {
     delete_backup_snapshot_with_confirmation(profile, backup_id, true).map(|_| ())
+}
+
+pub fn delete_backup_groups(
+    profile: &CodexProfile,
+    session_ids: &[String],
+    confirmed_last_archives: bool,
+) -> Result<BackupGroupDeleteReport> {
+    let mut selected = session_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    selected.sort();
+    selected.dedup();
+    if selected.is_empty() {
+        bail!("please select at least one backup group");
+    }
+
+    let sessions_root = backup_root(profile).join("sessions");
+    let snapshots = all_snapshot_dirs(profile)?;
+    let mut report = BackupGroupDeleteReport {
+        session_ids: Vec::new(),
+        deleted_backup_ids: Vec::new(),
+        deleted_dirs: Vec::new(),
+    };
+
+    for session_id in selected {
+        let session_snapshots = snapshots
+            .iter()
+            .filter(|(manifest, _)| manifest.session_id == session_id)
+            .collect::<Vec<_>>();
+        let session_dir = sessions_root.join(&session_id);
+        if session_snapshots.is_empty() {
+            if session_dir.exists() {
+                bail!("no readable backups found for selected session {session_id}");
+            }
+            continue;
+        }
+        if !confirmed_last_archives && !local_session_exists(profile, &session_id)? {
+            bail!(
+                "refusing to delete the last backup for missing local session {} without confirmation",
+                session_id
+            );
+        }
+
+        for (_, manifest_dir) in &session_snapshots {
+            report
+                .deleted_backup_ids
+                .push(backup_id_for_dir(profile, manifest_dir)?);
+        }
+        fs::remove_dir_all(&session_dir)
+            .with_context(|| format!("failed to delete backup group {}", session_dir.display()))?;
+        report.session_ids.push(session_id);
+        report.deleted_dirs.push(session_dir.display().to_string());
+    }
+
+    report.deleted_backup_ids.sort();
+    report.deleted_backup_ids.dedup();
+    Ok(report)
 }
 
 pub fn read_session_backup_manifest(
@@ -523,6 +602,10 @@ fn backup_id_for_manifest(profile: &CodexProfile, manifest_path: &Path) -> Resul
     let dir = manifest_path
         .parent()
         .context("manifest path has no parent")?;
+    backup_id_for_dir(profile, dir)
+}
+
+fn backup_id_for_dir(profile: &CodexProfile, dir: &Path) -> Result<String> {
     let root = backup_root(profile);
     Ok(dir
         .strip_prefix(&root)

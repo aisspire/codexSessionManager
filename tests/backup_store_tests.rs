@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use codex_session_manager::backup_store::{
-    create_session_backup, delete_backup_snapshot_with_confirmation, enforce_backup_retention,
-    list_session_backups, BackupTrigger,
+    create_session_backup, delete_backup_groups, delete_backup_snapshot_with_confirmation,
+    enforce_backup_retention, list_session_backups, BackupTrigger,
 };
 use codex_session_manager::favorites::set_favorite;
 use codex_session_manager::profile::CodexProfile;
@@ -119,6 +119,30 @@ fn listing_backup_marks_local_exists_false_when_jsonl_is_missing() {
 }
 
 #[test]
+fn listing_backups_sorts_session_summaries_by_latest_snapshot_newest_first() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    let first_rollout = profile.sessions_dir().join("thread-1.jsonl");
+    let second_rollout = profile.sessions_dir().join("thread-2.jsonl");
+    write_rollout(&first_rollout, "thread-1", "/tmp/project-a", "cm");
+    write_rollout(&second_rollout, "thread-2", "/tmp/project-b", "cm");
+
+    create_session_backup(&profile, "thread-1", BackupTrigger::Manual).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let newest = create_session_backup(&profile, "thread-2", BackupTrigger::Manual).unwrap();
+
+    let rows = list_session_backups(&profile).unwrap();
+
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["thread-2", "thread-1"]
+    );
+    assert_eq!(rows[0].latest_created_at_unix, newest.created_at_unix);
+}
+
+#[test]
 fn max_count_prunes_oldest_non_protected_backups() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
@@ -215,6 +239,52 @@ fn manual_deletion_of_last_archive_requires_confirmation() {
 
     let report = delete_backup_snapshot_with_confirmation(&profile, &backup_id, true).unwrap();
     assert!(report.deleted);
+    assert!(list_session_backups(&profile).unwrap().is_empty());
+}
+
+#[test]
+fn deleting_backup_groups_removes_all_snapshots_for_selected_sessions() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    let first_rollout = profile.sessions_dir().join("thread-1.jsonl");
+    let second_rollout = profile.sessions_dir().join("thread-2.jsonl");
+    write_rollout(&first_rollout, "thread-1", "/tmp/project-a", "cm");
+    write_rollout(&second_rollout, "thread-2", "/tmp/project-b", "cm");
+
+    create_session_backup(&profile, "thread-1", BackupTrigger::Manual).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    create_session_backup(&profile, "thread-1", BackupTrigger::Delete).unwrap();
+    create_session_backup(&profile, "thread-2", BackupTrigger::Manual).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    create_session_backup(&profile, "thread-2", BackupTrigger::Delete).unwrap();
+
+    let report = delete_backup_groups(
+        &profile,
+        &["thread-1".to_string(), "thread-2".to_string()],
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(report.session_ids, vec!["thread-1", "thread-2"]);
+    assert_eq!(report.deleted_backup_ids.len(), 4);
+    assert_eq!(report.deleted_dirs.len(), 2);
+    assert!(list_session_backups(&profile).unwrap().is_empty());
+}
+
+#[test]
+fn deleting_last_missing_backup_group_requires_confirmation() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    let rollout = profile.sessions_dir().join("thread-1.jsonl");
+    write_rollout(&rollout, "thread-1", "/tmp/project", "cm");
+    create_session_backup(&profile, "thread-1", BackupTrigger::Manual).unwrap();
+    fs::remove_file(&rollout).unwrap();
+
+    let error = delete_backup_groups(&profile, &["thread-1".to_string()], false).unwrap_err();
+    assert!(error.to_string().contains("last backup"));
+
+    let report = delete_backup_groups(&profile, &["thread-1".to_string()], true).unwrap();
+    assert_eq!(report.deleted_backup_ids.len(), 1);
     assert!(list_session_backups(&profile).unwrap().is_empty());
 }
 

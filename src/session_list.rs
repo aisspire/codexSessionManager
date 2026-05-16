@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,7 @@ pub struct SessionSummary {
     pub archived: bool,
     pub favorite: bool,
     pub updated_at: Option<String>,
+    pub sort_updated_at_ms: Option<i64>,
     pub rollout_path: Option<String>,
     pub in_session_index: bool,
 }
@@ -80,6 +83,17 @@ pub fn list_sessions(
             let index = index_by_id.get(&thread.id);
             let meta_archived = meta.is_some_and(|(_, archived)| *archived);
             let favorite = favorite_ids.contains(&thread.id);
+            let rollout_path = non_empty(thread.rollout_path.clone())
+                .or_else(|| meta.map(|(m, _)| m.path.display().to_string()));
+            let sort_updated_at_ms = meta
+                .and_then(|(m, _)| modified_unix_ms(&m.path))
+                .or_else(|| {
+                    rollout_path
+                        .as_deref()
+                        .and_then(|path| modified_unix_ms(Path::new(path)))
+                })
+                .or(thread.updated_at_ms)
+                .or(thread.created_at_ms);
             SessionSummary {
                 id: thread.id.clone(),
                 title: index
@@ -103,8 +117,8 @@ pub fn list_sessions(
                 archived: thread.archived || meta_archived,
                 favorite,
                 updated_at: thread.updated_at.clone(),
-                rollout_path: non_empty(thread.rollout_path.clone())
-                    .or_else(|| meta.map(|(m, _)| m.path.display().to_string())),
+                sort_updated_at_ms,
+                rollout_path,
                 in_session_index: index.is_some(),
             }
         })
@@ -130,6 +144,7 @@ pub fn list_sessions(
                         source: meta.source.clone(),
                         archived: *archived,
                         updated_at: index.and_then(|entry| entry.updated_at.clone()),
+                        sort_updated_at_ms: modified_unix_ms(&meta.path),
                         rollout_path: Some(meta.path.display().to_string()),
                         in_session_index: index.is_some(),
                     }
@@ -140,8 +155,9 @@ pub fn list_sessions(
 
     sessions.sort_by(|left, right| {
         right
-            .updated_at
-            .cmp(&left.updated_at)
+            .sort_updated_at_ms
+            .cmp(&left.sort_updated_at_ms)
+            .then(right.updated_at.cmp(&left.updated_at))
             .then(left.id.cmp(&right.id))
     });
     Ok(sessions)
@@ -197,4 +213,10 @@ fn matches_optional(actual: Option<&str>, expected: Option<&str>) -> bool {
 
 fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
+}
+
+fn modified_unix_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(duration.as_millis().min(i64::MAX as u128) as i64)
 }
