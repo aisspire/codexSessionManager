@@ -234,6 +234,48 @@ fn refreshes_selected_session_time_sources_for_codex_sorting() {
 }
 
 #[test]
+fn refresh_pins_selected_sessions_in_codex_global_state() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    create_state_db(&profile.state_db_path());
+    let rollout_1 = profile.sessions_dir().join("thread-1.jsonl");
+    let rollout_2 = profile.sessions_dir().join("thread-2.jsonl");
+    fs::create_dir_all(profile.sessions_dir()).unwrap();
+    write_rollout(&rollout_1, "thread-1");
+    write_rollout(&rollout_2, "thread-2");
+    set_rollout_path(&profile.state_db_path(), "thread-1", &rollout_1);
+    set_rollout_path(&profile.state_db_path(), "thread-2", &rollout_2);
+    fs::write(
+        profile.global_state_path(),
+        r#"{"pinned-thread-ids":["existing","thread-2"],"thread-sort-key":"created_at"}"#,
+    )
+    .unwrap();
+    let ids = vec!["thread-1".to_string(), "thread-2".to_string()];
+    let options = SessionApplyOptions { apply: true };
+
+    refresh_session_updated_at_with_guard(&profile, &ids, &options, || Ok(())).unwrap();
+
+    let state = fs::read_to_string(profile.global_state_path()).unwrap();
+    let value = serde_json::from_str::<serde_json::Value>(&state).unwrap();
+    assert_eq!(
+        value
+            .get("pinned-thread-ids")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap(),
+        vec![
+            serde_json::json!("thread-1"),
+            serde_json::json!("thread-2"),
+            serde_json::json!("existing"),
+        ]
+    );
+    assert_eq!(
+        value.get("thread-sort-key").and_then(|value| value.as_str()),
+        Some("created_at")
+    );
+}
+
+#[test]
 fn refuses_to_refresh_session_time_sources_when_codex_is_running() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();

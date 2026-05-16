@@ -166,6 +166,7 @@ where
         ids,
         &timestamp.updated_at_iso,
     )?;
+    pin_threads_in_global_state(&profile.global_state_path(), ids)?;
     Ok(report)
 }
 
@@ -567,6 +568,78 @@ fn touch_rollout_files_at(paths: &[PathBuf], now: SystemTime) -> Result<()> {
         touch_rollout_file(path, times)?;
     }
     Ok(())
+}
+
+fn pin_threads_in_global_state(path: &Path, ids: &[String]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut state = if path.exists() {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("failed to read global state {}", path.display()))?;
+        if text.trim().is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .with_context(|| format!("failed to parse global state {}", path.display()))?
+        }
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+
+    let object = state
+        .as_object_mut()
+        .with_context(|| format!("global state {} is not a JSON object", path.display()))?;
+    let existing = object
+        .get("pinned-thread-ids")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let selected = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut pinned = Vec::new();
+
+    for id in ids {
+        if seen.insert(id.clone()) {
+            pinned.push(id.clone());
+        }
+    }
+    for id in existing {
+        if !selected.contains(id.as_str()) && seen.insert(id.clone()) {
+            pinned.push(id);
+        }
+    }
+
+    let current = object
+        .get("pinned-thread-ids")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let next = pinned
+        .iter()
+        .map(|id| serde_json::Value::String(id.clone()))
+        .collect::<Vec<_>>();
+    if current == next {
+        return Ok(0);
+    }
+
+    object.insert(
+        "pinned-thread-ids".to_string(),
+        serde_json::Value::Array(next),
+    );
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create global state dir {}", parent.display()))?;
+    }
+    fs::write(path, format!("{}\n", serde_json::to_string_pretty(&state)?))
+        .with_context(|| format!("failed to write global state {}", path.display()))?;
+    Ok(pinned.len())
 }
 
 struct SessionTimestamp {
