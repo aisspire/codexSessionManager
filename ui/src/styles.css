@@ -956,9 +956,11 @@ select {
   left: 50%;
   z-index: 41;
   display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 14px;
   width: min(520px, calc(100vw - 36px));
   max-height: min(620px, calc(100vh - 48px));
+  overflow: hidden;
   padding: 18px;
   border: 1px solid #b9c4d0;
   border-radius: 8px;
@@ -1010,7 +1012,10 @@ select {
 .task-items {
   display: grid;
   gap: 8px;
-  overflow: auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding-right: 2px;
 }
 

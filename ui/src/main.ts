@@ -8,6 +8,7 @@ import {
   sessionTitle as displaySessionTitle,
 } from "./sessionDisplay";
 import { buildProjectGroups, type ProjectGroup } from "./sessionGroups";
+import { taskProgressDialogMarkup } from "./taskProgressView";
 import "./styles.css";
 
 type AppPage = "batch-edit" | "session-management" | "restore-backups" | "database-repair";
@@ -341,45 +342,7 @@ function render(options: RenderOptions = {}) {
 }
 
 function taskProgressDialog() {
-  const total = Math.max(state.busy.total, state.busy.items.length, 1);
-  const completed = Math.min(state.busy.completed, total);
-  const percent = Math.round((completed / total) * 100);
-  const visibleItems = state.busy.items.slice(0, 10);
-  const hiddenCount = Math.max(0, state.busy.items.length - visibleItems.length);
-  return `
-    <div class="task-backdrop" aria-hidden="true"></div>
-    <section class="task-dialog" role="dialog" aria-modal="true" aria-labelledby="task-dialog-title">
-      <div class="task-dialog-top">
-        <div>
-          <h2 id="task-dialog-title">${escapeHtml(state.busy.label)}</h2>
-          <p>${completed} / ${total}</p>
-        </div>
-        ${state.busy.error ? `<button class="icon-button" data-close-task title="关闭任务进度">×</button>` : ""}
-      </div>
-      <div class="task-meter" role="progressbar" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${completed}">
-        <span style="width:${percent}%"></span>
-      </div>
-      <div class="task-items">
-        ${visibleItems.map(taskProgressRow).join("")}
-        ${hiddenCount ? `<div class="task-overflow">还有 ${hiddenCount} 项正在队列中</div>` : ""}
-      </div>
-      ${state.busy.error ? `<div class="task-error">${escapeHtml(state.busy.error)}</div>` : ""}
-    </section>
-  `;
-}
-
-function taskProgressRow(item: TaskProgressItem) {
-  const label = item.status === "pending" ? "等待" : item.status === "running" ? "处理中" : item.status === "done" ? "完成" : "失败";
-  return `
-    <div class="task-item ${item.status}">
-      <span class="task-dot" aria-hidden="true"></span>
-      <div>
-        <strong>${escapeHtml(item.label)}</strong>
-        ${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}
-      </div>
-      <span>${label}</span>
-    </div>
-  `;
+  return taskProgressDialogMarkup(state.busy);
 }
 
 function appDialog(dialog: AppDialog) {
