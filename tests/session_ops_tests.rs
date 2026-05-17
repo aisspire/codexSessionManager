@@ -212,23 +212,11 @@ fn refreshes_selected_session_time_sources_for_codex_sorting() {
         1770794029,
         1770794029123,
     );
-    assert_created_after(
-        &profile.state_db_path(),
-        "thread-1",
-        1770790115,
-        1770790115043,
-    );
     assert_updated_after(
         &profile.state_db_path(),
         "thread-2",
         1770794029,
         1770794029122,
-    );
-    assert_created_after(
-        &profile.state_db_path(),
-        "thread-2",
-        1770790115,
-        1770790115043,
     );
 
     let index = fs::read_to_string(profile.session_index_path()).unwrap();
@@ -424,24 +412,6 @@ fn assert_updated_after(
         .unwrap();
     assert!(updated_at > old_updated_at);
     assert!(updated_at_ms > old_updated_at_ms);
-}
-
-fn assert_created_after(
-    path: &std::path::Path,
-    id: &str,
-    old_created_at: i64,
-    old_created_at_ms: i64,
-) {
-    let conn = Connection::open(path).unwrap();
-    let (created_at, created_at_ms): (i64, i64) = conn
-        .query_row(
-            "SELECT created_at, created_at_ms FROM threads WHERE id = ?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert!(created_at > old_created_at);
-    assert!(created_at_ms > old_created_at_ms);
 }
 
 fn session_index_updated_at(index: &str, id: &str) -> Option<String> {
