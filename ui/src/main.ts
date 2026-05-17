@@ -59,6 +59,16 @@ interface MutationReport {
   index_entries: number;
 }
 
+interface SessionOperationReport {
+  action: string;
+  applied: boolean;
+  sqlite_rows: number;
+  index_entries: number;
+  backup_manifests?: string[];
+  warnings?: string[];
+  trash_manifest_path?: string;
+}
+
 interface CompactReport {
   action: string;
   applied: boolean;
@@ -183,10 +193,22 @@ interface DetailEditState {
   pendingProvider: string;
 }
 
+type TaskItemStatus = "pending" | "running" | "done" | "failed";
+
+interface TaskProgressItem {
+  id: string;
+  label: string;
+  status: TaskItemStatus;
+  detail?: string;
+}
+
 interface BusyState {
   active: boolean;
   label: string;
-  processed: number;
+  completed: number;
+  total: number;
+  items: TaskProgressItem[];
+  error?: string;
 }
 
 interface AppDialog {
@@ -212,6 +234,14 @@ const blankDetailEdit = (): DetailEditState => ({
   pendingTitle: "",
   pendingProject: "",
   pendingProvider: "",
+});
+
+const idleBusyState = (): BusyState => ({
+  active: false,
+  label: "",
+  completed: 0,
+  total: 0,
+  items: [],
 });
 
 const cachedInput = loadInputCache();
@@ -261,7 +291,9 @@ const state = {
   busy: {
     active: false,
     label: "",
-    processed: 0,
+    completed: 0,
+    total: 0,
+    items: [],
   } as BusyState,
   // 展开状态按项目 key 保存。首次加载时会自动展开全部项目，用户操作后保持本地状态。
   expandedProjects: cachedExpandedProjects ?? new Set<string>(),
@@ -295,11 +327,11 @@ function render(options: RenderOptions = {}) {
         ${actionBar()}
         ${mainContent}
         <div class="status">${escapeHtml(state.status)}</div>
-        ${bottomProgress()}
       </section>
       ${active && state.detailOpen ? detailDrawer(active) : ""}
       ${state.settingsOpen ? settingsDrawer() : ""}
       ${state.dialog ? appDialog(state.dialog) : ""}
+      ${state.busy.active ? taskProgressDialog() : ""}
     </main>
   `;
   bindEvents(groups);
@@ -308,13 +340,44 @@ function render(options: RenderOptions = {}) {
   }
 }
 
-function bottomProgress() {
-  const blockCount = Math.max(8, Math.min(18, state.busy.processed || 8));
-  const blocks = Array.from({ length: blockCount }, (_, index) => `<span style="--i:${index}"></span>`).join("");
+function taskProgressDialog() {
+  const total = Math.max(state.busy.total, state.busy.items.length, 1);
+  const completed = Math.min(state.busy.completed, total);
+  const percent = Math.round((completed / total) * 100);
+  const visibleItems = state.busy.items.slice(0, 10);
+  const hiddenCount = Math.max(0, state.busy.items.length - visibleItems.length);
   return `
-    <div class="bottom-progress ${state.busy.active ? "active" : ""}" role="status" aria-live="polite">
-      <span class="bottom-progress-label">${escapeHtml(state.busy.label)}</span>
-      <span class="progress-blocks" aria-hidden="true">${blocks}</span>
+    <div class="task-backdrop" aria-hidden="true"></div>
+    <section class="task-dialog" role="dialog" aria-modal="true" aria-labelledby="task-dialog-title">
+      <div class="task-dialog-top">
+        <div>
+          <h2 id="task-dialog-title">${escapeHtml(state.busy.label)}</h2>
+          <p>${completed} / ${total}</p>
+        </div>
+        ${state.busy.error ? `<button class="icon-button" data-close-task title="关闭任务进度">×</button>` : ""}
+      </div>
+      <div class="task-meter" role="progressbar" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${completed}">
+        <span style="width:${percent}%"></span>
+      </div>
+      <div class="task-items">
+        ${visibleItems.map(taskProgressRow).join("")}
+        ${hiddenCount ? `<div class="task-overflow">还有 ${hiddenCount} 项正在队列中</div>` : ""}
+      </div>
+      ${state.busy.error ? `<div class="task-error">${escapeHtml(state.busy.error)}</div>` : ""}
+    </section>
+  `;
+}
+
+function taskProgressRow(item: TaskProgressItem) {
+  const label = item.status === "pending" ? "等待" : item.status === "running" ? "处理中" : item.status === "done" ? "完成" : "失败";
+  return `
+    <div class="task-item ${item.status}">
+      <span class="task-dot" aria-hidden="true"></span>
+      <div>
+        <strong>${escapeHtml(item.label)}</strong>
+        ${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}
+      </div>
+      <span>${label}</span>
     </div>
   `;
 }
@@ -330,15 +393,6 @@ function appDialog(dialog: AppDialog) {
       </div>
     </section>
   `;
-}
-
-function renderProgressOnly() {
-  const current = document.querySelector<HTMLElement>(".bottom-progress");
-  if (!current) {
-    render({ preserveTableScroll: true });
-    return;
-  }
-  current.outerHTML = bottomProgress();
 }
 
 function disabledWhenBusy(disabled = false) {
@@ -484,7 +538,7 @@ function filterBar() {
     <section class="toolbar filter-toolbar" aria-label="搜索筛选">
       <div class="filter-path-row">
         <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
-        <button id="refresh" class="primary" ${disabledWhenBusy()}>刷新</button>
+        <button id="refresh" class="primary" ${disabledWhenBusy()}>开始扫描</button>
       </div>
       <div class="filter-grid">
         <div class="filter-status">
@@ -510,7 +564,7 @@ function repairFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="数据库修复范围">
       <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
-      <button id="refresh" class="primary" ${disabledWhenBusy()}>预览修复项</button>
+      <button id="refresh" class="primary" ${disabledWhenBusy()}>扫描修复项</button>
     </section>
   `;
 }
@@ -519,7 +573,7 @@ function backupFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="备份范围">
       <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
-      <button id="refresh" class="primary" ${disabledWhenBusy()}>刷新备份</button>
+      <button id="refresh" class="primary" ${disabledWhenBusy()}>扫描备份</button>
     </section>
   `;
 }
@@ -837,6 +891,7 @@ function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
   }
   bindSettingsEvents();
   bindDialogEvents();
+  bindTaskDialogEvents();
 
   document.querySelector("#refresh")?.addEventListener("click", () => {
     state.activePage === "database-repair"
@@ -860,6 +915,13 @@ function bindDialogEvents() {
       state.dialog = null;
       render({ preserveTableScroll: true });
     });
+  });
+}
+
+function bindTaskDialogEvents() {
+  document.querySelector<HTMLElement>("[data-close-task]")?.addEventListener("click", () => {
+    state.busy = idleBusyState();
+    render({ preserveTableScroll: true });
   });
 }
 
@@ -1189,10 +1251,15 @@ async function mutateIds(command: SessionCommand, ids: string[]) {
     const ready = await ensureCodexStoppedBefore(commandLabel(command));
     if (!ready) return;
   }
-  await runWithProgress(`正在${commandLabel(command)}会话`, async () => {
-    const report = await invoke(command, { profile: state.profile, ids, apply: true });
-    state.status = JSON.stringify(report);
+  const label = `正在${commandLabel(command)}会话`;
+  await runTaskList(label, taskItemsForSessionIds(ids), async (tasks) => {
+    for (const [index, id] of ids.entries()) {
+      tasks.start(index, "已提交给 Rust 处理");
+      const report = await invoke<SessionOperationReport>(command, { profile: state.profile, ids: [id], apply: true });
+      tasks.finish(index, formatSessionOperationReport(report));
+    }
     await loadSessions();
+    state.status = `已${commandLabel(command)} ${ids.length} 个会话`;
   });
 }
 
@@ -1242,7 +1309,8 @@ async function editSelected(apply: boolean) {
     if (!ready) return;
   }
 
-  await runWithProgress(apply ? "正在应用批量编辑" : "正在预览批量编辑", async () => {
+  await runTaskList(apply ? "正在应用批量编辑" : "正在预览批量编辑", taskItemsForSessionIds(ids), async (tasks) => {
+    ids.forEach((_, index) => tasks.start(index, "等待批量编辑结果"));
     const report = await invoke<MutationReport>("edit_selected_sessions", {
       profile: state.profile,
       ids,
@@ -1257,6 +1325,7 @@ async function editSelected(apply: boolean) {
       await loadSessions();
     }
     state.status = formatMutationReport(report);
+    ids.forEach((_, index) => tasks.finish(index, formatMutationReport(report)));
   });
 }
 
@@ -1371,6 +1440,42 @@ function detailEditDirty(session: SessionSummary) {
   });
 }
 
+function taskItemsForSessionIds(ids: string[]) {
+  return ids.map((id) => {
+    const session = state.sessions.find((candidate) => candidate.id === id);
+    return {
+      id,
+      label: session ? sessionTitle(session) : id,
+      status: "pending" as TaskItemStatus,
+      detail: id,
+    };
+  });
+}
+
+function taskItemsForRepairIds(ids: string[]) {
+  return ids.map((id) => {
+    const item = state.repairItems.find((candidate) => candidate.id === id);
+    return {
+      id,
+      label: item?.summary || id,
+      status: "pending" as TaskItemStatus,
+      detail: item?.session_id || id,
+    };
+  });
+}
+
+function taskItemsForBackupSessionIds(ids: string[]) {
+  return ids.map((id) => {
+    const row = state.backupRows.find((candidate) => candidate.session_id === id);
+    return {
+      id,
+      label: row?.title || id,
+      status: "pending" as TaskItemStatus,
+      detail: row?.project || id,
+    };
+  });
+}
+
 async function openGithubRepository() {
   await runWithProgress("正在打开 GitHub 仓库", async () => {
     await invoke("open_external_url", { url: GITHUB_REPOSITORY_URL });
@@ -1434,7 +1539,8 @@ async function applySelectedRepairs() {
   const ready = await ensureCodexStoppedBefore("应用数据库修复");
   if (!ready) return;
 
-  await runWithProgress("正在应用数据库修复", async () => {
+  await runTaskList("正在应用数据库修复", taskItemsForRepairIds(selected), async (tasks) => {
+    selected.forEach((_, index) => tasks.start(index, "等待修复结果"));
     const report = await invoke<DatabaseRepairApplyReport>("apply_database_repairs", {
       profile: state.profile,
       options: { selected },
@@ -1446,6 +1552,7 @@ async function applySelectedRepairs() {
     state.repairItems = preview.items;
     state.repairBackupNote = preview.backup_note;
     state.selectedRepairIds.clear();
+    selected.forEach((_, index) => tasks.finish(index, formatRepairApplyReport(report)));
   });
 }
 
@@ -1531,7 +1638,8 @@ async function deleteSelectedBackupGroups() {
   );
   if (!confirmed) return;
 
-  await runWithProgress("正在删除备份", async () => {
+  await runTaskList("正在删除备份", taskItemsForBackupSessionIds(sessionIds), async (tasks) => {
+    sessionIds.forEach((_, index) => tasks.start(index, "等待删除结果"));
     const report = await invoke<BackupGroupDeleteReport>("delete_session_backup_groups", {
       profile: state.profile,
       sessionIds,
@@ -1543,6 +1651,7 @@ async function deleteSelectedBackupGroups() {
     });
     state.backupSummary = summarizeBackups(state.backupRows);
     state.selectedBackupSessionIds.clear();
+    sessionIds.forEach((_, index) => tasks.finish(index, `已删除 ${report.deleted_backup_ids.length} 个快照`));
   });
 }
 
@@ -1600,30 +1709,93 @@ async function pollCodexProcess() {
 }
 
 async function runWithProgress(label: string, task: () => Promise<void>) {
-  let timer = 0;
+  const item: TaskProgressItem = { id: label, label, status: "running" };
   try {
-    state.busy = { active: true, label, processed: 8 };
+    state.busy = { active: true, label, completed: 0, total: 1, items: [item] };
     state.status = label;
     render({ preserveTableScroll: true });
-    timer = window.setInterval(() => {
-      if (!state.busy.active) return;
-      state.busy.processed += 1;
-      renderProgressOnly();
-    }, 700);
+    await nextFrame();
     await task();
+    state.busy.completed = 1;
+    state.busy.items[0] = { ...item, status: "done" };
   } catch (error) {
-    state.status = String(error);
+    failActiveTask(String(error), 0);
   } finally {
-    if (timer) {
-      window.clearInterval(timer);
+    if (!state.busy.error) {
+      state.busy = idleBusyState();
+      render({ preserveTableScroll: true });
     }
-    state.busy = { active: false, label: "", processed: 0 };
-    render({ preserveTableScroll: true });
   }
+}
+
+async function runTaskList(
+  label: string,
+  items: TaskProgressItem[],
+  task: (controls: TaskListControls) => Promise<void>,
+) {
+  try {
+    state.busy = {
+      active: true,
+      label,
+      completed: 0,
+      total: items.length,
+      items: items.map((item) => ({ ...item })),
+    };
+    state.status = label;
+    render({ preserveTableScroll: true });
+    await nextFrame();
+    await task({
+      start: (index, detail) => updateTaskItem(index, "running", detail),
+      finish: (index, detail) => {
+        updateTaskItem(index, "done", detail);
+        state.busy.completed = state.busy.items.filter((item) => item.status === "done").length;
+        render({ preserveTableScroll: true });
+      },
+    });
+  } catch (error) {
+    const runningIndex = state.busy.items.findIndex((item) => item.status === "running");
+    failActiveTask(String(error), runningIndex >= 0 ? runningIndex : undefined);
+  } finally {
+    if (!state.busy.error) {
+      state.busy = idleBusyState();
+      render({ preserveTableScroll: true });
+    }
+  }
+}
+
+interface TaskListControls {
+  start: (index: number, detail?: string) => void;
+  finish: (index: number, detail?: string) => void;
+}
+
+function updateTaskItem(index: number, status: TaskItemStatus, detail?: string) {
+  const item = state.busy.items[index];
+  if (!item) return;
+  state.busy.items[index] = { ...item, status, detail };
+  render({ preserveTableScroll: true });
+}
+
+function failActiveTask(error: string, index?: number) {
+  if (typeof index === "number" && state.busy.items[index]) {
+    state.busy.items[index] = { ...state.busy.items[index], status: "failed", detail: error };
+  }
+  state.busy.error = error;
+  state.status = error;
+  render({ preserveTableScroll: true });
+}
+
+function nextFrame() {
+  return new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
 }
 
 function formatMutationReport(report: MutationReport) {
   return `${report.action} · ${report.applied ? "已应用" : "预览"} · SQLite ${report.sqlite_rows} 行 · JSONL ${report.jsonl_files} 个 · 索引 ${report.index_entries} 条`;
+}
+
+function formatSessionOperationReport(report: SessionOperationReport) {
+  const backups = report.backup_manifests?.length ? ` · 备份 ${report.backup_manifests.length} 个` : "";
+  const trash = report.trash_manifest_path ? " · 已移入回收站" : "";
+  return `SQLite ${report.sqlite_rows} 行 · 索引 ${report.index_entries} 条${backups}${trash}`;
 }
 
 function formatRepairApplyReport(report: DatabaseRepairApplyReport) {

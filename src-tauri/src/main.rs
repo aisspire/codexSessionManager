@@ -19,8 +19,10 @@ use codex_session_manager::session_list::{self, SessionListFilter, SessionSummar
 use codex_session_manager::session_ops::{self, SessionApplyOptions, SessionMutationReport};
 use codex_session_manager::settings::{self, AppSettings};
 use serde::Deserialize;
+use tauri::Manager;
 
 const PROJECT_GITHUB_URL: &str = "https://github.com/aisspire/codexSessionManager";
+const APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/128x128.png");
 
 #[derive(Debug, Clone, Deserialize)]
 struct ProfileInput {
@@ -305,6 +307,12 @@ fn default_browser_command(url: &str) -> Command {
 
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_icon(APP_ICON.clone())?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             load_settings,
