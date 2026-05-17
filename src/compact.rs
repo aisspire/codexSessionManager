@@ -418,7 +418,16 @@ fn wait_for_compaction(
         {
             return Ok(());
         }
-        if contains_context_compaction(&value) {
+        if value.get("method").and_then(Value::as_str) == Some("contextCompacted")
+            && value
+                .get("params")
+                .and_then(|params| params.get("threadId"))
+                .and_then(Value::as_str)
+                == Some(thread_id)
+        {
+            return Ok(());
+        }
+        if is_completed_context_compaction(&value, thread_id) {
             return Ok(());
         }
         if value.get("method").and_then(Value::as_str) == Some("error") {
@@ -455,6 +464,95 @@ fn contains_context_compaction(value: &Value) -> bool {
         }
         Value::Array(items) => items.iter().any(contains_context_compaction),
         _ => false,
+    }
+}
+
+fn is_completed_context_compaction(value: &Value, thread_id: &str) -> bool {
+    if value.get("method").and_then(Value::as_str) != Some("item/completed") {
+        return false;
+    }
+    let Some(params) = value.get("params") else {
+        return false;
+    };
+    if params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value != thread_id)
+    {
+        return false;
+    }
+    contains_context_compaction(params)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use super::wait_for_compaction;
+
+    #[test]
+    fn wait_for_compaction_ignores_started_context_compaction_until_completed() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(r#"{"method":"item/started","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"item-1"}}}"#.to_string()))
+            .unwrap();
+        tx.send(Ok(r#"{"method":"item/completed","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"item-1"}}}"#.to_string()))
+            .unwrap();
+        let mut raw_stdout = String::new();
+
+        wait_for_compaction(
+            &rx,
+            &mut raw_stdout,
+            "thread-1",
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert!(raw_stdout.contains("item/started"));
+        assert!(raw_stdout.contains("item/completed"));
+    }
+
+    #[test]
+    fn wait_for_compaction_accepts_thread_compacted_notification() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(
+            r#"{"method":"thread/compacted","params":{"threadId":"thread-1"}}"#.to_string(),
+        ))
+        .unwrap();
+        let mut raw_stdout = String::new();
+
+        wait_for_compaction(
+            &rx,
+            &mut raw_stdout,
+            "thread-1",
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert!(raw_stdout.contains("thread/compacted"));
+    }
+
+    #[test]
+    fn wait_for_compaction_ignores_completed_context_compaction_for_other_thread() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(r#"{"method":"item/completed","params":{"threadId":"thread-2","item":{"type":"contextCompaction","id":"item-1"}}}"#.to_string()))
+            .unwrap();
+        tx.send(Ok(
+            r#"{"method":"thread/compacted","params":{"threadId":"thread-1"}}"#.to_string(),
+        ))
+        .unwrap();
+        let mut raw_stdout = String::new();
+
+        wait_for_compaction(
+            &rx,
+            &mut raw_stdout,
+            "thread-1",
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert!(raw_stdout.contains("thread-2"));
+        assert!(raw_stdout.contains("thread-1"));
     }
 }
 
