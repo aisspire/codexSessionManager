@@ -312,8 +312,14 @@ impl StateDb {
 
         let columns = self.thread_columns()?;
         let mut assignments = Vec::new();
+        if columns.contains(&"created_at".to_string()) {
+            assignments.push("created_at = :updated_at");
+        }
         if columns.contains(&"updated_at".to_string()) {
             assignments.push("updated_at = :updated_at");
+        }
+        if columns.contains(&"created_at_ms".to_string()) {
+            assignments.push("created_at_ms = :updated_at_ms");
         }
         if columns.contains(&"updated_at_ms".to_string()) {
             assignments.push("updated_at_ms = :updated_at_ms");

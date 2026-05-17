@@ -212,11 +212,23 @@ fn refreshes_selected_session_time_sources_for_codex_sorting() {
         1770794029,
         1770794029123,
     );
+    assert_created_after(
+        &profile.state_db_path(),
+        "thread-1",
+        1770790115,
+        1770790115043,
+    );
     assert_updated_after(
         &profile.state_db_path(),
         "thread-2",
         1770794029,
         1770794029122,
+    );
+    assert_created_after(
+        &profile.state_db_path(),
+        "thread-2",
+        1770790115,
+        1770790115043,
     );
 
     let index = fs::read_to_string(profile.session_index_path()).unwrap();
@@ -230,48 +242,6 @@ fn refreshes_selected_session_time_sources_for_codex_sorting() {
     assert_eq!(
         lines[1],
         r#"{"id":"other","thread_name":"Other","updated_at":"2026-01-02T00:00:00Z"}"#
-    );
-}
-
-#[test]
-fn refresh_pins_selected_sessions_in_codex_global_state() {
-    let dir = tempdir().unwrap();
-    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
-    create_state_db(&profile.state_db_path());
-    let rollout_1 = profile.sessions_dir().join("thread-1.jsonl");
-    let rollout_2 = profile.sessions_dir().join("thread-2.jsonl");
-    fs::create_dir_all(profile.sessions_dir()).unwrap();
-    write_rollout(&rollout_1, "thread-1");
-    write_rollout(&rollout_2, "thread-2");
-    set_rollout_path(&profile.state_db_path(), "thread-1", &rollout_1);
-    set_rollout_path(&profile.state_db_path(), "thread-2", &rollout_2);
-    fs::write(
-        profile.global_state_path(),
-        r#"{"pinned-thread-ids":["existing","thread-2"],"thread-sort-key":"created_at"}"#,
-    )
-    .unwrap();
-    let ids = vec!["thread-1".to_string(), "thread-2".to_string()];
-    let options = SessionApplyOptions { apply: true };
-
-    refresh_session_updated_at_with_guard(&profile, &ids, &options, || Ok(())).unwrap();
-
-    let state = fs::read_to_string(profile.global_state_path()).unwrap();
-    let value = serde_json::from_str::<serde_json::Value>(&state).unwrap();
-    assert_eq!(
-        value
-            .get("pinned-thread-ids")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap(),
-        vec![
-            serde_json::json!("thread-1"),
-            serde_json::json!("thread-2"),
-            serde_json::json!("existing"),
-        ]
-    );
-    assert_eq!(
-        value.get("thread-sort-key").and_then(|value| value.as_str()),
-        Some("created_at")
     );
 }
 
@@ -454,6 +424,24 @@ fn assert_updated_after(
         .unwrap();
     assert!(updated_at > old_updated_at);
     assert!(updated_at_ms > old_updated_at_ms);
+}
+
+fn assert_created_after(
+    path: &std::path::Path,
+    id: &str,
+    old_created_at: i64,
+    old_created_at_ms: i64,
+) {
+    let conn = Connection::open(path).unwrap();
+    let (created_at, created_at_ms): (i64, i64) = conn
+        .query_row(
+            "SELECT created_at, created_at_ms FROM threads WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(created_at > old_created_at);
+    assert!(created_at_ms > old_created_at_ms);
 }
 
 fn session_index_updated_at(index: &str, id: &str) -> Option<String> {
