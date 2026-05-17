@@ -1,8 +1,10 @@
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,8 @@ use crate::safety;
 use crate::settings;
 
 const COMPACT_TIMEOUT: Duration = Duration::from_secs(120);
+const COMPACT_EFFECT_TIMEOUT: Duration = Duration::from_secs(5);
+const APP_SERVER_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactOptions {
@@ -60,6 +64,7 @@ pub struct CodexAppServerInvocation {
     pub args: Vec<String>,
     pub thread_id: String,
     pub cwd: Option<String>,
+    pub rollout_path: Option<String>,
     pub timeout: Duration,
 }
 
@@ -103,6 +108,7 @@ where
         args: vec!["app-server".to_string()],
         thread_id: session_id.to_string(),
         cwd: None,
+        rollout_path: None,
         timeout: COMPACT_TIMEOUT,
     };
     let mut report = CompactReport {
@@ -127,13 +133,25 @@ where
         .with_context(|| format!("cannot compact {session_id}: local JSONL file was not found"))?;
     let invocation = CodexAppServerInvocation {
         cwd: compact_current_dir(&local_session_path)?,
+        rollout_path: Some(local_session_path.display().to_string()),
         ..invocation
     };
     let manifest =
         backup_store::create_session_backup(profile, session_id, BackupTrigger::Compact)?;
     report.backup_manifest = backup_manifest_path(&manifest)?;
 
+    let before_compact = session_file_fingerprint(&local_session_path)?;
     let output = runner(&invocation)?;
+    if let Err(error) =
+        wait_for_session_file_change(&local_session_path, &before_compact, COMPACT_EFFECT_TIMEOUT)
+    {
+        bail!(
+            "codex app-server reported success but did not change local session JSONL: {}\nstdout:\n{}\nstderr:\n{}\n{error}",
+            local_session_path.display(),
+            output.stdout,
+            output.stderr
+        );
+    }
     report.stdout = output.stdout;
     report.stderr = output.stderr;
     Ok(report)
@@ -298,32 +316,58 @@ fn run_app_server_protocol(
     wait_for_response(line_rx, raw_stdout, 1, deadline)?;
     send_json(stdin, &json!({"method": "initialized"}))?;
 
-    send_json(
+    let resume_result = wait_for_response_after_send(
         stdin,
+        line_rx,
+        raw_stdout,
+        deadline,
         &json!({
             "id": 2,
             "method": "thread/resume",
             "params": {
                 "threadId": invocation.thread_id,
                 "cwd": invocation.cwd,
+                "path": invocation.rollout_path,
                 "persistExtendedHistory": false
             }
         }),
+        2,
     )?;
-    wait_for_response(line_rx, raw_stdout, 2, deadline)?;
 
-    send_json(
+    let compact_thread_id = resume_result
+        .get("thread")
+        .and_then(|thread| thread.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or(&invocation.thread_id)
+        .to_string();
+
+    wait_for_response_after_send(
         stdin,
+        line_rx,
+        raw_stdout,
+        deadline,
         &json!({
             "id": 3,
             "method": "thread/compact/start",
             "params": {
-                "threadId": invocation.thread_id
+                "threadId": compact_thread_id
             }
         }),
+        3,
     )?;
-    wait_for_response(line_rx, raw_stdout, 3, deadline)?;
-    wait_for_compaction(line_rx, raw_stdout, &invocation.thread_id, deadline)
+    wait_for_compaction(line_rx, raw_stdout, &compact_thread_id, deadline)
+}
+
+fn wait_for_response_after_send(
+    stdin: &mut impl Write,
+    line_rx: &Receiver<std::io::Result<String>>,
+    raw_stdout: &mut String,
+    deadline: Instant,
+    request: &Value,
+    id: i64,
+) -> Result<Value> {
+    send_json(stdin, request)?;
+    wait_for_response(line_rx, raw_stdout, id, deadline)
 }
 
 fn send_json(stdin: &mut impl Write, value: &Value) -> Result<()> {
@@ -414,6 +458,38 @@ fn contains_context_compaction(value: &Value) -> bool {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionFileFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+fn session_file_fingerprint(path: &Path) -> Result<SessionFileFingerprint> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to stat local session JSONL: {}", path.display()))?;
+    Ok(SessionFileFingerprint {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+fn wait_for_session_file_change(
+    path: &Path,
+    before: &SessionFileFingerprint,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if session_file_fingerprint(path)? != *before {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for compact side effect");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn spawn_stdout_reader<R: Read + Send + 'static>(
     reader: R,
 ) -> (
@@ -443,7 +519,16 @@ fn finish_child(
     stdout_handle: thread::JoinHandle<std::io::Result<()>>,
     stderr_handle: thread::JoinHandle<std::io::Result<String>>,
 ) -> Result<String> {
-    let _ = child.kill();
+    let exit_deadline = Instant::now() + APP_SERVER_EXIT_GRACE;
+    while Instant::now() < exit_deadline {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if child.try_wait()?.is_none() {
+        let _ = child.kill();
+    }
     let _ = child.wait();
     let _ = stdout_handle
         .join()

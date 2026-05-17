@@ -31,7 +31,7 @@ const message = codexExitConfirmationMessage({
   action: "压缩上下文",
   count: 1,
   backup: true,
-  extra: "可能需要等待 Codex CLI 完成 /compact。",
+  extra: "可能需要等待 Codex app-server 完成 thread/compact/start。",
 });
 
 if (!message.includes("请先退出正在使用同一份数据的 Codex")) {
@@ -40,6 +40,6 @@ if (!message.includes("请先退出正在使用同一份数据的 Codex")) {
 if (!message.includes("执行前会自动创建备份")) {
   throw new Error("confirmation should mention backup");
 }
-if (!message.includes("可能需要等待 Codex CLI 完成 /compact。")) {
+if (!message.includes("可能需要等待 Codex app-server 完成 thread/compact/start。")) {
   throw new Error("confirmation should include extra context");
 }

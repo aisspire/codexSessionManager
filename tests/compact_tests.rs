@@ -32,6 +32,25 @@ fn compact_creates_backup_and_invokes_codex_app_server_compact() {
             assert_eq!(invocation.args, vec!["app-server"]);
             assert_eq!(invocation.thread_id, "thread-1");
             assert_eq!(invocation.cwd.as_deref(), Some(project.to_str().unwrap()));
+            assert_eq!(
+                invocation.rollout_path.as_deref(),
+                Some(
+                    profile
+                        .sessions_dir()
+                        .join("thread-1.jsonl")
+                        .to_str()
+                        .unwrap()
+                )
+            );
+            fs::write(
+                invocation.rollout_path.as_ref().unwrap(),
+                format!(
+                    "{}\n{}",
+                    fs::read_to_string(invocation.rollout_path.as_ref().unwrap()).unwrap(),
+                    serde_json::json!({"type": "contextCompaction"})
+                ),
+            )
+            .unwrap();
             Ok(CodexAppServerOutput {
                 stdout: "thread compacted".to_string(),
                 stderr: String::new(),
@@ -62,6 +81,15 @@ fn compact_uses_configured_codex_command_path() {
         || Ok(()),
         |invocation| {
             assert_eq!(invocation.program, r"C:\Tools\codex.cmd");
+            fs::write(
+                invocation.rollout_path.as_ref().unwrap(),
+                format!(
+                    "{}\n{}",
+                    fs::read_to_string(invocation.rollout_path.as_ref().unwrap()).unwrap(),
+                    serde_json::json!({"type": "contextCompaction"})
+                ),
+            )
+            .unwrap();
             Ok(CodexAppServerOutput {
                 stdout: String::new(),
                 stderr: String::new(),
@@ -131,6 +159,31 @@ fn compact_app_server_failure_reports_captured_output() {
     let message = format!("{error:?}");
     assert!(message.contains("app-server compact failed"));
     assert!(message.contains("login required"));
+}
+
+#[test]
+fn compact_reports_failure_when_app_server_has_no_local_effect() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    write_rollout(&profile.sessions_dir().join("thread-1.jsonl"), "thread-1");
+
+    let error = compact_session_with_guard_and_runner(
+        &profile,
+        "thread-1",
+        &CompactOptions { apply: true },
+        || Ok(()),
+        |_invocation| {
+            Ok(CodexAppServerOutput {
+                stdout: "thread compacted".to_string(),
+                stderr: String::new(),
+            })
+        },
+    )
+    .unwrap_err();
+
+    let message = format!("{error:?}");
+    assert!(message.contains("reported success but did not change"));
+    assert!(message.contains("thread compacted"));
 }
 
 #[test]
