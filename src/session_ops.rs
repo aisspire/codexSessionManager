@@ -112,18 +112,6 @@ pub fn refresh_session_updated_at(
     ids: &[String],
     options: &SessionApplyOptions,
 ) -> Result<SessionMutationReport> {
-    refresh_session_updated_at_with_guard(profile, ids, options, safety::ensure_codex_not_running)
-}
-
-pub fn refresh_session_updated_at_with_guard<F>(
-    profile: &CodexProfile,
-    ids: &[String],
-    options: &SessionApplyOptions,
-    guard: F,
-) -> Result<SessionMutationReport>
-where
-    F: FnOnce() -> Result<()>,
-{
     let selected_ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
     let threads = read_threads_if_present(profile)?;
     let selected_threads = threads
@@ -148,8 +136,6 @@ where
     if !options.apply {
         return Ok(report);
     }
-
-    guard()?;
 
     let timestamp = current_session_timestamp()?;
     touch_rollout_files_at(&rollout_paths, timestamp.system_time)?;

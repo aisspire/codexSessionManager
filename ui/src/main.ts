@@ -1714,8 +1714,7 @@ function commandRequiresCodexExit(command: SessionCommand) {
   return (
     command === "archive_sessions" ||
     command === "active_sessions" ||
-    command === "delete_sessions" ||
-    command === "refresh_session_updated_at"
+    command === "delete_sessions"
   );
 }
 
