@@ -1,6 +1,6 @@
 [package]
 name = "codex-session-manager"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Safe scanner and migrator for OpenAI Codex session metadata."
 license = "MIT"
