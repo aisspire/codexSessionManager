@@ -1269,7 +1269,9 @@ async function compactIds(ids: string[]) {
     });
     state.busy = idleBusyState();
     state.status = formatCompactReport(report);
+    render({ preserveTableScroll: true });
     await loadSessions();
+    render({ preserveTableScroll: true });
   } catch (error) {
     state.busy = idleBusyState();
     state.dialog = {
@@ -1319,7 +1321,14 @@ async function retryLocalCompact() {
     });
     state.dialog = null;
     state.status = formatCompactReport(report);
-    await loadSessions();
+    render({ preserveTableScroll: true });
+    try {
+      await loadSessions();
+      render({ preserveTableScroll: true });
+    } catch (error) {
+      state.status = `本地压缩已完成，但刷新会话列表失败：${String(error)}`;
+      render({ preserveTableScroll: true });
+    }
   } catch (error) {
     const message = String(error);
     if (message.includes("已经是本地压缩，停止操作")) {
