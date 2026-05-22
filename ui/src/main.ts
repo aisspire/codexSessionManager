@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { compactFailureDialogMarkup, type CompactFailureDialogState } from "./compactFailureDialog";
 import { singleSelectionForCodexAction } from "./codexExitConfirm";
 import { loadInputCache, saveInputCache } from "./inputCache";
 import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectExpansionCache";
@@ -212,12 +213,14 @@ interface BusyState {
   error?: string;
 }
 
-interface AppDialog {
-  kind: "codex-running";
-  title: string;
-  message: string;
-  primaryLabel: string;
-}
+type AppDialog =
+  | {
+      kind: "codex-running";
+      title: string;
+      message: string;
+      primaryLabel: string;
+    }
+  | ({ kind: "compact-failure" } & CompactFailureDialogState);
 
 const pageLabels: Record<AppPage, string> = {
   "batch-edit": "批量编辑",
@@ -346,6 +349,10 @@ function taskProgressDialog() {
 }
 
 function appDialog(dialog: AppDialog) {
+  if (dialog.kind === "compact-failure") {
+    return compactFailureDialogMarkup(dialog);
+  }
+
   return `
     <div class="dialog-backdrop" data-close-dialog></div>
     <section class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title">
@@ -879,6 +886,9 @@ function bindDialogEvents() {
       render({ preserveTableScroll: true });
     });
   });
+  document.querySelector<HTMLElement>("[data-copy-compact-error]")?.addEventListener("click", copyCompactError);
+  document.querySelector<HTMLElement>("[data-stop-compact-failure]")?.addEventListener("click", stopCompactFailure);
+  document.querySelector<HTMLElement>("[data-retry-local-compact]")?.addEventListener("click", retryLocalCompact);
 }
 
 function bindTaskDialogEvents() {
@@ -1241,15 +1251,91 @@ async function compactIds(ids: string[]) {
     return;
   }
 
-  await runWithProgress("正在压缩上下文", async () => {
+  try {
+    state.busy = {
+      active: true,
+      label: "正在压缩上下文",
+      completed: 0,
+      total: 1,
+      items: [{ id: selection.id, label: selection.id, status: "running", detail: "等待 Codex app-server 压缩" }],
+    };
+    state.status = "正在压缩上下文";
+    render({ preserveTableScroll: true });
+    await nextFrame();
     const report = await invoke<CompactReport>("compact_session", {
       profile: state.profile,
       id: selection.id,
       apply: true,
     });
+    state.busy = idleBusyState();
     state.status = formatCompactReport(report);
     await loadSessions();
-  });
+  } catch (error) {
+    state.busy = idleBusyState();
+    state.dialog = {
+      kind: "compact-failure",
+      sessionId: selection.id,
+      error: String(error),
+      copied: false,
+      retryingLocal: false,
+    };
+    state.status = "压缩上下文失败";
+    render({ preserveTableScroll: true });
+  }
+}
+
+async function copyCompactError() {
+  const dialog = state.dialog?.kind === "compact-failure" ? state.dialog : null;
+  if (!dialog) return;
+  try {
+    await navigator.clipboard.writeText(dialog.error);
+    state.dialog = { ...dialog, copied: true };
+    state.status = "报错信息已复制";
+  } catch (error) {
+    state.status = `复制报错信息失败：${String(error)}`;
+  }
+  render({ preserveTableScroll: true });
+}
+
+function stopCompactFailure() {
+  const dialog = state.dialog?.kind === "compact-failure" ? state.dialog : null;
+  state.dialog = null;
+  state.status = dialog ? `压缩上下文失败：${dialog.sessionId}` : "压缩上下文失败";
+  render({ preserveTableScroll: true });
+}
+
+async function retryLocalCompact() {
+  const dialog = state.dialog?.kind === "compact-failure" ? state.dialog : null;
+  if (!dialog || dialog.retryingLocal) return;
+  state.dialog = { ...dialog, retryingLocal: true };
+  state.status = "正在尝试本地压缩";
+  render({ preserveTableScroll: true });
+
+  try {
+    const report = await invoke<CompactReport>("compact_session_with_local_provider_fallback", {
+      profile: state.profile,
+      id: dialog.sessionId,
+      apply: true,
+    });
+    state.dialog = null;
+    state.status = formatCompactReport(report);
+    await loadSessions();
+  } catch (error) {
+    const message = String(error);
+    if (message.includes("已经是本地压缩，停止操作")) {
+      state.dialog = null;
+      state.status = "已经是本地压缩，停止操作";
+    } else {
+      state.dialog = {
+        ...dialog,
+        error: message,
+        copied: false,
+        retryingLocal: false,
+      };
+      state.status = "本地压缩失败";
+    }
+    render({ preserveTableScroll: true });
+  }
 }
 
 async function editSelected(apply: boolean) {

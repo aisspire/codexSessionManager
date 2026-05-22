@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use toml_edit::{value, DocumentMut};
 
 use crate::backup_store::{self, BackupTrigger};
 use crate::path_map::path_buf_for_current_os;
@@ -88,6 +89,49 @@ pub fn compact_session(
     )
 }
 
+pub fn compact_session_with_local_provider_fallback(
+    profile: &CodexProfile,
+    session_id: &str,
+    options: &CompactOptions,
+) -> Result<CompactReport> {
+    compact_session_with_local_provider_fallback_with_guard_and_runner(
+        profile,
+        session_id,
+        options,
+        safety::ensure_codex_not_running,
+        run_codex_app_server_compact,
+    )
+}
+
+pub fn compact_session_with_local_provider_fallback_with_guard_and_runner<G, R>(
+    profile: &CodexProfile,
+    session_id: &str,
+    options: &CompactOptions,
+    guard: G,
+    runner: R,
+) -> Result<CompactReport>
+where
+    G: FnOnce() -> Result<()>,
+    R: FnOnce(&CodexAppServerInvocation) -> Result<CodexAppServerOutput>,
+{
+    if options.apply {
+        guard()?;
+    }
+    let restore = if options.apply {
+        Some(switch_openai_provider_name_to_local(profile)?)
+    } else {
+        None
+    };
+    let result =
+        compact_session_with_guard_and_runner(profile, session_id, options, || Ok(()), runner);
+    if let Some(restore) = restore {
+        restore
+            .restore()
+            .context("failed to restore provider name after local compact attempt")?;
+    }
+    result
+}
+
 pub fn compact_session_with_guard_and_runner<G, R>(
     profile: &CodexProfile,
     session_id: &str,
@@ -155,6 +199,83 @@ where
     report.stdout = output.stdout;
     report.stderr = output.stderr;
     Ok(report)
+}
+
+struct ProviderNameRestore {
+    config_path: std::path::PathBuf,
+    provider: String,
+    original_name: String,
+}
+
+impl ProviderNameRestore {
+    fn restore(self) -> Result<()> {
+        write_provider_name(&self.config_path, &self.provider, &self.original_name)
+    }
+}
+
+fn switch_openai_provider_name_to_local(profile: &CodexProfile) -> Result<ProviderNameRestore> {
+    let config_path = profile.config_path();
+    let text = fs::read_to_string(&config_path).with_context(|| {
+        format!(
+            "failed to read Codex config.toml: {}",
+            config_path.display()
+        )
+    })?;
+    let mut doc = text.parse::<DocumentMut>().with_context(|| {
+        format!(
+            "failed to parse Codex config.toml: {}",
+            config_path.display()
+        )
+    })?;
+    let provider = doc["model_provider"]
+        .as_str()
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .context("config.toml is missing model_provider")?
+        .to_string();
+    let provider_name = doc["model_providers"][&provider]["name"]
+        .as_str()
+        .map(str::trim)
+        .context("config.toml is missing model_providers.<model_provider>.name")?;
+    if !provider_name.eq_ignore_ascii_case("OpenAI") {
+        bail!("已经是本地压缩，停止操作");
+    }
+    let original_name = provider_name.to_string();
+
+    doc["model_providers"][&provider]["name"] = value("CSM");
+    fs::write(&config_path, doc.to_string()).with_context(|| {
+        format!(
+            "failed to write Codex config.toml: {}",
+            config_path.display()
+        )
+    })?;
+    Ok(ProviderNameRestore {
+        config_path,
+        provider,
+        original_name,
+    })
+}
+
+fn write_provider_name(config_path: &Path, provider: &str, name: &str) -> Result<()> {
+    let text = fs::read_to_string(config_path).with_context(|| {
+        format!(
+            "failed to read Codex config.toml: {}",
+            config_path.display()
+        )
+    })?;
+    let mut doc = text.parse::<DocumentMut>().with_context(|| {
+        format!(
+            "failed to parse Codex config.toml: {}",
+            config_path.display()
+        )
+    })?;
+    doc["model_providers"][provider]["name"] = value(name);
+    fs::write(config_path, doc.to_string()).with_context(|| {
+        format!(
+            "failed to write Codex config.toml: {}",
+            config_path.display()
+        )
+    })
 }
 
 fn compact_current_dir(local_session_path: &std::path::Path) -> Result<Option<String>> {

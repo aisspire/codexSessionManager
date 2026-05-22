@@ -943,6 +943,31 @@ select {
   justify-content: end;
 }
 
+.compact-failure-dialog {
+  width: min(620px, calc(100vw - 36px));
+}
+
+.compact-error-text {
+  max-height: min(260px, 34vh);
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #d7dde3;
+  border-radius: 6px;
+  color: #18212f;
+  background: #f8fafc;
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.compact-failure-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .task-backdrop {
   position: fixed;
   inset: 0;

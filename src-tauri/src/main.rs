@@ -174,6 +174,17 @@ fn compact_session(
 }
 
 #[tauri::command]
+fn compact_session_with_local_provider_fallback(
+    profile: ProfileInput,
+    id: String,
+    apply: bool,
+) -> Result<CompactReport, String> {
+    let profile = build_profile(profile)?;
+    compact::compact_session_with_local_provider_fallback(&profile, &id, &CompactOptions { apply })
+        .map_err(format_error)
+}
+
+#[tauri::command]
 fn edit_selected_sessions(
     profile: ProfileInput,
     ids: Vec<String>,
@@ -329,6 +340,7 @@ fn main() {
             delete_sessions,
             refresh_session_updated_at,
             compact_session,
+            compact_session_with_local_provider_fallback,
             edit_selected_sessions,
             preview_database_repairs,
             apply_database_repairs,
