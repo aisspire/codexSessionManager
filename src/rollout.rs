@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -116,11 +116,18 @@ pub fn discover_rollout_files(sessions_dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 pub fn read_rollout_meta(path: &Path) -> Result<Option<RolloutMeta>> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("failed to read rollout file {}", path.display()))?;
-    let Some(first_line) = text.lines().next() else {
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open rollout file {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut first_line = String::new();
+    if reader
+        .read_line(&mut first_line)
+        .with_context(|| format!("failed to read first line in {}", path.display()))?
+        == 0
+    {
         return Ok(None);
-    };
+    }
+    let first_line = first_line.trim_end_matches(['\r', '\n']);
 
     let line: SessionMetaLine = serde_json::from_str(first_line)
         .with_context(|| format!("failed to parse first JSONL line in {}", path.display()))?;

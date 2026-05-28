@@ -198,8 +198,7 @@ fn refreshes_selected_session_time_sources_for_codex_sorting() {
     let ids = vec!["thread-1".to_string(), "thread-2".to_string()];
     let options = SessionApplyOptions { apply: true };
 
-    let report =
-        refresh_session_updated_at(&profile, &ids, &options).unwrap();
+    let report = refresh_session_updated_at(&profile, &ids, &options).unwrap();
 
     assert!(report.applied);
     assert_eq!(report.sqlite_rows, 2);
@@ -254,13 +253,17 @@ fn refreshes_session_time_sources_without_requiring_codex_to_stop() {
         .unwrap();
     let options = SessionApplyOptions { apply: true };
 
-    let report =
-        refresh_session_updated_at(&profile, &["thread-1".to_string()], &options).unwrap();
+    let report = refresh_session_updated_at(&profile, &["thread-1".to_string()], &options).unwrap();
 
     assert!(report.applied);
     assert_eq!(report.sqlite_rows, 1);
     assert!(rollout_path.metadata().unwrap().modified().unwrap() > old_time);
-    assert_updated_after(&profile.state_db_path(), "thread-1", 1770794029, 1770794029123);
+    assert_updated_after(
+        &profile.state_db_path(),
+        "thread-1",
+        1770794029,
+        1770794029123,
+    );
 }
 
 fn create_state_db(path: &std::path::Path) {

@@ -197,10 +197,11 @@ where
                 target_path.display()
             );
         }
-        let preflight = backup_store::create_session_backup(
+        let preflight = backup_store::create_session_backup_from_local_path(
             profile,
             &manifest.session_id,
             BackupTrigger::RestorePreflight,
+            Some(&target_path),
         )?;
         report.preflight_backup_manifest = Some(manifest_path_from_backup(&preflight)?);
     }

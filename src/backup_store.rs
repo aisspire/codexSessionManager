@@ -107,15 +107,20 @@ pub fn create_session_backup(
     trigger: BackupTrigger,
 ) -> Result<SessionBackupManifest> {
     let local_path = locate_unique_local_session(profile, session_id)?;
+    create_session_backup_from_local_path(profile, session_id, trigger, local_path.as_deref())
+}
+
+pub fn create_session_backup_from_local_path(
+    profile: &CodexProfile,
+    session_id: &str,
+    trigger: BackupTrigger,
+    local_path: Option<&Path>,
+) -> Result<SessionBackupManifest> {
     if local_path.is_none() && matches!(trigger, BackupTrigger::Delete | BackupTrigger::Edit) {
         bail!("cannot create {trigger:?} backup for {session_id}: local JSONL file was not found");
     }
 
-    let source_size = local_path
-        .as_deref()
-        .map(file_size)
-        .transpose()?
-        .unwrap_or(0);
+    let source_size = local_path.map(file_size).transpose()?.unwrap_or(0);
     guard_backup_size(profile, source_size)?;
 
     let created_at_unix = OffsetDateTime::now_utc().unix_timestamp();
@@ -126,7 +131,7 @@ pub fn create_session_backup(
     fs::create_dir_all(&snapshot_dir)
         .with_context(|| format!("failed to create backup dir {}", snapshot_dir.display()))?;
 
-    let backup_session_path = if let Some(local_path) = local_path.as_deref() {
+    let backup_session_path = if let Some(local_path) = local_path {
         let file_name = local_path
             .file_name()
             .context("session backup source has no file name")?;
@@ -163,7 +168,7 @@ pub fn create_session_backup(
     let project = sqlite_thread
         .as_ref()
         .and_then(|thread| thread.cwd.clone())
-        .or_else(|| rollout_project(local_path.as_deref()));
+        .or_else(|| rollout_project(local_path));
     let favorite = favorites::favorite_ids(profile)
         .map(|ids| ids.contains(session_id))
         .unwrap_or(false);
@@ -178,7 +183,7 @@ pub fn create_session_backup(
         trigger,
         title,
         project,
-        original_session_path: local_path.as_ref().map(|path| path.display().to_string()),
+        original_session_path: local_path.map(|path| path.display().to_string()),
         backup_session_path,
         index_entries,
         sqlite_thread,
@@ -229,10 +234,12 @@ pub fn list_session_backups(profile: &CodexProfile) -> Result<Vec<SessionBackupS
             .push((backup_id, manifest, path.to_path_buf()));
     }
 
+    let session_ids = grouped.keys().cloned().collect::<Vec<_>>();
+    let local_sessions = locate_local_sessions(profile, &session_ids)?;
     let mut summaries = Vec::new();
     for (session_id, mut manifests) in grouped {
         manifests.sort_by(|left, right| right.1.created_at_unix.cmp(&left.1.created_at_unix));
-        let local_exists = local_session_exists(profile, &session_id)?;
+        let local_exists = local_sessions.contains_key(&session_id);
         let title = manifests
             .first()
             .and_then(|(_, manifest, _)| manifest.title.clone());
@@ -381,38 +388,90 @@ pub fn locate_unique_local_session(
     profile: &CodexProfile,
     session_id: &str,
 ) -> Result<Option<PathBuf>> {
-    let mut matches = Vec::new();
+    let mut sessions = locate_local_sessions(profile, &[session_id.to_string()])?;
+    Ok(sessions.remove(session_id))
+}
+
+pub fn locate_local_sessions(
+    profile: &CodexProfile,
+    session_ids: &[String],
+) -> Result<HashMap<String, PathBuf>> {
+    if session_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let selected_ids = session_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut matches = HashMap::<String, Vec<PathBuf>>::new();
     for meta in read_all_rollout_meta(&profile.sessions_dir())?
         .into_iter()
         .chain(read_all_rollout_meta(&profile.archived_sessions_dir())?)
     {
-        if meta.id.as_deref() == Some(session_id) && meta.path.exists() {
-            matches.push(meta.path);
+        let Some(id) = meta.id else {
+            continue;
+        };
+        if selected_ids.contains(id.as_str()) && meta.path.exists() {
+            matches.entry(id).or_default().push(meta.path);
         }
     }
 
-    if matches.is_empty() {
-        if let Some(path) = sqlite_thread(profile, session_id)?
-            .and_then(|thread| thread.rollout_path)
-            .map(|path| path_buf_for_current_os(&path))
-            .filter(|path| path.exists())
-        {
-            matches.push(path);
+    if profile.state_db_path().exists() {
+        if let Ok(db) = StateDb::open(&profile.state_db_path()) {
+            if let Ok(threads) = db.read_threads() {
+                for thread in threads {
+                    if !selected_ids.contains(thread.id.as_str())
+                        || matches.contains_key(&thread.id)
+                    {
+                        continue;
+                    }
+                    let Some(path) = thread
+                        .rollout_path
+                        .as_deref()
+                        .map(path_buf_for_current_os)
+                        .filter(|path| path.exists())
+                    else {
+                        continue;
+                    };
+                    matches.entry(thread.id).or_default().push(path);
+                }
+            }
         }
     }
 
-    matches.sort();
-    matches.dedup();
-    if matches.len() > 1 {
-        bail!("multiple local JSONL files found for session {session_id}");
+    let mut resolved = HashMap::new();
+    for id in session_ids {
+        let Some(paths) = matches.get_mut(id) else {
+            continue;
+        };
+        paths.sort();
+        paths.dedup();
+        if paths.len() > 1 {
+            bail!("multiple local JSONL files found for session {id}");
+        }
+        if let Some(path) = paths.pop() {
+            resolved.insert(id.clone(), path);
+        }
     }
-    Ok(matches.pop())
+    Ok(resolved)
 }
 
 pub fn enforce_backup_retention(profile: &CodexProfile) -> Result<RetentionReport> {
     let settings = load_settings(profile)?.backup;
+    if settings.max_age_days.is_none()
+        && settings.max_count.is_none()
+        && settings.max_bytes.is_none()
+    {
+        return Ok(RetentionReport::default());
+    }
+
     let mut report = RetentionReport {
-        total_bytes_before: dir_size(&backup_root(profile)).unwrap_or(0),
+        total_bytes_before: if settings.max_bytes.is_some() {
+            dir_size(&backup_root(profile)).unwrap_or(0)
+        } else {
+            0
+        },
         total_bytes_after: 0,
         ..RetentionReport::default()
     };
@@ -497,7 +556,11 @@ pub fn enforce_backup_retention(profile: &CodexProfile) -> Result<RetentionRepor
     }
     report.skipped_unique_archives.sort();
     report.skipped_unique_archives.dedup();
-    report.total_bytes_after = dir_size(&backup_root(profile)).unwrap_or(0);
+    report.total_bytes_after = if settings.max_bytes.is_some() {
+        dir_size(&backup_root(profile)).unwrap_or(0)
+    } else {
+        0
+    };
     Ok(report)
 }
 
@@ -549,9 +612,15 @@ fn protected_unique_archives(
         *counts.entry(manifest.session_id.clone()).or_default() += 1;
     }
 
+    let unique_session_ids = counts
+        .iter()
+        .filter(|(_, count)| **count == 1)
+        .map(|(session_id, _)| session_id.clone())
+        .collect::<Vec<_>>();
+    let local_sessions = locate_local_sessions(profile, &unique_session_ids)?;
     let mut protected = HashSet::new();
-    for (session_id, count) in counts {
-        if count == 1 && !local_session_exists(profile, &session_id)? {
+    for session_id in unique_session_ids {
+        if !local_sessions.contains_key(&session_id) {
             protected.insert(session_id);
         }
     }

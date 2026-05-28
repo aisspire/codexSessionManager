@@ -1220,17 +1220,11 @@ async function mutateIds(command: SessionCommand, ids: string[]) {
     render({ preserveTableScroll: true });
     return;
   }
-  if (commandRequiresCodexExit(command)) {
-    const ready = await ensureCodexStoppedBefore(commandLabel(command));
-    if (!ready) return;
-  }
   const label = `正在${commandLabel(command)}会话`;
   await runTaskList(label, taskItemsForSessionIds(ids), async (tasks) => {
-    for (const [index, id] of ids.entries()) {
-      tasks.start(index, "已提交给 Rust 处理");
-      const report = await invoke<SessionOperationReport>(command, { profile: state.profile, ids: [id], apply: true });
-      tasks.finish(index, formatSessionOperationReport(report));
-    }
+    ids.forEach((_, index) => tasks.start(index, "已提交给 Rust 批量处理"));
+    const report = await invoke<SessionOperationReport>(command, { profile: state.profile, ids, apply: true });
+    ids.forEach((_, index) => tasks.finish(index, formatSessionOperationReport(report)));
     await loadSessions();
     state.status = `已${commandLabel(command)} ${ids.length} 个会话`;
   });
@@ -1594,8 +1588,6 @@ async function applySelectedRepairs() {
     render({ preserveTableScroll: true });
     return;
   }
-  const ready = await ensureCodexStoppedBefore("应用数据库修复");
-  if (!ready) return;
 
   await runTaskList("正在应用数据库修复", taskItemsForRepairIds(selected), async (tasks) => {
     selected.forEach((_, index) => tasks.start(index, "等待修复结果"));
@@ -1629,8 +1621,6 @@ async function refreshBackups() {
 async function restoreSelectedBackup(sessionId: string) {
   const snapshot = selectedSnapshot(sessionId);
   if (!snapshot) return;
-  const ready = await ensureCodexStoppedBefore("恢复备份");
-  if (!ready) return;
   await runWithProgress("正在恢复备份", async () => {
     const preview = await invoke<RestorePreview>("preview_restore_session_backup", {
       profile: state.profile,
@@ -1714,8 +1704,6 @@ async function deleteSelectedBackupGroups() {
 }
 
 async function applyDatabaseSyncFromLocal() {
-  const ready = await ensureCodexStoppedBefore("按本地文件同步数据库");
-  if (!ready) return;
   await runWithProgress("正在同步数据库", async () => {
     const report = await invoke<DatabaseRepairApplyReport>("apply_database_sync_from_local", {
       profile: state.profile,

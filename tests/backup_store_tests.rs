@@ -2,8 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use codex_session_manager::backup_store::{
-    create_session_backup, delete_backup_groups, delete_backup_snapshot_with_confirmation,
-    enforce_backup_retention, list_session_backups, BackupTrigger,
+    create_session_backup, create_session_backup_from_local_path, delete_backup_groups,
+    delete_backup_snapshot_with_confirmation, enforce_backup_retention, list_session_backups,
+    BackupTrigger,
 };
 use codex_session_manager::favorites::set_favorite;
 use codex_session_manager::profile::CodexProfile;
@@ -56,6 +57,30 @@ fn creating_backup_for_jsonl_only_session_works() {
 }
 
 #[test]
+fn creating_backup_from_known_local_path_does_not_rescan_rollout_dirs() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    let rollout = profile.sessions_dir().join("thread-1.jsonl");
+    write_rollout(&rollout, "thread-1", "/tmp/project", "cm");
+    let unrelated = profile.sessions_dir().join("broken.jsonl");
+    fs::write(&unrelated, "{not json").unwrap();
+
+    let manifest = create_session_backup_from_local_path(
+        &profile,
+        "thread-1",
+        BackupTrigger::Delete,
+        Some(&rollout),
+    )
+    .unwrap();
+
+    assert_eq!(manifest.session_id, "thread-1");
+    assert_eq!(
+        manifest.original_session_path.as_deref(),
+        Some(rollout.to_str().unwrap())
+    );
+}
+
+#[test]
 fn delete_or_edit_backup_without_local_jsonl_returns_clear_error() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
@@ -63,6 +88,28 @@ fn delete_or_edit_backup_without_local_jsonl_returns_clear_error() {
     let error = create_session_backup(&profile, "missing", BackupTrigger::Delete).unwrap_err();
 
     assert!(error.to_string().contains("local JSONL"));
+}
+
+#[test]
+fn retention_without_limits_does_not_scan_existing_backup_manifests() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    let bad_manifest = profile
+        .codex_home
+        .join("backups")
+        .join("codex-session-manager")
+        .join("sessions")
+        .join("thread-1")
+        .join("bad-snapshot")
+        .join("manifest.json");
+    fs::create_dir_all(bad_manifest.parent().unwrap()).unwrap();
+    fs::write(&bad_manifest, "{not json").unwrap();
+
+    let report = enforce_backup_retention(&profile).unwrap();
+
+    assert!(report.deleted_backup_dirs.is_empty());
+    assert!(report.skipped_unique_archives.is_empty());
+    assert!(report.warnings.is_empty());
 }
 
 #[test]

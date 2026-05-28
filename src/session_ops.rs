@@ -189,7 +189,13 @@ where
     guard()?;
 
     for id in ids {
-        let manifest = backup_store::create_session_backup(profile, id, BackupTrigger::Delete)?;
+        let local_path = selected_local_path(&selected, id);
+        let manifest = backup_store::create_session_backup_from_local_path(
+            profile,
+            id,
+            BackupTrigger::Delete,
+            local_path.as_deref(),
+        )?;
         report
             .backup_manifests
             .push(manifest_path_from_backup(&manifest)?);
@@ -272,13 +278,14 @@ fn selected_threads_for_delete(
         .filter(|thread| selected_ids.contains(thread.id.as_str()))
         .map(|thread| (thread.id.clone(), thread.clone()))
         .collect::<HashMap<_, _>>();
+    let local_sessions = backup_store::locate_local_sessions(profile, ids)?;
 
     for id in ids {
-        if let Some(path) = backup_store::locate_unique_local_session(profile, id)? {
+        if let Some(path) = local_sessions.get(id) {
             by_id
                 .entry(id.clone())
                 .and_modify(|thread| thread.rollout_path = Some(path.display().to_string()))
-                .or_insert_with(|| synthetic_thread_for_local_jsonl(id, path));
+                .or_insert_with(|| synthetic_thread_for_local_jsonl(id, path.clone()));
         }
     }
 
@@ -286,6 +293,15 @@ fn selected_threads_for_delete(
         .iter()
         .filter_map(|id| by_id.get(id).cloned())
         .collect::<Vec<_>>())
+}
+
+fn selected_local_path(threads: &[crate::state_db::ThreadRecord], id: &str) -> Option<PathBuf> {
+    threads
+        .iter()
+        .find(|thread| thread.id == id)
+        .and_then(|thread| thread.rollout_path.as_deref())
+        .map(path_buf_for_current_os)
+        .filter(|path| path.exists())
 }
 
 fn synthetic_thread_for_local_jsonl(id: &str, path: PathBuf) -> crate::state_db::ThreadRecord {

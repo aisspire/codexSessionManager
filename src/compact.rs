@@ -180,8 +180,12 @@ where
         rollout_path: Some(local_session_path.display().to_string()),
         ..invocation
     };
-    let manifest =
-        backup_store::create_session_backup(profile, session_id, BackupTrigger::Compact)?;
+    let manifest = backup_store::create_session_backup_from_local_path(
+        profile,
+        session_id,
+        BackupTrigger::Compact,
+        Some(&local_session_path),
+    )?;
     report.backup_manifest = backup_manifest_path(&manifest)?;
 
     let before_compact = session_file_fingerprint(&local_session_path)?;

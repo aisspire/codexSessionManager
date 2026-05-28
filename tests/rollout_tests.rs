@@ -59,6 +59,24 @@ fn reads_object_source_session_meta() {
 }
 
 #[test]
+fn reads_session_meta_without_loading_later_jsonl_bytes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("large-thread.jsonl");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(
+        br#"{"type":"session_meta","payload":{"id":"large-1","cwd":"/mnt/e/code/demo","source":"cli","model_provider":"cm"}}"#,
+    );
+    bytes.push(b'\n');
+    bytes.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+    fs::write(&path, bytes).unwrap();
+
+    let meta = read_rollout_meta(&path).unwrap().unwrap();
+
+    assert_eq!(meta.id.as_deref(), Some("large-1"));
+    assert_eq!(meta.cwd.as_deref(), Some("/mnt/e/code/demo"));
+}
+
+#[test]
 fn preserves_object_source_when_rewriting_session_meta() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("guardian.jsonl");

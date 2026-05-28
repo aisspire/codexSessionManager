@@ -266,12 +266,7 @@ fn sorts_sessions_by_rollout_file_modified_time_before_sqlite_updated_at() {
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
     create_state_db(&profile.state_db_path());
     let older_rollout = profile.sessions_dir().join("active-1.jsonl");
-    create_rollout(
-        &older_rollout,
-        "active-1",
-        "/mnt/e/code/project-a",
-        "cm",
-    );
+    create_rollout(&older_rollout, "active-1", "/mnt/e/code/project-a", "cm");
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let newer_rollout = profile.sessions_dir().join("archived-1.jsonl");
     create_rollout(

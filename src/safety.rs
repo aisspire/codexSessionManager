@@ -100,6 +100,7 @@ fn process_list_command() -> Command {
         "-Command",
         "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }",
     ]);
+    hide_child_console(&mut command);
     command
 }
 
@@ -108,6 +109,14 @@ fn process_list_command() -> Command {
     let mut command = Command::new("ps");
     command.args(["-eo", "args="]);
     command
+}
+
+#[cfg(target_os = "windows")]
+fn hide_child_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    command.creation_flags(CREATE_NO_WINDOW);
 }
 
 pub fn detect_codex_processes_from_lines(lines: &[String]) -> Vec<CodexProcess> {

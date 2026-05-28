@@ -151,8 +151,14 @@ where
     }
 
     guard()?;
+    let backup_paths = backup_store::locate_local_sessions(profile, ids)?;
     for id in ids {
-        let manifest = backup_store::create_session_backup(profile, id, BackupTrigger::Edit)?;
+        let manifest = backup_store::create_session_backup_from_local_path(
+            profile,
+            id,
+            BackupTrigger::Edit,
+            backup_paths.get(id).map(|path| path.as_path()),
+        )?;
         report
             .backup_manifests
             .push(manifest_path_from_backup(&manifest)?);

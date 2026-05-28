@@ -298,6 +298,7 @@ fn default_browser_command(url: &str) -> Command {
     {
         let mut command = Command::new("cmd");
         command.args(["/C", "start", "", url]);
+        hide_child_console(&mut command);
         command
     }
 
@@ -314,6 +315,14 @@ fn default_browser_command(url: &str) -> Command {
         command.arg(url);
         command
     }
+}
+
+#[cfg(target_os = "windows")]
+fn hide_child_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    command.creation_flags(CREATE_NO_WINDOW);
 }
 
 fn main() {
