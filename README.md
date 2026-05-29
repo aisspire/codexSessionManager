@@ -251,10 +251,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\set-version.ps1 0.2.0
 
 脚本会同步更新 `Cargo.toml`、`Cargo.lock`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`ui/package.json` 和 `ui/package-lock.json`。
 
+应用内更新使用 Tauri updater 和 GitHub Releases 的 `latest.json`。发布前需要手动完成签名配置：
+
+- 将 `src-tauri/tauri.conf.json` 中的 `__TAURI_UPDATER_PUBLIC_KEY__` 替换为 Tauri updater 公钥内容。
+- 在 GitHub 仓库 Secrets 中添加 `TAURI_SIGNING_PRIVATE_KEY`，值为 updater 私钥内容或私钥文件路径。
+- 如果私钥设置了密码，再添加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
+
+不要把 updater 私钥提交到仓库。占位公钥未替换前，发布构建或应用内更新检查可能无法正常完成。
+
 建议发布前至少执行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\set-version.tests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\tauri-config.tests.ps1
 npm --prefix ui run build
 ```
 

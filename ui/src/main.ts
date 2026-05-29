@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { compactFailureDialogMarkup, type CompactFailureDialogState } from "./compactFailureDialog";
 import { singleSelectionForCodexAction } from "./codexExitConfirm";
 import { loadInputCache, saveInputCache } from "./inputCache";
@@ -10,6 +12,11 @@ import {
 } from "./sessionDisplay";
 import { buildProjectGroups, type ProjectGroup } from "./sessionGroups";
 import { taskProgressDialogMarkup } from "./taskProgressView";
+import {
+  updateCheckButtonMarkup,
+  updatePromptMarkup,
+  type UpdatePromptState,
+} from "./updatePrompt";
 import "./styles.css";
 
 type AppPage = "batch-edit" | "session-management" | "restore-backups" | "database-repair";
@@ -220,7 +227,17 @@ type AppDialog =
       message: string;
       primaryLabel: string;
     }
-  | ({ kind: "compact-failure" } & CompactFailureDialogState);
+  | ({ kind: "compact-failure" } & CompactFailureDialogState)
+  | {
+      kind: "app-update";
+      update: UpdatePromptState;
+    };
+
+interface UpdateState {
+  checking: boolean;
+  installing: boolean;
+  pendingUpdate: Update | null;
+}
 
 const pageLabels: Record<AppPage, string> = {
   "batch-edit": "批量编辑",
@@ -292,6 +309,11 @@ const state = {
   detailOpen: false,
   status: "就绪",
   dialog: null as AppDialog | null,
+  update: {
+    checking: false,
+    installing: false,
+    pendingUpdate: null,
+  } as UpdateState,
   busy: {
     active: false,
     label: "",
@@ -352,6 +374,9 @@ function appDialog(dialog: AppDialog) {
   if (dialog.kind === "compact-failure") {
     return compactFailureDialogMarkup(dialog);
   }
+  if (dialog.kind === "app-update") {
+    return updatePromptMarkup(dialog.update);
+  }
 
   return `
     <div class="dialog-backdrop" data-close-dialog></div>
@@ -400,6 +425,7 @@ function settingsPanel() {
     <section class="settings-panel" aria-label="设置">
       <span class="settings-title">设置</span>
       <button class="settings-open-button" data-open-settings>备份与同步</button>
+      ${updateCheckButtonMarkup({ checking: state.update.checking })}
       <a class="github-link" data-open-github href="${GITHUB_REPOSITORY_URL}" title="打开 GitHub 仓库">
         <svg class="github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
           <path d="M8 0.2C3.7 0.2 0.2 3.7 0.2 8c0 3.4 2.2 6.3 5.3 7.4 0.4 0.1 0.5-0.2 0.5-0.4v-1.4c-2.2 0.5-2.6-0.9-2.6-0.9-0.4-0.9-0.9-1.1-0.9-1.1-0.7-0.5 0.1-0.5 0.1-0.5 0.8 0.1 1.2 0.8 1.2 0.8 0.7 1.2 1.9 0.9 2.3 0.7 0.1-0.5 0.3-0.9 0.5-1.1-1.7-0.2-3.5-0.9-3.5-3.9 0-0.9 0.3-1.6 0.8-2.1-0.1-0.2-0.4-1 0.1-2.1 0 0 0.7-0.2 2.2 0.8 0.6-0.2 1.3-0.3 2-0.3s1.4 0.1 2 0.3c1.5-1 2.2-0.8 2.2-0.8 0.4 1.1 0.2 1.9 0.1 2.1 0.5 0.6 0.8 1.3 0.8 2.1 0 3-1.8 3.6-3.5 3.8 0.3 0.2 0.5 0.7 0.5 1.5V15c0 0.2 0.1 0.5 0.5 0.4 3.1-1 5.3-3.9 5.3-7.4C15.8 3.7 12.3 0.2 8 0.2z" />
@@ -889,6 +915,11 @@ function bindDialogEvents() {
   document.querySelector<HTMLElement>("[data-copy-compact-error]")?.addEventListener("click", copyCompactError);
   document.querySelector<HTMLElement>("[data-stop-compact-failure]")?.addEventListener("click", stopCompactFailure);
   document.querySelector<HTMLElement>("[data-retry-local-compact]")?.addEventListener("click", retryLocalCompact);
+  document.querySelectorAll<HTMLElement>("[data-dismiss-update]").forEach((target) => {
+    target.addEventListener("click", dismissUpdatePrompt);
+  });
+  document.querySelector<HTMLElement>("[data-install-update]")?.addEventListener("click", installAvailableUpdate);
+  document.querySelector<HTMLElement>("[data-retry-update-check]")?.addEventListener("click", () => checkForUpdates(true));
 }
 
 function bindTaskDialogEvents() {
@@ -909,6 +940,7 @@ function bindSettingsEvents() {
   bindSettingsInputs();
   document.querySelector("#reload-settings")?.addEventListener("click", () => loadAppSettings(true));
   document.querySelector("#save-settings")?.addEventListener("click", saveAppSettings);
+  document.querySelector<HTMLElement>("[data-check-updates]")?.addEventListener("click", () => checkForUpdates(true));
   document.querySelector<HTMLElement>("[data-open-github]")?.addEventListener("click", (event) => {
     event.preventDefault();
     openGithubRepository();
@@ -1535,6 +1567,136 @@ async function openGithubRepository() {
   });
 }
 
+async function checkForUpdates(manual: boolean) {
+  if (state.update.checking || state.update.installing) return;
+
+  state.update.checking = true;
+  if (manual) {
+    state.dialog = null;
+    state.status = "正在检查更新...";
+  }
+  render({ preserveTableScroll: true });
+
+  try {
+    const update = await check();
+    state.update.pendingUpdate = update;
+
+    if (update) {
+      state.dialog = {
+        kind: "app-update",
+        update: {
+          kind: "available",
+          version: update.version,
+          date: update.date,
+          body: update.body,
+        },
+      };
+      state.status = `发现新版本 ${update.version}`;
+    } else if (manual) {
+      state.status = "当前已是最新版本";
+    }
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    state.update.pendingUpdate = null;
+    if (manual) {
+      state.dialog = {
+        kind: "app-update",
+        update: {
+          kind: "error",
+          title: "检查更新失败",
+          message,
+          retryable: true,
+        },
+      };
+    } else {
+      state.status = `自动检查更新失败：${message}`;
+    }
+  } finally {
+    state.update.checking = false;
+    render({ preserveTableScroll: true });
+  }
+}
+
+function dismissUpdatePrompt() {
+  if (state.dialog?.kind === "app-update" && state.dialog.update.kind === "installing") {
+    return;
+  }
+  state.dialog = null;
+  render({ preserveTableScroll: true });
+}
+
+async function installAvailableUpdate() {
+  if (state.update.installing) return;
+
+  const update = state.update.pendingUpdate;
+  if (!update) {
+    await checkForUpdates(true);
+    return;
+  }
+
+  state.update.installing = true;
+  let downloaded = 0;
+  let total = 0;
+  setInstallingUpdatePrompt(update, "准备下载更新", downloaded, total);
+
+  try {
+    await update.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        downloaded = 0;
+        total = event.data.contentLength ?? 0;
+        setInstallingUpdatePrompt(update, "正在下载更新", downloaded, total);
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        setInstallingUpdatePrompt(update, "正在下载更新", downloaded, total);
+      } else if (event.event === "Finished") {
+        const completed = total || downloaded || 1;
+        setInstallingUpdatePrompt(update, "正在安装更新", completed, completed);
+      }
+    });
+
+    const completed = total || downloaded || 1;
+    setInstallingUpdatePrompt(update, "安装完成，正在重启", completed, completed);
+    await relaunch();
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    state.update.installing = false;
+    state.dialog = {
+      kind: "app-update",
+      update: {
+        kind: "error",
+        title: "更新失败",
+        message,
+        retryable: true,
+      },
+    };
+    state.status = `更新失败：${message}`;
+    render({ preserveTableScroll: true });
+  }
+}
+
+function setInstallingUpdatePrompt(update: Update, stage: string, downloaded: number, total: number) {
+  state.dialog = {
+    kind: "app-update",
+    update: {
+      kind: "installing",
+      version: update.version,
+      stage,
+      downloaded,
+      total,
+    },
+  };
+  state.status = stage;
+  render({ preserveTableScroll: true });
+}
+
+function dialogBlocksDismiss(dialog: AppDialog) {
+  return dialog.kind === "app-update" && dialog.update.kind === "installing";
+}
+
+function formatErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function openSettings() {
   state.settingsOpen = true;
   render({ preserveTableScroll: true });
@@ -2085,8 +2247,9 @@ function escapeHtml(value: string) {
 
 render();
 void loadAppSettings(false);
+void checkForUpdates(false);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.dialog) {
+  if (event.key === "Escape" && state.dialog && !dialogBlocksDismiss(state.dialog)) {
     state.dialog = null;
     render({ preserveTableScroll: true });
   }

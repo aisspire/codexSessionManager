@@ -327,6 +327,8 @@ fn hide_child_console(command: &mut Command) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_icon(APP_ICON.clone())?;

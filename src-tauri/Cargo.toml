@@ -10,5 +10,7 @@ tauri-build = { version = "2", features = [] }
 anyhow = "1"
 codex-session-manager = { path = ".." }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri = { version = "2", features = [] }
-
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
