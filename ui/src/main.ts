@@ -2,7 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { compactFailureDialogMarkup, type CompactFailureDialogState } from "./compactFailureDialog";
-import { singleSelectionForCodexAction } from "./codexExitConfirm";
+import {
+  codexRunningDialogMarkup,
+  codexRunningDialogState,
+  commandRequiresCodexExit,
+  singleSelectionForCodexAction,
+  type CodexRunningDialogState,
+} from "./codexExitConfirm";
 import { loadInputCache, saveInputCache } from "./inputCache";
 import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectExpansionCache";
 import {
@@ -221,12 +227,7 @@ interface BusyState {
 }
 
 type AppDialog =
-  | {
-      kind: "codex-running";
-      title: string;
-      message: string;
-      primaryLabel: string;
-    }
+  | CodexRunningDialogState
   | ({ kind: "compact-failure" } & CompactFailureDialogState)
   | {
       kind: "app-update";
@@ -371,23 +372,15 @@ function taskProgressDialog() {
 }
 
 function appDialog(dialog: AppDialog) {
+  if (dialog.kind === "codex-running") {
+    return codexRunningDialogMarkup(dialog);
+  }
   if (dialog.kind === "compact-failure") {
     return compactFailureDialogMarkup(dialog);
   }
   if (dialog.kind === "app-update") {
     return updatePromptMarkup(dialog.update);
   }
-
-  return `
-    <div class="dialog-backdrop" data-close-dialog></div>
-    <section class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title">
-      <h2 id="app-dialog-title">${escapeHtml(dialog.title)}</h2>
-      <p>${escapeHtml(dialog.message)}</p>
-      <div class="dialog-actions">
-        <button class="primary" data-close-dialog>${escapeHtml(dialog.primaryLabel)}</button>
-      </div>
-    </section>
-  `;
 }
 
 function disabledWhenBusy(disabled = false) {
@@ -1252,6 +1245,9 @@ async function mutateIds(command: SessionCommand, ids: string[]) {
     render({ preserveTableScroll: true });
     return;
   }
+  if (commandRequiresCodexExit(command) && !(await ensureCodexStoppedBefore(`${commandLabel(command)}会话`))) {
+    return;
+  }
   const label = `正在${commandLabel(command)}会话`;
   await runTaskList(label, taskItemsForSessionIds(ids), async (tasks) => {
     ids.forEach((_, index) => tasks.start(index, "已提交给 Rust 批量处理"));
@@ -1335,6 +1331,9 @@ function stopCompactFailure() {
 async function retryLocalCompact() {
   const dialog = state.dialog?.kind === "compact-failure" ? state.dialog : null;
   if (!dialog || dialog.retryingLocal) return;
+  if (!(await ensureCodexStoppedBefore("尝试本地压缩"))) {
+    return;
+  }
   state.dialog = { ...dialog, retryingLocal: true };
   state.status = "正在尝试本地压缩";
   render({ preserveTableScroll: true });
@@ -1750,6 +1749,9 @@ async function applySelectedRepairs() {
     render({ preserveTableScroll: true });
     return;
   }
+  if (!(await ensureCodexStoppedBefore("应用数据库修复"))) {
+    return;
+  }
 
   await runTaskList("正在应用数据库修复", taskItemsForRepairIds(selected), async (tasks) => {
     selected.forEach((_, index) => tasks.start(index, "等待修复结果"));
@@ -1783,6 +1785,9 @@ async function refreshBackups() {
 async function restoreSelectedBackup(sessionId: string) {
   const snapshot = selectedSnapshot(sessionId);
   if (!snapshot) return;
+  if (!(await ensureCodexStoppedBefore("恢复备份"))) {
+    return;
+  }
   await runWithProgress("正在恢复备份", async () => {
     const preview = await invoke<RestorePreview>("preview_restore_session_backup", {
       profile: state.profile,
@@ -1866,6 +1871,9 @@ async function deleteSelectedBackupGroups() {
 }
 
 async function applyDatabaseSyncFromLocal() {
+  if (!(await ensureCodexStoppedBefore("同步数据库"))) {
+    return;
+  }
   await runWithProgress("正在同步数据库", async () => {
     const report = await invoke<DatabaseRepairApplyReport>("apply_database_sync_from_local", {
       profile: state.profile,
@@ -2090,14 +2098,6 @@ function formatCompactReport(report: CompactReport) {
   return `已压缩上下文 ${report.session_id}${backup}${outputNote}`;
 }
 
-function commandRequiresCodexExit(command: SessionCommand) {
-  return (
-    command === "archive_sessions" ||
-    command === "active_sessions" ||
-    command === "delete_sessions"
-  );
-}
-
 function commandLabel(command: SessionCommand) {
   const labels: Record<SessionCommand, string> = {
     archive_sessions: "归档",
@@ -2112,12 +2112,7 @@ async function ensureCodexStoppedBefore(action: string) {
   try {
     const running = await invoke<boolean>("detect_codex_running");
     if (!running) return true;
-    state.dialog = {
-      kind: "codex-running",
-      title: "Codex 正在运行",
-      message: `为避免数据被同时写入，请先关闭正在使用同一份数据的 Codex 后再${action}。`,
-      primaryLabel: "知道了",
-    };
+    state.dialog = codexRunningDialogState(action);
     render({ preserveTableScroll: true });
     return false;
   } catch (error) {

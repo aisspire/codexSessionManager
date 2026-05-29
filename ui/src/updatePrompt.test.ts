@@ -18,6 +18,8 @@ const available: UpdatePromptState = {
 };
 
 const availableMarkup = updatePromptMarkup(available);
+expectIncludes(availableMarkup, "dialog-backdrop", "available prompt should use the styled dialog backdrop");
+expectIncludes(availableMarkup, "app-dialog update-dialog", "available prompt should use the styled update dialog");
 expectIncludes(availableMarkup, "0.4.0", "available prompt should show the update version");
 expectIncludes(availableMarkup, "Fix &lt;tag&gt; &amp; improve updater", "available prompt should escape release notes");
 expectIncludes(availableMarkup, "data-install-update", "available prompt should expose an install action");
@@ -30,6 +32,7 @@ const installingMarkup = updatePromptMarkup({
   downloaded: 42,
   total: 100,
 });
+expectIncludes(installingMarkup, "app-dialog update-dialog", "installing prompt should use the styled update dialog");
 expectIncludes(installingMarkup, "role=\"progressbar\"", "installing prompt should expose progress semantics");
 expectIncludes(installingMarkup, "aria-valuenow=\"42\"", "installing prompt should report downloaded progress");
 expectIncludes(installingMarkup, "disabled", "installing prompt should disable dialog actions");
@@ -40,6 +43,7 @@ const errorMarkup = updatePromptMarkup({
   message: "network <offline>",
   retryable: true,
 });
+expectIncludes(errorMarkup, "app-dialog update-dialog", "update errors should use the styled update dialog");
 expectIncludes(errorMarkup, "network &lt;offline&gt;", "error prompt should escape failure details");
 expectIncludes(errorMarkup, "data-retry-update-check", "retryable error prompt should expose a retry action");
 

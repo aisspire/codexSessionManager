@@ -1,5 +1,8 @@
 import {
   codexExitConfirmationMessage,
+  codexRunningDialogMarkup,
+  codexRunningDialogState,
+  commandRequiresCodexExit,
   singleSelectionForCodexAction,
 } from "./codexExitConfirm.js";
 
@@ -43,3 +46,27 @@ if (!message.includes("执行前会自动创建备份")) {
 if (!message.includes("可能需要等待 Codex app-server 完成 thread/compact/start。")) {
   throw new Error("confirmation should include extra context");
 }
+
+const runningDialog = codexRunningDialogState("删除会话");
+if (runningDialog.kind !== "codex-running") {
+  throw new Error("running dialog should be identified as the codex running blocker");
+}
+if (!runningDialog.message.includes("请先关闭正在使用同一份数据的 Codex 后再删除会话")) {
+  throw new Error("running dialog should describe the blocked action");
+}
+
+const runningMarkup = codexRunningDialogMarkup(runningDialog);
+if (!runningMarkup.includes("app-dialog codex-running-dialog")) {
+  throw new Error("running blocker should render as a styled app dialog");
+}
+if (!runningMarkup.includes("role=\"dialog\"")) {
+  throw new Error("running blocker should expose dialog semantics");
+}
+if (!runningMarkup.includes("data-close-dialog")) {
+  throw new Error("running blocker should provide a close action");
+}
+
+expectEqual(commandRequiresCodexExit("archive_sessions"), true, "archive should be preflighted");
+expectEqual(commandRequiresCodexExit("active_sessions"), true, "unarchive should be preflighted");
+expectEqual(commandRequiresCodexExit("delete_sessions"), true, "delete should be preflighted");
+expectEqual(commandRequiresCodexExit("refresh_session_updated_at"), false, "refresh timestamp should not be preflighted");
