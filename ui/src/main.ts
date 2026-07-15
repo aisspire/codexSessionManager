@@ -26,6 +26,16 @@ import {
   type ManagedInstance,
   type InstanceSyncPlan,
 } from "./instanceManagement";
+import {
+  DelayedInstanceSyncPreview,
+  ExpiringInstanceSyncPreviewCache,
+  InstanceSyncPreviewInputMode,
+  configDiffTargetDisplay,
+  instanceSyncConfigDiffCacheKey,
+  restoreInstanceSyncScroll,
+  snapshotInstanceSyncScroll,
+  type InstanceSyncConfigDiffStatus,
+} from "./instanceSyncPreview";
 import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectExpansionCache";
 import {
   buildSessionMetaItems,
@@ -230,6 +240,9 @@ interface InstanceSyncSourceSession {
   title?: string;
   project?: string;
   archived: boolean;
+  source?: string;
+  model_provider?: string;
+  model?: string;
   source_path: string;
   updated_at?: string;
 }
@@ -238,6 +251,21 @@ interface InstanceSyncSourceData {
   source_instance_id: number;
   sessions: InstanceSyncSourceSession[];
   config_paths: ConfigPathNode[];
+}
+
+interface InstanceSyncConfigDiffTarget {
+  target_instance_id: number;
+  target_path: string;
+  status: InstanceSyncConfigDiffStatus;
+  original_value?: string | null;
+  error?: string | null;
+}
+
+interface InstanceSyncConfigDiff {
+  source_instance_id: number;
+  config_path: string[];
+  source_value: string;
+  targets: InstanceSyncConfigDiffTarget[];
 }
 
 interface InstanceSyncConflict {
@@ -433,6 +461,17 @@ const state = {
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("missing app root");
 const appRoot = app;
+const instanceSyncPreviewController = new DelayedInstanceSyncPreview();
+const instanceSyncPreviewInputMode = new InstanceSyncPreviewInputMode();
+const instanceSyncConfigDiffCache = new ExpiringInstanceSyncPreviewCache<InstanceSyncConfigDiff>();
+let instanceSyncPreviewDescriptionTarget: HTMLElement | null = null;
+let lastRenderedPage: AppPage | null = null;
+
+document.addEventListener("keydown", (event) => {
+  instanceSyncPreviewInputMode.recordKeyboardInput();
+  if (event.key === "Escape") dismissInstanceSyncPreview();
+});
+document.addEventListener("pointerdown", () => instanceSyncPreviewInputMode.recordPointerInput(), true);
 
 interface RenderOptions {
   preserveTableScroll?: boolean;
@@ -440,6 +479,16 @@ interface RenderOptions {
 
 function render(options: RenderOptions = {}) {
   const tableScroll = options.preserveTableScroll ? readTableScroll() : undefined;
+  if (lastRenderedPage === "instance-management" && state.activePage !== "instance-management") {
+    clearInstanceSyncConfigDiffCache();
+  }
+  const instanceSyncScroll =
+    state.activePage === "instance-management"
+      ? snapshotInstanceSyncScroll(
+          document.querySelectorAll<HTMLElement>("[data-instance-sync-scroll]"),
+        )
+      : undefined;
+  dismissInstanceSyncPreview();
   const groups = buildProjectGroups(state.sessions);
   const active = state.sessions.find((session) => session.id === state.activeId);
   const mainContent =
@@ -471,6 +520,13 @@ function render(options: RenderOptions = {}) {
   if (tableScroll) {
     restoreTableScroll(tableScroll);
   }
+  if (instanceSyncScroll) {
+    restoreInstanceSyncScroll(
+      document.querySelectorAll<HTMLElement>("[data-instance-sync-scroll]"),
+      instanceSyncScroll,
+    );
+  }
+  lastRenderedPage = state.activePage;
 }
 
 function taskProgressDialog() {
@@ -934,7 +990,7 @@ function instanceSyncWorkspace() {
                 .join("")}
             </select>
           </label>
-          <div class="instance-sync-targets" role="group" aria-label="目标实例（可多选）">
+          <div class="instance-sync-targets" data-instance-sync-scroll="targets" role="group" aria-label="目标实例（可多选）">
             <span>目标实例（可多选）</span>
             ${
               targetInstances.length
@@ -960,7 +1016,7 @@ function instanceSyncWorkspace() {
           <label>筛选会话
             <input id="instance-sync-session-search" value="${escapeHtml(state.instanceSyncSessionSearch)}" placeholder="按标题、ID 或项目筛选" ${disabledWhenBusy()} />
           </label>
-          <div class="instance-sync-list" role="group" aria-label="源会话">
+          <div class="instance-sync-list" data-instance-sync-scroll="sessions" role="group" aria-label="源会话">
             ${
               state.instanceSyncSourceId == null
                 ? `<span class="instance-sync-muted">请选择源实例以加载会话。</span>`
@@ -974,7 +1030,7 @@ function instanceSyncWorkspace() {
         <section class="instance-sync-panel" aria-label="配置选择">
           <h3>3. 选择 config.toml 路径</h3>
           <p class="instance-sync-risk">已选配置项会以源值覆盖目标值；配置可能含密钥，方案不会保存其值。</p>
-          <div class="instance-sync-config-tree" role="group" aria-label="可同步配置路径">
+          <div class="instance-sync-config-tree" data-instance-sync-scroll="config" role="group" aria-label="可同步配置路径">
             ${
               state.instanceSyncSourceId == null
                 ? `<span class="instance-sync-muted">请选择源实例以读取配置路径。</span>`
@@ -1001,7 +1057,7 @@ function instanceSyncWorkspace() {
 function instanceSyncSessionRow(session: InstanceSyncSourceSession) {
   const title = session.title || session.id;
   return `
-    <label class="instance-sync-session-row">
+    <label class="instance-sync-session-row" data-instance-sync-session-preview="${escapeHtml(session.id)}">
       <input type="checkbox" data-instance-sync-session="${escapeHtml(session.id)}" ${state.instanceSyncSessionIds.has(session.id) ? "checked" : ""} ${disabledWhenBusy()} />
       <span>
         <strong>${escapeHtml(title)}</strong>
@@ -1016,7 +1072,7 @@ function instanceSyncConfigTree(nodes: ConfigPathNode[], depth = 0): string {
     .map((node) => {
       const key = configPathKey(node.path);
       const control = node.selectable
-        ? `<label class="instance-sync-config-leaf">
+        ? `<label class="instance-sync-config-leaf" data-instance-sync-config-preview="${escapeHtml(key)}">
              <input type="checkbox" data-instance-sync-config="${escapeHtml(key)}" ${state.instanceSyncConfigPathKeys.has(key) ? "checked" : ""} ${disabledWhenBusy()} />
              <span>${escapeHtml(node.label)}</span>
            </label>`
@@ -1029,6 +1085,287 @@ function instanceSyncConfigTree(nodes: ConfigPathNode[], depth = 0): string {
       `;
     })
     .join("");
+}
+
+function bindInstanceSyncPreviewEvents() {
+  document
+    .querySelectorAll<HTMLElement>("[data-instance-sync-session-preview]")
+    .forEach((row) => {
+      bindInstanceSyncPreviewTrigger(row, (requestId) => {
+        const sessionId = row.dataset.instanceSyncSessionPreview || "";
+        const session = state.instanceSyncSessions.find((candidate) => candidate.id === sessionId);
+        if (!session || !instanceSyncPreviewController.isCurrent(requestId)) return;
+        showInstanceSyncPreviewPopover(row, instanceSyncSessionPreviewMarkup(session));
+      });
+    });
+  document
+    .querySelectorAll<HTMLElement>("[data-instance-sync-config-preview]")
+    .forEach((row) => {
+      bindInstanceSyncPreviewTrigger(row, (requestId) => {
+        const key = row.dataset.instanceSyncConfigPreview || "";
+        void openInstanceSyncConfigPreview(row, key, requestId);
+      });
+    });
+}
+
+function bindInstanceSyncPreviewTrigger(
+  element: HTMLElement,
+  open: (requestId: number) => void,
+) {
+  element.addEventListener("mouseenter", () => {
+    instanceSyncPreviewController.schedule(open);
+  });
+  element.addEventListener("mouseleave", dismissInstanceSyncPreview);
+  element.addEventListener("focusin", () => {
+    if (!instanceSyncPreviewInputMode.allowsImmediateFocusPreview()) return;
+    instanceSyncPreviewController.openImmediately(open);
+  });
+  element.addEventListener("focusout", (event) => {
+    const nextFocus = event.relatedTarget;
+    if (nextFocus instanceof Node && element.contains(nextFocus)) return;
+    dismissInstanceSyncPreview();
+  });
+}
+
+function instanceSyncSessionPreviewMarkup(session: InstanceSyncSourceSession) {
+  const items: Array<[string, string | undefined]> = [
+    ["标题", session.title || session.id],
+    ["会话 ID", session.id],
+    ["项目路径", session.project],
+    ["状态", session.archived ? "已归档" : "活动"],
+    ["来源", session.source],
+    ["模型提供方", session.model_provider],
+    ["模型", session.model],
+    ["更新时间", session.updated_at],
+    ["JSONL 路径", session.source_path],
+  ];
+  return `
+    <div class="instance-sync-preview-heading">
+      <strong>会话元数据</strong>
+      <span>${escapeHtml(session.archived ? "已归档" : "活动")}</span>
+    </div>
+    <dl class="instance-sync-preview-metadata">
+      ${items
+        .map(
+          ([label, value]) =>
+            `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value?.trim() || "未提供")}</dd>`,
+        )
+        .join("")}
+    </dl>
+  `;
+}
+
+async function openInstanceSyncConfigPreview(
+  anchor: HTMLElement,
+  key: string,
+  requestId: number,
+) {
+  const configPath = configPathFromKey(key);
+  const sourceInstanceId = state.instanceSyncSourceId;
+  const targetInstanceIds = [...state.instanceSyncTargetIds];
+  if (!instanceSyncPreviewController.isCurrent(requestId)) return;
+  if (sourceInstanceId == null || configPath.length === 0) {
+    showInstanceSyncPreviewPopover(anchor, instanceSyncPreviewMessageMarkup("配置差异", "配置路径不可用。"));
+    return;
+  }
+  if (targetInstanceIds.length === 0) {
+    showInstanceSyncPreviewPopover(
+      anchor,
+      instanceSyncPreviewMessageMarkup("配置差异", "请先选择至少一个目标实例。"),
+    );
+    return;
+  }
+
+  const cacheKey = instanceSyncConfigDiffCacheKey(
+    sourceInstanceId,
+    targetInstanceIds,
+    configPath,
+  );
+  const cached = instanceSyncConfigDiffCache.get(cacheKey);
+  if (cached) {
+    showInstanceSyncPreviewPopover(anchor, instanceSyncConfigDiffPreviewMarkup(cached));
+    return;
+  }
+
+  showInstanceSyncPreviewPopover(anchor, instanceSyncPreviewMessageMarkup("配置差异", "正在读取目标配置…"));
+  try {
+    const diff = await invoke<InstanceSyncConfigDiff>("preview_instance_sync_config_diff", {
+      request: {
+        source_instance_id: sourceInstanceId,
+        target_instance_ids: targetInstanceIds,
+        config_path: configPath,
+      },
+    });
+    if (
+      !instanceSyncPreviewController.isCurrent(requestId) ||
+      !instanceSyncConfigDiffContextIsCurrent(cacheKey, sourceInstanceId, configPath)
+    ) {
+      return;
+    }
+    instanceSyncConfigDiffCache.set(cacheKey, diff);
+    showInstanceSyncPreviewPopover(anchor, instanceSyncConfigDiffPreviewMarkup(diff));
+  } catch (error) {
+    if (
+      !instanceSyncPreviewController.isCurrent(requestId) ||
+      !instanceSyncConfigDiffContextIsCurrent(cacheKey, sourceInstanceId, configPath)
+    ) {
+      return;
+    }
+    showInstanceSyncPreviewPopover(
+      anchor,
+      instanceSyncPreviewMessageMarkup("配置差异", `读取失败：${String(error)}`),
+    );
+  }
+}
+
+function instanceSyncConfigDiffContextIsCurrent(
+  cacheKey: string,
+  sourceInstanceId: number,
+  configPath: string[],
+) {
+  return (
+    state.instanceSyncSourceId === sourceInstanceId &&
+    cacheKey ===
+      instanceSyncConfigDiffCacheKey(
+        sourceInstanceId,
+        [...state.instanceSyncTargetIds],
+        configPath,
+      )
+  );
+}
+
+function instanceSyncConfigDiffPreviewMarkup(diff: InstanceSyncConfigDiff) {
+  return `
+    <div class="instance-sync-preview-heading">
+      <strong>配置差异 · ${escapeHtml(diff.config_path.join("."))}</strong>
+      <span>${diff.targets.length} 个目标</span>
+    </div>
+    <div class="instance-sync-preview-source-value">
+      <span>源端替换值</span>
+      <code>${escapeHtml(diff.source_value)}</code>
+    </div>
+    <div class="instance-sync-diff-targets">
+      ${diff.targets.map((target) => instanceSyncConfigDiffTargetMarkup(target, diff.source_value)).join("")}
+    </div>
+  `;
+}
+
+function instanceSyncConfigDiffTargetMarkup(
+  target: InstanceSyncConfigDiffTarget,
+  sourceValue: string,
+) {
+  const instance = state.managedInstances.find((candidate) => candidate.id === target.target_instance_id);
+  const display = configDiffTargetDisplay(target, sourceValue);
+  return `
+    <article class="instance-sync-diff-target ${target.status === "read_error" ? "failed" : ""}">
+      <div class="instance-sync-diff-target-heading">
+        <strong>${escapeHtml(instance ? instanceDisplayName(instance) : target.target_path)}</strong>
+        <span>${escapeHtml(display.statusLabel)}</span>
+      </div>
+      ${display.before ? instanceSyncDiffValueMarkup(display.before) : ""}
+      ${display.after ? instanceSyncDiffValueMarkup(display.after) : ""}
+      ${display.detail ? `<small>${escapeHtml(display.detail)}</small>` : ""}
+    </article>
+  `;
+}
+
+function instanceSyncDiffValueMarkup(value: {
+  label: "原值" | "替换值";
+  value: string;
+  tone: "removed" | "added";
+}) {
+  return `
+    <div class="instance-sync-diff-value ${value.tone}">
+      <span>${escapeHtml(value.label)}</span>
+      <code>${escapeHtml(value.value)}</code>
+    </div>
+  `;
+}
+
+function instanceSyncPreviewMessageMarkup(title: string, message: string) {
+  return `
+    <div class="instance-sync-preview-heading"><strong>${escapeHtml(title)}</strong></div>
+    <p class="instance-sync-preview-message">${escapeHtml(message)}</p>
+  `;
+}
+
+function showInstanceSyncPreviewPopover(anchor: HTMLElement, markup: string) {
+  const popover = instanceSyncPreviewPopover();
+  setInstanceSyncPreviewDescription(anchor, popover.id);
+  popover.innerHTML = markup;
+  popover.hidden = false;
+  const anchorRect = anchor.getBoundingClientRect();
+  const popoverRect = popover.getBoundingClientRect();
+  const left = Math.max(8, Math.min(anchorRect.left, window.innerWidth - popoverRect.width - 8));
+  const below = anchorRect.bottom + 8;
+  const top =
+    below + popoverRect.height <= window.innerHeight - 8
+      ? below
+      : Math.max(8, anchorRect.top - popoverRect.height - 8);
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+}
+
+function instanceSyncPreviewPopover() {
+  let popover = document.querySelector<HTMLElement>("#instance-sync-preview-popover");
+  if (popover) return popover;
+  popover = document.createElement("aside");
+  popover.id = "instance-sync-preview-popover";
+  popover.className = "instance-sync-preview-popover";
+  popover.setAttribute("role", "tooltip");
+  popover.setAttribute("aria-live", "polite");
+  popover.hidden = true;
+  document.body.append(popover);
+  return popover;
+}
+
+function dismissInstanceSyncPreview() {
+  instanceSyncPreviewController.cancel();
+  clearInstanceSyncPreviewDescription();
+  scheduleInstanceSyncConfigDiffCacheClear();
+  const popover = document.querySelector<HTMLElement>("#instance-sync-preview-popover");
+  if (!popover) return;
+  popover.hidden = true;
+  popover.innerHTML = "";
+}
+
+function setInstanceSyncPreviewDescription(anchor: HTMLElement, popoverId: string) {
+  const focused = document.activeElement;
+  const target =
+    focused instanceof HTMLElement && anchor.contains(focused) ? focused : anchor;
+  if (instanceSyncPreviewDescriptionTarget !== target) {
+    clearInstanceSyncPreviewDescription();
+    instanceSyncPreviewDescriptionTarget = target;
+  }
+  const ids = (target.getAttribute("aria-describedby") || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((id) => id !== popoverId);
+  ids.push(popoverId);
+  target.setAttribute("aria-describedby", ids.join(" "));
+}
+
+function clearInstanceSyncPreviewDescription() {
+  const target = instanceSyncPreviewDescriptionTarget;
+  if (!target) return;
+  const ids = (target.getAttribute("aria-describedby") || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((id) => id !== "instance-sync-preview-popover");
+  if (ids.length) {
+    target.setAttribute("aria-describedby", ids.join(" "));
+  } else {
+    target.removeAttribute("aria-describedby");
+  }
+  instanceSyncPreviewDescriptionTarget = null;
+}
+
+function scheduleInstanceSyncConfigDiffCacheClear() {
+  instanceSyncConfigDiffCache.scheduleClear();
+}
+
+function clearInstanceSyncConfigDiffCache() {
+  instanceSyncConfigDiffCache.clear();
 }
 
 function instanceSyncOutcomeMarkup() {
@@ -1383,6 +1720,8 @@ function bindInstanceEvents() {
     checkbox.addEventListener("change", () => {
       const instanceId = Number(checkbox.dataset.instanceSyncTarget);
       if (!Number.isSafeInteger(instanceId)) return;
+      dismissInstanceSyncPreview();
+      clearInstanceSyncConfigDiffCache();
       checkbox.checked
         ? state.instanceSyncTargetIds.add(instanceId)
         : state.instanceSyncTargetIds.delete(instanceId);
@@ -1471,6 +1810,8 @@ function bindInstanceEvents() {
       }
     });
   });
+
+  bindInstanceSyncPreviewEvents();
 
   const renameInput = document.querySelector<HTMLInputElement>("#instance-rename-input");
   if (!renameInput) return;
@@ -1830,6 +2171,7 @@ async function scanManagedInstances() {
 }
 
 function reconcileInstanceSyncInstances() {
+  clearInstanceSyncConfigDiffCache();
   const availableIds = new Set(
     state.managedInstances.filter((instance) => instance.available).map((instance) => instance.id),
   );
@@ -1972,6 +2314,8 @@ function currentInstanceSyncRequest() {
 }
 
 async function selectInstanceSyncPlan(planId: number | null) {
+  dismissInstanceSyncPreview();
+  clearInstanceSyncConfigDiffCache();
   state.instanceSyncPlanId = planId;
   const plan = state.instanceSyncPlans.find((candidate) => candidate.id === planId);
   if (!plan) {
@@ -1994,6 +2338,8 @@ async function selectInstanceSyncPlan(planId: number | null) {
 }
 
 async function selectInstanceSyncSource(sourceInstanceId: number | null, clearConfigSelections: boolean) {
+  dismissInstanceSyncPreview();
+  clearInstanceSyncConfigDiffCache();
   state.instanceSyncSourceId = sourceInstanceId;
   if (sourceInstanceId != null) {
     state.instanceSyncTargetIds.delete(sourceInstanceId);
@@ -2010,6 +2356,7 @@ async function loadInstanceSyncSourceData(
   sourceInstanceId: number | null,
   clearOnMissing: boolean,
 ) {
+  dismissInstanceSyncPreview();
   state.instanceSyncSessions = [];
   state.instanceSyncConfigPaths = [];
   if (sourceInstanceId == null) {
@@ -2161,6 +2508,7 @@ async function executeInstanceSync() {
     state.instanceSyncResult = await invoke<InstanceSyncExecutionReport>("execute_instance_sync", {
       request,
     });
+    clearInstanceSyncConfigDiffCache();
     state.instanceSyncPreview = null;
     const failed = state.instanceSyncResult.targets.filter((target) => target.error).length;
     const added = state.instanceSyncResult.targets.reduce(

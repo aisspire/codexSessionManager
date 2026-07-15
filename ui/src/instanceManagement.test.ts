@@ -10,6 +10,15 @@ import {
   instanceScanSummary,
   validateInstanceSyncSelection,
 } from "./instanceManagement.js";
+import {
+  DelayedInstanceSyncPreview,
+  ExpiringInstanceSyncPreviewCache,
+  InstanceSyncPreviewInputMode,
+  configDiffTargetDisplay,
+  instanceSyncConfigDiffCacheKey,
+  restoreInstanceSyncScroll,
+  snapshotInstanceSyncScroll,
+} from "./instanceSyncPreview.js";
 
 function expectEqual<T>(actual: T, expected: T, message: string) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -116,4 +125,154 @@ expectEqual(
   }),
   "新增 1 · 相同跳过 1 · 冲突 1 · 配置 2 项",
   "summarizes each target sync result for display",
+);
+
+const syncScrollContainers = [
+  { dataset: { instanceSyncScroll: "targets" }, scrollLeft: 3, scrollTop: 12 },
+  { dataset: { instanceSyncScroll: "sessions" }, scrollLeft: 5, scrollTop: 24 },
+  { dataset: { instanceSyncScroll: "config" }, scrollLeft: 7, scrollTop: 36 },
+  { dataset: { instanceSyncScroll: "unknown" }, scrollLeft: 99, scrollTop: 99 },
+];
+const syncScrollSnapshot = snapshotInstanceSyncScroll(syncScrollContainers);
+expectEqual(
+  syncScrollSnapshot,
+  {
+    targets: { left: 3, top: 12 },
+    sessions: { left: 5, top: 24 },
+    config: { left: 7, top: 36 },
+  },
+  "captures every known instance-sync list independently",
+);
+syncScrollContainers.forEach((container) => {
+  container.scrollLeft = 0;
+  container.scrollTop = 0;
+});
+restoreInstanceSyncScroll(syncScrollContainers, syncScrollSnapshot);
+expectEqual(
+  syncScrollContainers.map(({ scrollLeft, scrollTop }) => ({ scrollLeft, scrollTop })),
+  [
+    { scrollLeft: 3, scrollTop: 12 },
+    { scrollLeft: 5, scrollTop: 24 },
+    { scrollLeft: 7, scrollTop: 36 },
+    { scrollLeft: 0, scrollTop: 0 },
+  ],
+  "restores scroll positions by stable list identifier instead of DOM order",
+);
+
+let nextTimerId = 1;
+let scheduledDelay = 0;
+const scheduledTimers = new Map<number, () => void>();
+const delayedPreview = new DelayedInstanceSyncPreview({
+  setTimeout(callback, delay) {
+    const timerId = nextTimerId++;
+    scheduledDelay = delay;
+    scheduledTimers.set(timerId, callback);
+    return timerId;
+  },
+  clearTimeout(timerId) {
+    scheduledTimers.delete(timerId);
+  },
+});
+const previewEvents: string[] = [];
+const cancelledRequest = delayedPreview.schedule((requestId) => {
+  previewEvents.push(`cancelled-${requestId}`);
+});
+expectEqual(scheduledDelay, 500, "waits 500ms before opening a pointer preview");
+delayedPreview.cancel();
+expectEqual([...scheduledTimers.values()].length, 0, "cancels a pending preview when pointer leaves");
+const activeRequest = delayedPreview.schedule((requestId) => {
+  previewEvents.push(`active-${requestId}`);
+});
+const activeTimer = nextTimerId - 1;
+scheduledTimers.get(activeTimer)?.();
+expectEqual(previewEvents, [`active-${activeRequest}`], "only opens the latest hovered row");
+expectEqual(delayedPreview.isCurrent(cancelledRequest), false, "invalidates cancelled delayed requests");
+const staleRequest = delayedPreview.openImmediately(() => undefined);
+const latestRequest = delayedPreview.openImmediately(() => undefined);
+expectEqual(
+  [delayedPreview.isCurrent(staleRequest), delayedPreview.isCurrent(latestRequest)],
+  [false, true],
+  "allows callers to ignore an older asynchronous preview response",
+);
+
+const previewInputMode = new InstanceSyncPreviewInputMode();
+previewInputMode.recordPointerInput();
+expectEqual(
+  previewInputMode.allowsImmediateFocusPreview(),
+  false,
+  "does not open an immediate preview for a mouse-triggered focus",
+);
+previewInputMode.recordKeyboardInput();
+expectEqual(
+  previewInputMode.allowsImmediateFocusPreview(),
+  true,
+  "opens an immediate preview after keyboard focus navigation",
+);
+
+let nextCacheTimerId = 1;
+const cacheTimers = new Map<number, () => void>();
+const expiringPreviewCache = new ExpiringInstanceSyncPreviewCache<string>(
+  {
+    setTimeout(callback) {
+      const timerId = nextCacheTimerId++;
+      cacheTimers.set(timerId, callback);
+      return timerId;
+    },
+    clearTimeout(timerId) {
+      cacheTimers.delete(timerId);
+    },
+  },
+  30_000,
+);
+expiringPreviewCache.set("source-target-path", "sensitive-value");
+expiringPreviewCache.scheduleClear();
+const firstCacheTimer = nextCacheTimerId - 1;
+expectEqual(cacheTimers.has(firstCacheTimer), true, "expires cached config values after a short idle period");
+expectEqual(
+  expiringPreviewCache.get("source-target-path"),
+  "sensitive-value",
+  "keeps a completed config diff while the user continues inspecting it",
+);
+expectEqual(cacheTimers.has(firstCacheTimer), false, "cancels expiry while a cached diff is reopened");
+expiringPreviewCache.scheduleClear();
+cacheTimers.get(nextCacheTimerId - 1)?.();
+expectEqual(
+  expiringPreviewCache.get("source-target-path"),
+  undefined,
+  "removes cached config values after the idle timeout",
+);
+
+expectEqual(
+  configDiffTargetDisplay({ status: "changed", original_value: "\"target\"" }, "\"source\""),
+  {
+    statusLabel: "已变更",
+    before: { label: "原值", value: "\"target\"", tone: "removed" },
+    after: { label: "替换值", value: "\"source\"", tone: "added" },
+  },
+  "maps changed config values to labelled red and green diff data",
+);
+expectEqual(
+  configDiffTargetDisplay({ status: "missing", original_value: null }, "\"source\""),
+  {
+    statusLabel: "未设置",
+    before: { label: "原值", value: "未设置", tone: "removed" },
+    after: { label: "替换值", value: "\"source\"", tone: "added" },
+  },
+  "maps a missing target value to labelled red and green diff data",
+);
+expectEqual(
+  configDiffTargetDisplay({ status: "same", original_value: "\"source\"" }, "\"source\""),
+  { statusLabel: "无变化", detail: "目标值与源值相同" },
+  "does not invent red and green values when a target is unchanged",
+);
+expectEqual(
+  [
+    instanceSyncConfigDiffCacheKey(1, [2, 3], ["model"]),
+    instanceSyncConfigDiffCacheKey(1, [3, 2], ["model"]),
+  ],
+  [
+    "[1,[2,3],[\"model\"]]",
+    "[1,[3,2],[\"model\"]]",
+  ],
+  "includes ordered targets in the config-diff cache key",
 );

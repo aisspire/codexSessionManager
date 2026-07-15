@@ -36,8 +36,44 @@ pub struct InstanceSyncSourceSession {
     pub title: Option<String>,
     pub project: Option<String>,
     pub archived: bool,
+    pub source: Option<String>,
+    pub model_provider: Option<String>,
+    pub model: Option<String>,
     pub source_path: String,
     pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceSyncConfigDiffRequest {
+    pub source_instance_id: i64,
+    pub target_instance_ids: Vec<i64>,
+    pub config_path: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceSyncConfigDiff {
+    pub source_instance_id: i64,
+    pub config_path: Vec<String>,
+    pub source_value: String,
+    pub targets: Vec<InstanceSyncConfigDiffTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceSyncConfigDiffTarget {
+    pub target_instance_id: i64,
+    pub target_path: String,
+    pub status: InstanceSyncConfigDiffStatus,
+    pub original_value: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceSyncConfigDiffStatus {
+    Changed,
+    Same,
+    Missing,
+    ReadError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +222,19 @@ pub fn list_instance_sync_source_data(
                     .clone()
                     .or_else(|| thread.and_then(|thread| thread.cwd.clone())),
                 archived: session.archived,
+                source: session
+                    .meta
+                    .source
+                    .clone()
+                    .or_else(|| thread.and_then(|thread| thread.source.clone())),
+                model_provider: session
+                    .meta
+                    .model_provider
+                    .clone()
+                    .or_else(|| thread.and_then(|thread| thread.model_provider.clone())),
+                model: thread
+                    .and_then(|thread| thread.model.clone())
+                    .or_else(|| raw_index_string(index, "model")),
                 source_path: session.path.display().to_string(),
                 updated_at: raw_index_string(index, "updated_at")
                     .or_else(|| thread.and_then(|thread| thread.updated_at.clone())),
@@ -200,6 +249,106 @@ pub fn list_instance_sync_source_data(
         sessions,
         config_paths: config_path_tree(config_document.as_table(), &[]),
     })
+}
+
+pub fn preview_instance_sync_config_diff(
+    registry_database_path: &Path,
+    request: &InstanceSyncConfigDiffRequest,
+) -> Result<InstanceSyncConfigDiff> {
+    let config_path =
+        normalized_config_paths(&[request.config_path.clone()]).and_then(|mut paths| {
+            paths
+                .pop()
+                .ok_or_else(|| anyhow::anyhow!("instance sync config path cannot be empty"))
+        })?;
+    let instances = list_managed_instances(registry_database_path)?;
+    let source = resolve_available_instance(&instances, request.source_instance_id)?;
+    let target_ids =
+        normalized_target_ids(request.source_instance_id, &request.target_instance_ids)?;
+    let targets = target_ids
+        .into_iter()
+        .map(|target_id| resolve_available_instance(&instances, target_id))
+        .collect::<Result<Vec<_>>>()?;
+    let source_document = read_config_document(&source.profile.config_path())?;
+    let source_item = config_item_at_path(&source_document, &config_path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "source config path {} does not exist",
+            config_path_label(&config_path)
+        )
+    })?;
+    if source_item.is_table() {
+        bail!(
+            "source config path {} is a table; select an individual value instead",
+            config_path_label(&config_path)
+        );
+    }
+
+    let source_value = formatted_config_item(source_item);
+    let targets = targets
+        .iter()
+        .map(|target| config_diff_target(target, &config_path, source_item))
+        .collect();
+
+    Ok(InstanceSyncConfigDiff {
+        source_instance_id: request.source_instance_id,
+        config_path,
+        source_value,
+        targets,
+    })
+}
+
+fn config_diff_target(
+    target: &SyncInstance,
+    config_path: &[String],
+    source_item: &Item,
+) -> InstanceSyncConfigDiffTarget {
+    let target_path = target.path.display().to_string();
+    let result = (|| -> Result<InstanceSyncConfigDiffTarget> {
+        let document = read_config_document(&target.profile.config_path())?;
+        let Some(target_item) = config_item_at_path(&document, config_path) else {
+            return Ok(InstanceSyncConfigDiffTarget {
+                target_instance_id: target.id,
+                target_path: target_path.clone(),
+                status: InstanceSyncConfigDiffStatus::Missing,
+                original_value: None,
+                error: None,
+            });
+        };
+        if target_item.is_table() {
+            bail!(
+                "target config path {} is a table, not a value",
+                config_path_label(config_path)
+            );
+        }
+
+        Ok(InstanceSyncConfigDiffTarget {
+            target_instance_id: target.id,
+            target_path: target_path.clone(),
+            status: if config_items_match(source_item, target_item) {
+                InstanceSyncConfigDiffStatus::Same
+            } else {
+                InstanceSyncConfigDiffStatus::Changed
+            },
+            original_value: Some(formatted_config_item(target_item)),
+            error: None,
+        })
+    })();
+
+    result.unwrap_or_else(|error| InstanceSyncConfigDiffTarget {
+        target_instance_id: target.id,
+        target_path,
+        status: InstanceSyncConfigDiffStatus::ReadError,
+        original_value: None,
+        error: Some(format!("{error:#}")),
+    })
+}
+
+fn formatted_config_item(item: &Item) -> String {
+    item.to_string().trim().to_string()
+}
+
+fn config_items_match(left: &Item, right: &Item) -> bool {
+    formatted_config_item(left) == formatted_config_item(right)
 }
 
 pub fn execute_instance_sync_with_guard<F>(

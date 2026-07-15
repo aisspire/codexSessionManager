@@ -15,8 +15,8 @@ use codex_session_manager::instance_registry::{
     self, InstanceScanReport, InstanceSyncPlan, InstanceSyncPlanDraft, ManagedInstance,
 };
 use codex_session_manager::instance_sync::{
-    self, InstanceSyncExecutionReport, InstanceSyncPreview, InstanceSyncRequest,
-    InstanceSyncSourceData,
+    self, InstanceSyncConfigDiff, InstanceSyncConfigDiffRequest, InstanceSyncExecutionReport,
+    InstanceSyncPreview, InstanceSyncRequest, InstanceSyncSourceData,
 };
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
 use codex_session_manager::path_map::PathMap;
@@ -360,6 +360,20 @@ async fn list_instance_sync_source_data(
 }
 
 #[tauri::command]
+async fn preview_instance_sync_config_diff(
+    app: tauri::AppHandle,
+    request: InstanceSyncConfigDiffRequest,
+) -> Result<InstanceSyncConfigDiff, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_sync::preview_instance_sync_config_diff(&database_path, &request)
+            .map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("instance sync config diff task failed: {error}"))?
+}
+
+#[tauri::command]
 async fn preview_instance_sync(
     app: tauri::AppHandle,
     request: InstanceSyncRequest,
@@ -565,6 +579,7 @@ fn main() {
             save_instance_sync_plan,
             delete_instance_sync_plan,
             list_instance_sync_source_data,
+            preview_instance_sync_config_diff,
             preview_instance_sync,
             execute_instance_sync,
             open_external_url

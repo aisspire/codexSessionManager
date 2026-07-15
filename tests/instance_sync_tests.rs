@@ -5,7 +5,8 @@ use std::path::Path;
 use codex_session_manager::instance_registry::{list_managed_instances, scan_and_register};
 use codex_session_manager::instance_sync::{
     execute_instance_sync_with_guard, list_instance_sync_source_data, preview_instance_sync,
-    ConfigPathNode, InstanceSyncRequest,
+    preview_instance_sync_config_diff, ConfigPathNode, InstanceSyncConfigDiffRequest,
+    InstanceSyncConfigDiffStatus, InstanceSyncRequest,
 };
 use codex_session_manager::state_db::StateDb;
 use rusqlite::{params, Connection};
@@ -360,6 +361,156 @@ base_url = "https://source.example/v1"
         true
     )));
     assert!(paths.contains(&(vec!["model_providers".to_string()], false)));
+}
+
+#[test]
+fn lists_source_session_hover_metadata_without_reading_session_contents() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    let rollout_path = source_directory.join("sessions").join("metadata.jsonl");
+    write_config(&source_directory, "model = \"source\"\n");
+    write_rollout_with_details(
+        &rollout_path,
+        "thread-metadata",
+        "openai",
+        "E:\\project\\metadata",
+    );
+    fs::write(
+        source_directory.join("session_index.jsonl"),
+        r#"{"id":"thread-metadata","updated_at":"2026-07-02T03:04:05Z"}"#,
+    )
+    .unwrap();
+    create_state_db(&source_directory.join("state_5.sqlite"));
+    insert_thread(
+        &source_directory.join("state_5.sqlite"),
+        "thread-metadata",
+        rollout_path.to_str().unwrap(),
+        false,
+        "完整的会话标题",
+    );
+    set_thread_model(
+        &source_directory.join("state_5.sqlite"),
+        "thread-metadata",
+        "gpt-5",
+    );
+
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let source = instance_id_at(
+        &list_managed_instances(&registry_path).unwrap(),
+        &source_directory,
+    );
+
+    let data = list_instance_sync_source_data(&registry_path, source).unwrap();
+    let session = data
+        .sessions
+        .iter()
+        .find(|session| session.id == "thread-metadata")
+        .unwrap();
+
+    assert_eq!(session.title.as_deref(), Some("完整的会话标题"));
+    assert_eq!(session.project.as_deref(), Some("E:\\project\\metadata"));
+    assert!(!session.archived);
+    assert_eq!(session.source.as_deref(), Some("cli"));
+    assert_eq!(session.model_provider.as_deref(), Some("openai"));
+    assert_eq!(session.model.as_deref(), Some("gpt-5"));
+    assert_eq!(session.updated_at.as_deref(), Some("2026-07-02T03:04:05Z"));
+    assert_eq!(session.source_path, rollout_path.display().to_string());
+}
+
+#[test]
+fn previews_config_diff_for_each_target_without_writing_configuration() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let changed_directory = dir.path().join("changed");
+    let same_directory = dir.path().join("same");
+    let missing_directory = dir.path().join("missing");
+    let unreadable_directory = dir.path().join("unreadable");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&source_directory, "model = \"source-model\"\n");
+    write_config(&changed_directory, "model = \"target-model\"\n");
+    write_config(&same_directory, "model = \"source-model\"\n");
+    write_config(&missing_directory, "other = true\n");
+    write_config(&unreadable_directory, "model = [\n");
+
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&registry_path).unwrap();
+    let source = instance_id_at(&instances, &source_directory);
+    let changed = instance_id_at(&instances, &changed_directory);
+    let same = instance_id_at(&instances, &same_directory);
+    let missing = instance_id_at(&instances, &missing_directory);
+    let unreadable = instance_id_at(&instances, &unreadable_directory);
+
+    let diff = preview_instance_sync_config_diff(
+        &registry_path,
+        &InstanceSyncConfigDiffRequest {
+            source_instance_id: source,
+            target_instance_ids: vec![changed, same, missing, unreadable],
+            config_path: vec!["model".to_string()],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(diff.source_value, "\"source-model\"");
+    assert_eq!(diff.targets.len(), 4);
+    assert_eq!(diff.targets[0].target_instance_id, changed);
+    assert_eq!(
+        diff.targets[0].status,
+        InstanceSyncConfigDiffStatus::Changed
+    );
+    assert_eq!(
+        diff.targets[0].original_value.as_deref(),
+        Some("\"target-model\"")
+    );
+    assert_eq!(diff.targets[1].status, InstanceSyncConfigDiffStatus::Same);
+    assert_eq!(
+        diff.targets[1].original_value.as_deref(),
+        Some("\"source-model\"")
+    );
+    assert_eq!(
+        diff.targets[2].status,
+        InstanceSyncConfigDiffStatus::Missing
+    );
+    assert_eq!(diff.targets[2].original_value, None);
+    assert_eq!(
+        diff.targets[3].status,
+        InstanceSyncConfigDiffStatus::ReadError
+    );
+    assert!(diff.targets[3]
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("parse")));
+    assert_eq!(
+        fs::read_to_string(changed_directory.join("config.toml")).unwrap(),
+        "model = \"target-model\"\n",
+    );
+}
+
+#[test]
+fn config_diff_rejects_an_unavailable_registered_target() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let target_directory = dir.path().join("target");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&source_directory, "model = \"source-model\"\n");
+    write_config(&target_directory, "model = \"target-model\"\n");
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&registry_path).unwrap();
+    let source = instance_id_at(&instances, &source_directory);
+    let target = instance_id_at(&instances, &target_directory);
+    fs::remove_file(target_directory.join("config.toml")).unwrap();
+
+    let error = preview_instance_sync_config_diff(
+        &registry_path,
+        &InstanceSyncConfigDiffRequest {
+            source_instance_id: source,
+            target_instance_ids: vec![target],
+            config_path: vec!["model".to_string()],
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("not available"));
 }
 
 #[test]
@@ -853,6 +1004,16 @@ fn insert_thread(path: &Path, id: &str, rollout_path: &str, archived: bool, titl
             VALUES (?1, ?2, 1, 2, 'cli', 'openai', 'E:\\project', ?3, 'workspace-write', 'on-request', 0, 1, ?4, '', NULL, NULL, 1, 2)
             "#,
             params![id, rollout_path, title, if archived { 1 } else { 0 }],
+        )
+        .unwrap();
+}
+
+fn set_thread_model(path: &Path, id: &str, model: &str) {
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute(
+            "UPDATE threads SET model = ?1 WHERE id = ?2",
+            params![model, id],
         )
         .unwrap();
 }

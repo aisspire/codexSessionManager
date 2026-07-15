@@ -1003,6 +1003,11 @@ select {
   align-content: start;
   gap: 7px;
   min-width: 0;
+  min-height: 120px;
+  max-height: 250px;
+  overflow: auto;
+  padding: 3px;
+  scrollbar-gutter: stable;
   color: #314457;
   font-size: 12px;
   font-weight: 800;
@@ -1026,6 +1031,7 @@ select {
   max-height: 250px;
   overflow: auto;
   padding: 3px;
+  scrollbar-gutter: stable;
   border: 1px solid #e0e7ec;
   border-radius: 6px;
   background: #fbfcfd;
@@ -1109,6 +1115,141 @@ select {
   color: #38586a;
   font-size: 12px;
   font-weight: 850;
+}
+
+.instance-sync-preview-popover {
+  position: fixed;
+  z-index: 30;
+  width: min(410px, calc(100vw - 16px));
+  max-height: min(520px, calc(100vh - 16px));
+  overflow: auto;
+  padding: 11px;
+  border: 1px solid #9dbebf;
+  border-radius: 7px;
+  color: #243548;
+  background: #ffffff;
+  box-shadow: 0 10px 28px rgb(23 52 58 / 18%);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+}
+
+.instance-sync-preview-heading,
+.instance-sync-diff-target-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.instance-sync-preview-heading {
+  color: #17343a;
+}
+
+.instance-sync-preview-heading span,
+.instance-sync-diff-target-heading span {
+  flex: 0 0 auto;
+  color: #5d727f;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.instance-sync-preview-metadata {
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
+  gap: 5px 9px;
+  margin: 10px 0 0;
+}
+
+.instance-sync-preview-metadata dt {
+  color: #617987;
+  font-weight: 800;
+}
+
+.instance-sync-preview-metadata dd {
+  min-width: 0;
+  margin: 0;
+  color: #243548;
+  overflow-wrap: anywhere;
+}
+
+.instance-sync-preview-message {
+  margin: 8px 0 0;
+  color: #5d727f;
+}
+
+.instance-sync-preview-source-value,
+.instance-sync-diff-value {
+  display: grid;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr);
+  gap: 7px;
+  margin-top: 9px;
+  padding: 6px;
+  border-radius: 4px;
+}
+
+.instance-sync-preview-source-value {
+  color: #445e6b;
+  background: #f3f7f8;
+}
+
+.instance-sync-preview-source-value span,
+.instance-sync-diff-value span {
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.instance-sync-preview-popover code {
+  min-width: 0;
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.instance-sync-diff-targets {
+  display: grid;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.instance-sync-diff-target {
+  display: grid;
+  gap: 5px;
+  padding: 7px;
+  border: 1px solid #d4e2e5;
+  border-radius: 5px;
+  background: #fbfdfd;
+}
+
+.instance-sync-diff-target-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.instance-sync-diff-target small {
+  color: #8c4b45;
+  overflow-wrap: anywhere;
+}
+
+.instance-sync-diff-target.failed {
+  border-color: #e0b8b2;
+  background: #fff8f7;
+}
+
+.instance-sync-diff-value {
+  margin-top: 0;
+}
+
+.instance-sync-diff-value.removed {
+  color: #9c342e;
+  background: #fff0ef;
+}
+
+.instance-sync-diff-value.added {
+  color: #1c6a4b;
+  background: #edf9f1;
 }
 
 .instance-sync-actions {
