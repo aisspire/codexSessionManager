@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { compactFailureDialogMarkup, type CompactFailureDialogState } from "./compactFailureDialog";
@@ -10,6 +11,12 @@ import {
   type CodexRunningDialogState,
 } from "./codexExitConfirm";
 import { loadInputCache, saveInputCache } from "./inputCache";
+import {
+  pathFieldMarkup,
+  pathPickerDirectory,
+  pickSinglePath,
+  type PathPickerTarget,
+} from "./pathPicker";
 import {
   applyInstanceSyncPlan,
   availableInstanceSyncTargets,
@@ -675,9 +682,13 @@ function settingsDrawer() {
             <option value="auto-when-codex-stops" ${draft.database_sync.mode === "auto-when-codex-stops" ? "selected" : ""}>Codex 停止后自动同步</option>
           </select>
         </label>
-        <label>Codex CLI 命令
-          <input id="setting-codex-cli" placeholder="留空自动查找；Windows 优先 where.exe codex 的 codex.cmd" value="${escapeHtml(draft.codex_cli.command_path ?? "")}" />
-        </label>
+        ${pathFieldMarkup({
+          target: "setting-codex-cli",
+          label: "Codex CLI 命令",
+          value: draft.codex_cli.command_path ?? "",
+          escapeHtml,
+          placeholder: "留空自动查找；Windows 优先 where.exe codex 的 codex.cmd",
+        })}
       </div>
       <div class="settings-summary">
         ${summary ? `${summary.sessions} 个会话备份 · ${summary.snapshots} 个快照 · ${formatBytes(summary.bytes)}` : "备份统计未加载"}
@@ -704,7 +715,12 @@ function filterBar() {
   return `
     <section class="toolbar filter-toolbar" aria-label="搜索筛选">
       <div class="filter-path-row">
-        <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
+        ${pathFieldMarkup({
+          target: "codex-home",
+          label: "Codex 主目录",
+          value: state.profile.codex_home,
+          escapeHtml,
+        })}
         <button id="refresh" class="primary" ${disabledWhenBusy()}>开始扫描</button>
       </div>
       <div class="filter-grid">
@@ -730,9 +746,14 @@ function filterBar() {
 function instanceFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="实例扫描">
-      <label>父路径
-        <input id="instance-scan-path" placeholder="例如 E:\\CodexInstances" value="${escapeHtml(state.instanceScanPath)}" ${state.busy.active ? "disabled" : ""} />
-      </label>
+      ${pathFieldMarkup({
+        target: "instance-scan-path",
+        label: "父路径",
+        value: state.instanceScanPath,
+        escapeHtml,
+        placeholder: "例如 E:\\CodexInstances",
+        disabled: state.busy.active,
+      })}
       <button id="scan-managed-instances" class="primary" ${disabledWhenBusy()}>扫描并添加</button>
     </section>
   `;
@@ -741,7 +762,12 @@ function instanceFilterBar() {
 function repairFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="数据库修复范围">
-      <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
+      ${pathFieldMarkup({
+        target: "codex-home",
+        label: "Codex 主目录",
+        value: state.profile.codex_home,
+        escapeHtml,
+      })}
       <button id="refresh" class="primary" ${disabledWhenBusy()}>扫描修复项</button>
     </section>
   `;
@@ -750,7 +776,12 @@ function repairFilterBar() {
 function backupFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="备份范围">
-      <label>Codex 主目录<input id="codex-home" value="${escapeHtml(state.profile.codex_home)}" /></label>
+      ${pathFieldMarkup({
+        target: "codex-home",
+        label: "Codex 主目录",
+        value: state.profile.codex_home,
+        escapeHtml,
+      })}
       <button id="refresh" class="primary" ${disabledWhenBusy()}>扫描备份</button>
     </section>
   `;
@@ -815,7 +846,13 @@ function batchEditBar() {
     <section class="toolbar action-toolbar" aria-label="批量编辑操作">
       <label>会话名前缀<input id="edit-title-prefix" placeholder="多选时生成 前缀(1)" value="${escapeHtml(state.selectedEdit.titlePrefix)}" /></label>
       <label>提供方<input id="edit-provider" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.provider)}" /></label>
-      <label>项目路径<input id="edit-project" placeholder="留空则不改" value="${escapeHtml(state.selectedEdit.project)}" /></label>
+      ${pathFieldMarkup({
+        target: "edit-project",
+        label: "项目路径",
+        value: state.selectedEdit.project,
+        escapeHtml,
+        placeholder: "留空则不改",
+      })}
       <div class="action-buttons">
         <button id="preview-selected-edit" ${disabledWhenBusy()}>预览</button>
         <button id="apply-selected-edit" class="primary" ${disabledWhenBusy()}>应用</button>
@@ -1614,6 +1651,7 @@ function detailDrawer(session: SessionSummary) {
 function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
   bindPageSwitching();
   bindFilters();
+  bindPathPickerEvents();
   if (state.activePage === "instance-management") {
     bindInstanceEvents();
   } else if (state.activePage === "database-repair") {
@@ -1909,14 +1947,7 @@ function bindPageSwitching() {
 }
 
 function bindFilters() {
-  bindInput("codex-home", (value) => {
-    if (state.profile.codex_home !== value) {
-      state.settings = null;
-      state.settingsDraft = null;
-      state.backupSummary = null;
-    }
-    state.profile.codex_home = value;
-  });
+  bindInput("codex-home", updateCodexHome);
   document.querySelector<HTMLInputElement>("#codex-home")?.addEventListener("change", () => {
     void loadAppSettings(false);
   });
@@ -2128,6 +2159,53 @@ async function loadSessions(activeId?: string) {
       ? activeId
       : state.sessions[0]?.id || "";
   state.detailOpen = Boolean(activeId && state.activeId);
+}
+
+function bindPathPickerEvents() {
+  document.querySelectorAll<HTMLButtonElement>("[data-pick-path]").forEach((button) => {
+    const target = button.dataset.pickPath as PathPickerTarget | undefined;
+    if (!target) return;
+    button.addEventListener("click", () => {
+      void selectPathForTarget(target);
+    });
+  });
+}
+
+async function selectPathForTarget(target: PathPickerTarget) {
+  try {
+    const selectedPath = await pickSinglePath(openNativeDialog, pathPickerDirectory(target));
+    if (!selectedPath) return;
+
+    if (target === "codex-home") {
+      updateCodexHome(selectedPath);
+      saveCurrentInputCache();
+      render({ preserveTableScroll: true });
+      await loadAppSettings(false);
+      return;
+    }
+
+    if (target === "instance-scan-path") {
+      state.instanceScanPath = selectedPath;
+    } else if (target === "edit-project") {
+      state.selectedEdit.project = selectedPath;
+      saveCurrentInputCache();
+    } else if (state.settingsDraft) {
+      state.settingsDraft.codex_cli.command_path = selectedPath;
+    }
+    render({ preserveTableScroll: true });
+  } catch (error) {
+    state.status = `无法选择路径：${formatErrorMessage(error)}`;
+    render({ preserveTableScroll: true });
+  }
+}
+
+function updateCodexHome(value: string) {
+  if (state.profile.codex_home !== value) {
+    state.settings = null;
+    state.settingsDraft = null;
+    state.backupSummary = null;
+  }
+  state.profile.codex_home = value;
 }
 
 async function loadManagedInstances(showStatus: boolean) {

@@ -7,10 +7,12 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "test:instance-management": "tsc -p tsconfig.instance-test.json && node dist/instanceManagement.test.js",
+    "test:path-picker": "tsc -p tsconfig.path-picker-test.json && node dist/pathPicker.test.js",
     "tauri": "cd .. && node ui/node_modules/@tauri-apps/cli/tauri.js"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1"
   },

@@ -271,6 +271,31 @@ select {
   min-width: 76px;
 }
 
+.path-field,
+.path-input-control {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.path-input-control {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.path-input-control input {
+  min-width: 0;
+}
+
+.path-input-control button {
+  white-space: nowrap;
+}
+
+.path-input-control input:focus-visible,
+.path-input-control button:focus-visible {
+  outline: 3px solid rgb(14 104 112 / 35%);
+  outline-offset: 2px;
+}
+
 .filter-grid {
   display: grid;
   grid-template-columns: minmax(250px, 1.35fr) repeat(5, minmax(116px, 1fr));
@@ -1896,6 +1921,10 @@ dd {
   }
 
   .filter-path-row {
+    grid-template-columns: 1fr;
+  }
+
+  .path-input-control {
     grid-template-columns: 1fr;
   }
 
