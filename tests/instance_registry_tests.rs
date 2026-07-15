@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use codex_session_manager::instance_registry::{
-    list_managed_instances, managed_instance_path, rename_managed_instance, scan_and_register,
-    soft_delete_managed_instance,
+    list_managed_instances, managed_instance_path, permanently_ignore_managed_instance,
+    rename_managed_instance, scan_and_register, soft_delete_managed_instance,
 };
 use rusqlite::{params, Connection};
 use tempfile::tempdir;
@@ -162,6 +162,103 @@ fn logical_delete_migrates_an_existing_registry_without_losing_metadata() {
     assert_eq!(path, registered_path(&instance_directory));
     assert_eq!(display_name.as_deref(), Some("旧实例名称"));
     assert!(deleted_at.is_some());
+}
+
+#[test]
+fn permanent_ignore_hides_instance_and_prevents_rescan_without_losing_metadata() {
+    let dir = tempdir().unwrap();
+    let instance_directory = dir.path().join("instance");
+    let database_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&instance_directory);
+
+    scan_and_register(&database_path, dir.path()).unwrap();
+    let instance = list_managed_instances(&database_path)
+        .unwrap()
+        .pop()
+        .unwrap();
+    rename_managed_instance(&database_path, instance.id, "永久忽略的实例名称").unwrap();
+
+    permanently_ignore_managed_instance(&database_path, instance.id).unwrap();
+
+    assert!(list_managed_instances(&database_path).unwrap().is_empty());
+    assert!(managed_instance_path(&database_path, instance.id).is_err());
+    assert!(rename_managed_instance(&database_path, instance.id, "不应保存").is_err());
+
+    let rescan = scan_and_register(&database_path, dir.path()).unwrap();
+
+    assert_eq!(rescan.added, 0);
+    assert_eq!(rescan.reactivated, 0);
+    assert_eq!(rescan.ignored, 1);
+    assert_eq!(rescan.already_managed, 0);
+    assert!(list_managed_instances(&database_path).unwrap().is_empty());
+
+    let connection = Connection::open(&database_path).unwrap();
+    let (path, display_name, ignored_at): (String, Option<String>, Option<i64>) = connection
+        .query_row(
+            "SELECT path, display_name, ignored_at_unix FROM managed_instances WHERE id = ?1",
+            [instance.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        path,
+        fs::canonicalize(&instance_directory)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    );
+    assert_eq!(display_name.as_deref(), Some("永久忽略的实例名称"));
+    assert!(ignored_at.is_some());
+}
+
+#[test]
+fn permanent_ignore_migrates_logical_delete_registry_without_losing_metadata() {
+    let dir = tempdir().unwrap();
+    let instance_directory = dir.path().join("instance");
+    let database_path = dir.path().join("instances.sqlite");
+    write_config(&instance_directory);
+    let stored_path = registered_path(&instance_directory);
+
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE managed_instances (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                display_name TEXT,
+                added_at_unix INTEGER NOT NULL,
+                last_seen_at_unix INTEGER NOT NULL,
+                deleted_at_unix INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+    connection
+        .execute(
+            r#"
+            INSERT INTO managed_instances (path, display_name, added_at_unix, last_seen_at_unix)
+            VALUES (?1, ?2, 1, 2)
+            "#,
+            params![stored_path, "已有逻辑删除迁移的实例"],
+        )
+        .unwrap();
+    drop(connection);
+
+    permanently_ignore_managed_instance(&database_path, 1).unwrap();
+
+    assert!(list_managed_instances(&database_path).unwrap().is_empty());
+    let connection = Connection::open(&database_path).unwrap();
+    let (path, display_name, ignored_at): (String, Option<String>, Option<i64>) = connection
+        .query_row(
+            "SELECT path, display_name, ignored_at_unix FROM managed_instances WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(path, registered_path(&instance_directory));
+    assert_eq!(display_name.as_deref(), Some("已有逻辑删除迁移的实例"));
+    assert!(ignored_at.is_some());
 }
 
 #[test]

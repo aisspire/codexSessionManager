@@ -15,6 +15,7 @@ import {
   instanceDisplayName,
   instanceScanSummary,
   managedInstanceDeleteConfirmation,
+  managedInstanceIgnoreConfirmation,
   type InstanceScanReport,
   type ManagedInstance,
 } from "./instanceManagement";
@@ -815,6 +816,7 @@ function instanceRow(instance: ManagedInstance) {
         }
         <button data-open-managed-instance="${instance.id}" ${disabledWhenBusy()}>打开路径</button>
         <button data-delete-managed-instance="${instance.id}" class="danger" ${disabledWhenBusy(renaming)}>删除记录</button>
+        <button data-ignore-managed-instance="${instance.id}" class="danger" ${disabledWhenBusy(renaming)}>永久忽略</button>
       </div>
     </article>
   `;
@@ -1095,6 +1097,14 @@ function bindInstanceEvents() {
       const instanceId = Number(button.dataset.deleteManagedInstance);
       if (Number.isSafeInteger(instanceId)) {
         void deleteManagedInstance(instanceId);
+      }
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-ignore-managed-instance]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const instanceId = Number(button.dataset.ignoreManagedInstance);
+      if (Number.isSafeInteger(instanceId)) {
+        void ignoreManagedInstance(instanceId);
       }
     });
   });
@@ -1446,7 +1456,8 @@ async function scanManagedInstances() {
     state.instanceRenameId = null;
     state.instanceRenameDraft = "";
     const reactivated = report.reactivated ? `，重新登记 ${report.reactivated} 个` : "";
-    state.status = `扫描完成：新增 ${report.added} 个${reactivated}，已存在 ${report.already_managed} 个，跳过 ${report.skipped} 个`;
+    const ignored = report.ignored ? `，永久忽略 ${report.ignored} 个` : "";
+    state.status = `扫描完成：新增 ${report.added} 个${reactivated}${ignored}，已存在 ${report.already_managed} 个，跳过 ${report.skipped} 个`;
   });
 }
 
@@ -1510,6 +1521,21 @@ async function deleteManagedInstance(instanceId: number) {
       state.instanceRenameDraft = "";
     }
     state.status = `已删除“${instanceDisplayName(instance)}”的登记记录；文件夹和 config.toml 未被修改`;
+  });
+}
+
+async function ignoreManagedInstance(instanceId: number) {
+  const instance = state.managedInstances.find((candidate) => candidate.id === instanceId);
+  if (!instance || !window.confirm(managedInstanceIgnoreConfirmation(instance))) return;
+
+  await runWithProgress("正在永久忽略实例", async () => {
+    await invoke("ignore_managed_instance", { instanceId });
+    state.managedInstances = state.managedInstances.filter((candidate) => candidate.id !== instanceId);
+    if (state.instanceRenameId === instanceId) {
+      state.instanceRenameId = null;
+      state.instanceRenameDraft = "";
+    }
+    state.status = `已永久忽略“${instanceDisplayName(instance)}”；文件夹和 config.toml 未被修改，后续扫描不会自动重新添加`;
   });
 }
 

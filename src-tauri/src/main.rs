@@ -290,6 +290,12 @@ fn delete_managed_instance(app: tauri::AppHandle, instance_id: i64) -> Result<()
 }
 
 #[tauri::command]
+fn ignore_managed_instance(app: tauri::AppHandle, instance_id: i64) -> Result<(), String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    ignore_managed_instance_from_registry(&database_path, instance_id)
+}
+
+#[tauri::command]
 fn open_managed_instance_path(app: tauri::AppHandle, instance_id: i64) -> Result<(), String> {
     let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
     let path = instance_registry::managed_instance_path(&database_path, instance_id)
@@ -350,6 +356,14 @@ fn delete_managed_instance_from_registry(
     instance_id: i64,
 ) -> Result<(), String> {
     instance_registry::soft_delete_managed_instance(database_path, instance_id).map_err(format_error)
+}
+
+fn ignore_managed_instance_from_registry(
+    database_path: &Path,
+    instance_id: i64,
+) -> Result<(), String> {
+    instance_registry::permanently_ignore_managed_instance(database_path, instance_id)
+        .map_err(format_error)
 }
 
 fn open_url_in_default_browser(url: &str) -> Result<(), String> {
@@ -462,6 +476,7 @@ fn main() {
             scan_managed_instances,
             rename_managed_instance,
             delete_managed_instance,
+            ignore_managed_instance,
             open_managed_instance_path,
             open_external_url
         ])
@@ -520,6 +535,39 @@ mod tests {
         assert!(instance_registry::list_managed_instances(&database_path)
             .unwrap()
             .is_empty());
+        assert!(instance_directory.is_dir());
+        assert!(instance_directory.join("config.toml").is_file());
+        std::fs::remove_dir_all(test_directory).unwrap();
+    }
+
+    #[test]
+    fn ignore_managed_instance_bridge_keeps_the_instance_ignored_after_rescan() {
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let test_directory = std::env::temp_dir().join(format!(
+            "codex-session-manager-ignore-managed-instance-{}-{unique_suffix}",
+            std::process::id()
+        ));
+        let instance_directory = test_directory.join("instance");
+        let database_path = test_directory.join("managed-instances.sqlite");
+        std::fs::create_dir_all(&instance_directory).unwrap();
+        std::fs::write(instance_directory.join("config.toml"), "model = \"gpt-5\"\n").unwrap();
+
+        instance_registry::scan_and_register(&database_path, &test_directory).unwrap();
+        let instance = instance_registry::list_managed_instances(&database_path)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        ignore_managed_instance_from_registry(&database_path, instance.id).unwrap();
+        let rescan = instance_registry::scan_and_register(&database_path, &test_directory).unwrap();
+
+        assert!(instance_registry::list_managed_instances(&database_path)
+            .unwrap()
+            .is_empty());
+        assert_eq!(rescan.ignored, 1);
         assert!(instance_directory.is_dir());
         assert!(instance_directory.join("config.toml").is_file());
         std::fs::remove_dir_all(test_directory).unwrap();
