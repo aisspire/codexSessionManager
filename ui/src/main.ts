@@ -10,6 +10,13 @@ import {
   type CodexRunningDialogState,
 } from "./codexExitConfirm";
 import { loadInputCache, saveInputCache } from "./inputCache";
+import {
+  instanceAvailability,
+  instanceDisplayName,
+  instanceScanSummary,
+  type InstanceScanReport,
+  type ManagedInstance,
+} from "./instanceManagement";
 import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectExpansionCache";
 import {
   buildSessionMetaItems,
@@ -25,7 +32,12 @@ import {
 } from "./updatePrompt";
 import "./styles.css";
 
-type AppPage = "batch-edit" | "session-management" | "restore-backups" | "database-repair";
+type AppPage =
+  | "batch-edit"
+  | "session-management"
+  | "restore-backups"
+  | "database-repair"
+  | "instance-management";
 type SessionScope = "active" | "archived" | "favorite" | "all";
 type SessionCommand =
   | "archive_sessions"
@@ -245,6 +257,7 @@ const pageLabels: Record<AppPage, string> = {
   "session-management": "会话管理",
   "restore-backups": "恢复备份",
   "database-repair": "数据库修复",
+  "instance-management": "多实例管理",
 };
 
 const GITHUB_REPOSITORY_URL = "https://github.com/aisspire/codexSessionManager";
@@ -302,6 +315,11 @@ const state = {
   backupRows: [] as SessionBackupSummary[],
   selectedSnapshotBySession: {} as Record<string, number>,
   selectedBackupSessionIds: new Set<string>(),
+  managedInstances: [] as ManagedInstance[],
+  instanceScanPath: "",
+  instanceScanReport: null as InstanceScanReport | null,
+  instanceRenameId: null as number | null,
+  instanceRenameDraft: "",
   restorePreview: null as RestorePreview | null,
   syncStatus: "",
   codexWasRunning: null as boolean | null,
@@ -339,7 +357,9 @@ function render(options: RenderOptions = {}) {
   const groups = buildProjectGroups(state.sessions);
   const active = state.sessions.find((session) => session.id === state.activeId);
   const mainContent =
-    state.activePage === "database-repair"
+    state.activePage === "instance-management"
+      ? instanceTable()
+      : state.activePage === "database-repair"
       ? repairTable()
       : state.activePage === "restore-backups"
         ? backupTable()
@@ -399,6 +419,7 @@ function navigation() {
         ${pageNavButton("session-management")}
         ${pageNavButton("restore-backups")}
         ${pageNavButton("database-repair")}
+        ${pageNavButton("instance-management")}
       </nav>
       ${settingsPanel()}
     </aside>
@@ -431,7 +452,9 @@ function settingsPanel() {
 
 function pageHeader() {
   const description =
-    state.activePage === "batch-edit"
+    state.activePage === "instance-management"
+      ? "扫描并登记包含 config.toml 的实例目录；不会切换当前 Codex 主目录。"
+      : state.activePage === "batch-edit"
       ? "批量修改已选会话的名称前缀、提供方和项目路径。"
       : state.activePage === "session-management"
         ? "归档、活动、置顶、压缩上下文或删除已选会话。"
@@ -439,18 +462,28 @@ function pageHeader() {
           ? "按会话查看备份快照，恢复缺失或覆盖前自动创建预检备份。"
           : "预览 Codex 数据库与 JSONL 文件之间的不一致项，勾选后执行保守修复。";
   const total =
-    state.activePage === "database-repair"
+    state.activePage === "instance-management"
+      ? state.managedInstances.length
+      : state.activePage === "database-repair"
       ? state.repairItems.length
       : state.activePage === "restore-backups"
         ? state.backupRows.length
         : state.sessions.length;
-  const selected =
-    state.activePage === "database-repair"
+  const secondaryCount =
+    state.activePage === "instance-management"
+      ? state.managedInstances.filter((instance) => !instance.available).length
+      : state.activePage === "database-repair"
       ? state.selectedRepairIds.size
       : state.activePage === "restore-backups"
         ? state.selectedBackupSessionIds.size
         : state.selectedIds.size;
-  const totalLabel = state.activePage === "database-repair" ? "项目" : "会话";
+  const totalLabel =
+    state.activePage === "instance-management"
+      ? "已登记"
+      : state.activePage === "database-repair"
+        ? "项目"
+        : "会话";
+  const secondaryLabel = state.activePage === "instance-management" ? "已失效" : "已选";
   return `
     <header class="page-header">
       <div>
@@ -460,8 +493,8 @@ function pageHeader() {
       <div class="page-count">
         <strong>${total}</strong>
         <span>${totalLabel}</span>
-        <strong>${selected}</strong>
-        <span>已选</span>
+        <strong>${secondaryCount}</strong>
+        <span>${secondaryLabel}</span>
       </div>
     </header>
   `;
@@ -516,6 +549,9 @@ function settingsDrawer() {
 }
 
 function filterBar() {
+  if (state.activePage === "instance-management") {
+    return instanceFilterBar();
+  }
   if (state.activePage === "database-repair") {
     return repairFilterBar();
   }
@@ -549,6 +585,17 @@ function filterBar() {
   `;
 }
 
+function instanceFilterBar() {
+  return `
+    <section class="toolbar repair-filter-toolbar" aria-label="实例扫描">
+      <label>父路径
+        <input id="instance-scan-path" placeholder="例如 E:\\CodexInstances" value="${escapeHtml(state.instanceScanPath)}" ${state.busy.active ? "disabled" : ""} />
+      </label>
+      <button id="scan-managed-instances" class="primary" ${disabledWhenBusy()}>扫描并添加</button>
+    </section>
+  `;
+}
+
 function repairFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="数据库修复范围">
@@ -568,6 +615,9 @@ function backupFilterBar() {
 }
 
 function actionBar() {
+  if (state.activePage === "instance-management") {
+    return instanceActionBar();
+  }
   if (state.activePage === "database-repair") {
     return repairActionBar();
   }
@@ -575,6 +625,16 @@ function actionBar() {
     return backupActionBar();
   }
   return state.activePage === "batch-edit" ? batchEditBar() : sessionManagementBar();
+}
+
+function instanceActionBar() {
+  const scanSummary = instanceScanSummary(state.instanceScanReport);
+  return `
+    <section class="toolbar action-toolbar instance-action-toolbar" aria-label="实例管理说明">
+      <span class="repair-note">${escapeHtml(scanSummary)}</span>
+      <button id="refresh-managed-instances" ${disabledWhenBusy()}>检查实例状态</button>
+    </section>
+  `;
 }
 
 function repairActionBar() {
@@ -708,6 +768,53 @@ function backupTable() {
         }
       </div>
     </section>
+  `;
+}
+
+function instanceTable() {
+  return `
+    <section class="table-shell instance-table-shell" aria-label="多实例列表">
+      <div class="instance-table">
+        ${
+          state.managedInstances.length
+            ? state.managedInstances.map(instanceRow).join("")
+            : `<div class="empty-list">尚未登记实例。输入父路径并扫描其中的 config.toml。</div>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function instanceRow(instance: ManagedInstance) {
+  const renaming = state.instanceRenameId === instance.id;
+  const displayName = instanceDisplayName(instance);
+  const availability = instanceAvailability(instance);
+  return `
+    <article class="instance-row ${instance.available ? "" : "missing"}">
+      <div class="instance-main">
+        ${
+          renaming
+            ? `<label class="instance-rename-label">显示名称
+                <input id="instance-rename-input" value="${escapeHtml(state.instanceRenameDraft)}" aria-label="实例显示名称" ${state.busy.active ? "disabled" : ""} />
+              </label>`
+            : `<strong title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</strong>`
+        }
+        <code title="${escapeHtml(instance.path)}">${escapeHtml(instance.path)}</code>
+      </div>
+      <div class="instance-facts">
+        <span class="instance-status ${instance.available ? "available" : "missing"}">${availability.label}</span>
+        <span>${availability.detail}</span>
+      </div>
+      <div class="instance-controls">
+        ${
+          renaming
+            ? `<button data-save-managed-instance="${instance.id}" class="primary" ${disabledWhenBusy()}>保存</button>
+               <button data-cancel-managed-instance="${instance.id}" ${disabledWhenBusy()}>取消</button>`
+            : `<button data-rename-managed-instance="${instance.id}" ${disabledWhenBusy()}>重命名</button>`
+        }
+        <button data-open-managed-instance="${instance.id}" ${disabledWhenBusy()}>打开路径</button>
+      </div>
+    </article>
   `;
 }
 
@@ -867,7 +974,9 @@ function detailDrawer(session: SessionSummary) {
 function bindEvents(groups: ProjectGroup<SessionSummary>[]) {
   bindPageSwitching();
   bindFilters();
-  if (state.activePage === "database-repair") {
+  if (state.activePage === "instance-management") {
+    bindInstanceEvents();
+  } else if (state.activePage === "database-repair") {
     bindRepairEvents();
   } else if (state.activePage === "restore-backups") {
     bindBackupEvents();
@@ -940,6 +1049,65 @@ function bindSettingsEvents() {
   });
 }
 
+function bindInstanceEvents() {
+  document.querySelector<HTMLInputElement>("#instance-scan-path")?.addEventListener("input", (event) => {
+    state.instanceScanPath = (event.target as HTMLInputElement).value;
+  });
+  document.querySelector("#scan-managed-instances")?.addEventListener("click", () => {
+    void scanManagedInstances();
+  });
+  document.querySelector("#refresh-managed-instances")?.addEventListener("click", () => {
+    void loadManagedInstances(true);
+  });
+  document.querySelectorAll<HTMLElement>("[data-rename-managed-instance]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const instanceId = Number(button.dataset.renameManagedInstance);
+      if (Number.isSafeInteger(instanceId)) {
+        startManagedInstanceRename(instanceId);
+      }
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-save-managed-instance]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const instanceId = Number(button.dataset.saveManagedInstance);
+      if (Number.isSafeInteger(instanceId)) {
+        void saveManagedInstanceRename(instanceId);
+      }
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-cancel-managed-instance]").forEach((button) => {
+    button.addEventListener("click", () => {
+      cancelManagedInstanceRename(Number(button.dataset.cancelManagedInstance));
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-open-managed-instance]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const instanceId = Number(button.dataset.openManagedInstance);
+      if (Number.isSafeInteger(instanceId)) {
+        void openManagedInstancePath(instanceId);
+      }
+    });
+  });
+
+  const renameInput = document.querySelector<HTMLInputElement>("#instance-rename-input");
+  if (!renameInput) return;
+  renameInput.focus();
+  renameInput.select();
+  renameInput.addEventListener("input", () => {
+    state.instanceRenameDraft = renameInput.value;
+  });
+  renameInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && state.instanceRenameId != null) {
+      event.preventDefault();
+      void saveManagedInstanceRename(state.instanceRenameId);
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelManagedInstanceRename(state.instanceRenameId);
+    }
+  });
+}
+
 function bindRepairEvents() {
   const selectAll = document.querySelector<HTMLInputElement>("#select-all-repair-checkbox");
   if (selectAll) {
@@ -1003,6 +1171,9 @@ function bindPageSwitching() {
     button.addEventListener("click", () => {
       state.activePage = button.dataset.page as AppPage;
       render({ preserveTableScroll: true });
+      if (state.activePage === "instance-management") {
+        void loadManagedInstances(true);
+      }
       if (state.activePage === "database-repair" && state.repairItems.length === 0) {
         refreshDatabaseRepairs();
       }
@@ -1233,6 +1404,87 @@ async function loadSessions(activeId?: string) {
       ? activeId
       : state.sessions[0]?.id || "";
   state.detailOpen = Boolean(activeId && state.activeId);
+}
+
+async function loadManagedInstances(showStatus: boolean) {
+  try {
+    state.managedInstances = await invoke<ManagedInstance[]>("list_managed_instances");
+    if (showStatus) {
+      const unavailable = state.managedInstances.filter((instance) => !instance.available).length;
+      state.status = unavailable
+        ? `已检查 ${state.managedInstances.length} 个实例，其中 ${unavailable} 个已失效`
+        : `已检查 ${state.managedInstances.length} 个实例`;
+    }
+  } catch (error) {
+    state.status = `无法加载多实例列表：${String(error)}`;
+  }
+  render({ preserveTableScroll: true });
+}
+
+async function scanManagedInstances() {
+  const parentPath = state.instanceScanPath.trim();
+  if (!parentPath) {
+    state.status = "请输入要扫描的父路径";
+    render({ preserveTableScroll: true });
+    return;
+  }
+
+  await runWithProgress("正在扫描并登记实例", async () => {
+    const report = await invoke<InstanceScanReport>("scan_managed_instances", { parentPath });
+    state.instanceScanReport = report;
+    state.managedInstances = await invoke<ManagedInstance[]>("list_managed_instances");
+    state.instanceRenameId = null;
+    state.instanceRenameDraft = "";
+    state.status = `扫描完成：新增 ${report.added} 个，已存在 ${report.already_managed} 个，跳过 ${report.skipped} 个`;
+  });
+}
+
+function startManagedInstanceRename(instanceId: number) {
+  const instance = state.managedInstances.find((candidate) => candidate.id === instanceId);
+  if (!instance) return;
+  state.instanceRenameId = instanceId;
+  state.instanceRenameDraft = instanceDisplayName(instance);
+  render({ preserveTableScroll: true });
+}
+
+function cancelManagedInstanceRename(instanceId: number | null) {
+  if (instanceId == null || state.instanceRenameId !== instanceId) return;
+  state.instanceRenameId = null;
+  state.instanceRenameDraft = "";
+  render({ preserveTableScroll: true });
+}
+
+async function saveManagedInstanceRename(instanceId: number) {
+  const displayName = state.instanceRenameDraft.trim();
+  if (!displayName) {
+    state.status = "实例显示名称不能为空";
+    render({ preserveTableScroll: true });
+    return;
+  }
+
+  await runWithProgress("正在保存实例名称", async () => {
+    const renamed = await invoke<ManagedInstance>("rename_managed_instance", {
+      instanceId,
+      displayName,
+    });
+    state.managedInstances = state.managedInstances.map((instance) =>
+      instance.id === renamed.id ? renamed : instance,
+    );
+    state.instanceRenameId = null;
+    state.instanceRenameDraft = "";
+    state.status = `已将实例标记为“${displayName}”`;
+  });
+}
+
+async function openManagedInstancePath(instanceId: number) {
+  const instance = state.managedInstances.find((candidate) => candidate.id === instanceId);
+  try {
+    await invoke("open_managed_instance_path", { instanceId });
+    state.status = `已请求打开“${instance ? instanceDisplayName(instance) : "实例"}”的路径`;
+  } catch (error) {
+    state.status = `无法打开实例路径：${String(error)}`;
+  }
+  render({ preserveTableScroll: true });
 }
 
 async function mutateSelected(command: SessionCommand) {
@@ -2208,7 +2460,7 @@ function repairKindLabel(kind: DatabaseRepairKind) {
 }
 
 function readTableScroll() {
-  const table = document.querySelector<HTMLElement>(".table, .repair-table, .backup-table");
+  const table = document.querySelector<HTMLElement>(".table, .repair-table, .backup-table, .instance-table");
   return {
     left: table?.scrollLeft ?? 0,
     top: table?.scrollTop ?? 0,
@@ -2216,7 +2468,7 @@ function readTableScroll() {
 }
 
 function restoreTableScroll(scroll: { left: number; top: number }) {
-  const table = document.querySelector<HTMLElement>(".table, .repair-table, .backup-table");
+  const table = document.querySelector<HTMLElement>(".table, .repair-table, .backup-table, .instance-table");
   if (!table) return;
   table.scrollLeft = scroll.left;
   table.scrollTop = scroll.top;
@@ -2241,6 +2493,7 @@ function escapeHtml(value: string) {
 }
 
 render();
+void loadManagedInstances(false);
 void loadAppSettings(false);
 void checkForUpdates(false);
 document.addEventListener("keydown", (event) => {

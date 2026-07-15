@@ -9,6 +9,7 @@ pub mod cli;
 pub mod compact;
 pub mod db_repair;
 pub mod favorites;
+pub mod instance_registry;
 pub mod migrate;
 pub mod path_map;
 pub mod profile;

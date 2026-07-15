@@ -11,3 +11,4 @@ node_modules/
 !README.md
 !使用说明.md
 */dist
+AGENTS.md

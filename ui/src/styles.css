@@ -885,6 +885,117 @@ select {
   text-align: center;
 }
 
+.instance-action-toolbar {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.instance-table-shell {
+  background: #f3f6f8;
+}
+
+.instance-table {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  background: #f3f6f8;
+}
+
+.instance-row {
+  display: grid;
+  grid-template-columns: minmax(250px, 1.35fr) minmax(240px, 0.9fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-width: 760px;
+  border: 1px solid #d9e2ea;
+  border-radius: 7px;
+  padding: 12px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(17 24 39 / 4%);
+}
+
+.instance-row:hover {
+  border-color: #a8c6ca;
+}
+
+.instance-row.missing {
+  border-color: #d3dbe2;
+  color: #7c8997;
+  background: #eef2f5;
+}
+
+.instance-main {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.instance-main strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instance-row.missing .instance-main strong {
+  color: #697786;
+}
+
+.instance-main code {
+  min-width: 0;
+  color: #607083;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.instance-rename-label {
+  max-width: 100%;
+}
+
+.instance-facts {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: #607083;
+  font-size: 12px;
+}
+
+.instance-status {
+  justify-self: start;
+  border: 1px solid #b8d8c4;
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: #27603c;
+  background: #e8f4ec;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.instance-status.missing {
+  border-color: #c6cfd8;
+  color: #687786;
+  background: #e4e9ee;
+}
+
+.instance-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: end;
+  gap: 7px;
+}
+
+.instance-controls button:focus-visible,
+#instance-scan-path:focus-visible {
+  outline: 3px solid rgb(14 104 112 / 35%);
+  outline-offset: 2px;
+}
+
 .status {
   min-height: 44px;
   padding: 12px 20px;
@@ -1377,6 +1488,15 @@ dd {
 
   .table-shell {
     min-height: 180px;
+  }
+
+  .instance-row {
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+  }
+
+  .instance-controls {
+    justify-content: start;
   }
 
   .detail-drawer {

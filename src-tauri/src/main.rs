@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use codex_session_manager::backup_store::{
@@ -10,6 +11,9 @@ use codex_session_manager::db_repair::{
     self, DatabaseRepairApplyReport, DatabaseRepairOptions, DatabaseRepairPreview,
 };
 use codex_session_manager::favorites::{self, FavoritesFile};
+use codex_session_manager::instance_registry::{
+    self, InstanceScanReport, ManagedInstance,
+};
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
 use codex_session_manager::path_map::PathMap;
 use codex_session_manager::profile::CodexProfile;
@@ -250,6 +254,44 @@ fn apply_database_sync_from_local(
 }
 
 #[tauri::command]
+fn list_managed_instances(app: tauri::AppHandle) -> Result<Vec<ManagedInstance>, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    instance_registry::list_managed_instances(&database_path).map_err(format_error)
+}
+
+#[tauri::command]
+async fn scan_managed_instances(
+    app: tauri::AppHandle,
+    parent_path: String,
+) -> Result<InstanceScanReport, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_registry::scan_and_register(&database_path, Path::new(&parent_path)).map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("managed instance scan task failed: {error}"))?
+}
+
+#[tauri::command]
+fn rename_managed_instance(
+    app: tauri::AppHandle,
+    instance_id: i64,
+    display_name: String,
+) -> Result<ManagedInstance, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    instance_registry::rename_managed_instance(&database_path, instance_id, &display_name)
+        .map_err(format_error)
+}
+
+#[tauri::command]
+fn open_managed_instance_path(app: tauri::AppHandle, instance_id: i64) -> Result<(), String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    let path = instance_registry::managed_instance_path(&database_path, instance_id)
+        .map_err(format_error)?;
+    open_path_in_default_file_manager(&path)
+}
+
+#[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     if !is_allowed_external_url(&url) {
         return Err("external URL is not allowed".to_string());
@@ -285,12 +327,34 @@ fn is_allowed_external_url(url: &str) -> bool {
     url == PROJECT_GITHUB_URL
 }
 
+fn managed_instance_registry_database(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
+    let app_data_directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| anyhow::anyhow!("failed to resolve app data directory: {error}"))?;
+    Ok(managed_instance_registry_path(&app_data_directory))
+}
+
+fn managed_instance_registry_path(app_data_directory: &Path) -> PathBuf {
+    app_data_directory.join("managed-instances.sqlite")
+}
+
 fn open_url_in_default_browser(url: &str) -> Result<(), String> {
     let mut command = default_browser_command(url);
     command
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("failed to open default browser: {error}"))
+}
+
+fn open_path_in_default_file_manager(path: &Path) -> Result<(), String> {
+    let mut command = default_file_manager_command(path);
+    command.spawn().map(|_| ()).map_err(|error| {
+        format!(
+            "failed to open instance directory {}: {error}",
+            path.display()
+        )
+    })
 }
 
 fn default_browser_command(url: &str) -> Command {
@@ -313,6 +377,30 @@ fn default_browser_command(url: &str) -> Command {
     {
         let mut command = Command::new("xdg-open");
         command.arg(url);
+        command
+    }
+}
+
+fn default_file_manager_command(path: &Path) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer");
+        command.arg(path);
+        hide_child_console(&mut command);
+        command
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
         command
     }
 }
@@ -357,6 +445,10 @@ fn main() {
             apply_database_repairs,
             detect_codex_running,
             apply_database_sync_from_local,
+            list_managed_instances,
+            scan_managed_instances,
+            rename_managed_instance,
+            open_managed_instance_path,
             open_external_url
         ])
         .run(tauri::generate_context!())
@@ -378,5 +470,13 @@ mod tests {
         assert!(!is_allowed_external_url(
             "https://example.com/aisspire/codexSessionManager"
         ));
+    }
+
+    #[test]
+    fn keeps_managed_instance_registry_in_app_data_directory() {
+        assert_eq!(
+            managed_instance_registry_path(std::path::Path::new("app-data")),
+            std::path::PathBuf::from("app-data").join("managed-instances.sqlite")
+        );
     }
 }
