@@ -134,6 +134,8 @@ Codex Session Manager 会把 SQLite 中的 threads、`sessions/` 和 `archived_s
 
 “实例管理”页中的“本机同步工作区”用于在**同一台机器**的已登记 Codex 目录之间分发数据，不提供网络同步或自动执行。先选择一个源实例和一个或多个目标实例；会话必须每次手动勾选，可按标题、ID 或项目筛选。同步方案可复用源、目标和已选 `config.toml` 路径，但不会恢复会话勾选，也不会保存任何配置值。
 
+方案下拉框会始终保留“未选择已保存方案”的空方案，并提供内置的“自动：同步所有差异的非根配置”方案。选择它后，应用会异步比较源实例与所有可读取目标实例的 `config.toml`：只要某个非根叶子配置在任一目标中缺失或值不同，就自动选中该路径；顶层配置（例如 `model`）不会自动选中。源实例或目标实例变化时会重新计算，计算尚未结束时不能预览或执行同步；读取失败的目标会被跳过并在界面中提示。该内置方案不会保存为自定义方案，切换回空方案后仍可手动选择配置。
+
 执行前可先查看按目标汇总的预览。会话保持源端的活动或归档状态，并只在目标不存在时新增 JSONL；同内容会跳过，冲突会保留目标文件。工具只合并本次新增会话的 `session_index.jsonl` 条目，并只更新这些导入 ID 的 SQLite `threads` 记录，不会复制源数据库或修改目标的其他会话。项目路径按原样保留；如果当前环境中找不到该路径，结果会提示但不会阻止同步。
 
 配置同步没有删除语义：已选叶子路径由源覆盖目标，其他目标配置保持不变。请先确认所选项不包含不应分发的密钥或环境专属设置。执行同步时必须关闭所有 Codex 进程；前端和后端都会拒绝在检测到 Codex 正在运行时写入。一个目标失败不会阻断后续目标，结果会分别显示备份、冲突、跳过和失败信息。
@@ -258,32 +260,41 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\set-version.test
 发布前用版本脚本同步版本号，参数不带 `v`：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\set-version.ps1 0.2.0
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\set-version.ps1 <版本号>
 ```
 
 脚本会同步更新 `Cargo.toml`、`Cargo.lock`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`ui/package.json` 和 `ui/package-lock.json`。
 
-应用内更新使用 Tauri updater 和 GitHub Releases 的 `latest.json`。发布前需要手动完成签名配置：
+应用内更新使用 Tauri updater 和 GitHub Releases 的 `latest.json`。发布前需要完成签名配置：
 
-- 将 `src-tauri/tauri.conf.json` 中的 `__TAURI_UPDATER_PUBLIC_KEY__` 替换为 Tauri updater 公钥内容。
+- 确认 `src-tauri/tauri.conf.json` 中的 `plugins.updater.pubkey` 与发布私钥配对；仅在轮换密钥时更新公钥。
 - 在 GitHub 仓库 Secrets 中添加 `TAURI_SIGNING_PRIVATE_KEY`，值为 updater 私钥内容或私钥文件路径。
 - 如果私钥设置了密码，再添加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 
-不要把 updater 私钥提交到仓库。占位公钥未替换前，发布构建或应用内更新检查可能无法正常完成。
+不要把 updater 私钥提交到仓库。本地执行 Tauri 打包时也需要通过环境变量注入该私钥；缺少私钥时，MSI/NSIS 安装包可能已生成，但 updater 签名产物不会生成，不能作为正式发布附件。
 
-建议发布前至少执行：
+发布前按以下顺序执行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\set-version.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\tauri-config.tests.ps1
+cargo test
+npm --prefix ui run test:instance-management
+npm --prefix ui run test:path-picker
 npm --prefix ui run build
 ```
 
-确认版本文件和构建检查没问题后，创建发布提交并推送 tag：
+在已安全注入 `TAURI_SIGNING_PRIVATE_KEY`（及可选密码）的环境中，再生成并验证签名后的桌面安装包：
 
 ```powershell
-git tag v0.2.0
-git push origin v0.2.0
+npm --prefix ui run tauri -- build
+```
+
+确认版本文件、测试、签名产物和 `git diff --check` 均无误后，创建发布提交并推送 tag：
+
+```powershell
+git tag v<版本号>
+git push origin v<版本号>
 ```
 
 workflow 当前设置为 `releaseDraft: true`，生成的是草稿 Release。Actions 全部通过后，到 GitHub Releases 页面检查标题、说明和附件，再手动发布。

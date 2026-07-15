@@ -19,9 +19,15 @@ import {
 } from "./pathPicker";
 import {
   applyInstanceSyncPlan,
+  automaticNonRootDiffConfigPathKeys,
+  automaticNonRootDiffPlanExecutionBlockMessage,
+  automaticNonRootDiffPlanId,
+  automaticNonRootDiffPlanLabel,
   availableInstanceSyncTargets,
   configPathFromKey,
   configPathKey,
+  isAutomaticNonRootDiffPlan,
+  isCurrentAutomaticNonRootDiffContext,
   instanceAvailability,
   instanceDisplayName,
   instanceScanSummary,
@@ -275,6 +281,12 @@ interface InstanceSyncConfigDiff {
   targets: InstanceSyncConfigDiffTarget[];
 }
 
+interface InstanceSyncNonRootConfigDifferenceSelection {
+  source_instance_id: number;
+  config_paths: string[][];
+  unreadable_target_instance_ids: number[];
+}
+
 interface InstanceSyncConflict {
   session_id: string;
   reason: string;
@@ -439,6 +451,7 @@ const state = {
   instanceSyncSessionSearch: "",
   instanceSyncConfigPaths: [] as ConfigPathNode[],
   instanceSyncConfigPathKeys: new Set<string>(),
+  instanceSyncAutomaticConfigSelectionInFlight: false,
   instanceSyncPreview: null as InstanceSyncPreview | null,
   instanceSyncResult: null as InstanceSyncExecutionReport | null,
   restorePreview: null as RestorePreview | null,
@@ -471,6 +484,7 @@ const appRoot = app;
 const instanceSyncPreviewController = new DelayedInstanceSyncPreview();
 const instanceSyncPreviewInputMode = new InstanceSyncPreviewInputMode();
 const instanceSyncConfigDiffCache = new ExpiringInstanceSyncPreviewCache<InstanceSyncConfigDiff>();
+let automaticNonRootDiffSelectionRequestId = 0;
 let instanceSyncPreviewDescriptionTarget: HTMLElement | null = null;
 let lastRenderedPage: AppPage | null = null;
 
@@ -981,21 +995,30 @@ function instanceSyncWorkspace() {
   const selectedSessions = state.instanceSyncSessionIds.size;
   const selectedConfigs = state.instanceSyncConfigPathKeys.size;
   const selectedPlan = state.instanceSyncPlans.find((plan) => plan.id === state.instanceSyncPlanId);
+  const automaticPlanSelected = isAutomaticNonRootDiffPlan(state.instanceSyncPlanId);
+  const automaticPlanExecutionBlockMessage = automaticNonRootDiffPlanExecutionBlockMessage(
+    state.instanceSyncPlanId,
+    state.instanceSyncAutomaticConfigSelectionInFlight,
+  );
+  const configSelectionStatus = state.instanceSyncAutomaticConfigSelectionInFlight
+    ? `配置 ${selectedConfigs} · 正在计算差异`
+    : `配置 ${selectedConfigs}`;
 
   return `
     <section class="instance-sync-workspace" aria-label="本机同步工作区">
       <div class="instance-sync-heading">
         <div>
           <h2>本机同步工作区</h2>
-          <p>每次手动选择会话；同步方案只保存源、目标和配置路径，不保存会话选择或配置值。</p>
+          <p>每次手动选择会话；同步方案只保存源、目标和配置路径，不保存会话选择或配置值。内置自动方案不会保存。</p>
         </div>
-        <span class="instance-sync-selection">会话 ${selectedSessions} · 配置 ${selectedConfigs}</span>
+        <span class="instance-sync-selection" aria-live="polite">会话 ${selectedSessions} · ${configSelectionStatus}</span>
       </div>
 
       <div class="instance-sync-plan-row">
         <label>同步方案
           <select id="instance-sync-plan" ${disabledWhenBusy()}>
             <option value="">未选择已保存方案</option>
+            <option value="${automaticNonRootDiffPlanId}" ${automaticPlanSelected ? "selected" : ""}>${automaticNonRootDiffPlanLabel}</option>
             ${state.instanceSyncPlans
               .map(
                 (plan) =>
@@ -1082,8 +1105,8 @@ function instanceSyncWorkspace() {
       <div class="instance-sync-actions">
         <span>同步仅在本机目录之间进行。执行前会再次预检，并为每个目标创建元数据备份。</span>
         <div class="action-buttons">
-          <button id="preview-instance-sync" ${disabledWhenBusy()}>预览同步</button>
-          <button id="execute-instance-sync" class="primary" ${disabledWhenBusy()}>开始同步</button>
+          <button id="preview-instance-sync" ${disabledWhenBusy(Boolean(automaticPlanExecutionBlockMessage))}>预览同步</button>
+          <button id="execute-instance-sync" class="primary" ${disabledWhenBusy(Boolean(automaticPlanExecutionBlockMessage))}>开始同步</button>
         </div>
       </div>
       ${instanceSyncOutcomeMarkup()}
@@ -1764,7 +1787,12 @@ function bindInstanceEvents() {
         ? state.instanceSyncTargetIds.add(instanceId)
         : state.instanceSyncTargetIds.delete(instanceId);
       clearInstanceSyncOutcome();
-      render({ preserveTableScroll: true });
+      if (isAutomaticNonRootDiffPlan(state.instanceSyncPlanId)) {
+        invalidateAutomaticNonRootDiffConfigSelection();
+        void refreshAutomaticNonRootDiffConfigSelection();
+      } else {
+        render({ preserveTableScroll: true });
+      }
     });
   });
   document.querySelector<HTMLInputElement>("#instance-sync-session-search")?.addEventListener("input", (event) => {
@@ -1790,6 +1818,11 @@ function bindInstanceEvents() {
   document.querySelectorAll<HTMLInputElement>("[data-instance-sync-config]").forEach((checkbox) => {
     checkbox.addEventListener("change", () => {
       const key = checkbox.dataset.instanceSyncConfig || "";
+      if (isAutomaticNonRootDiffPlan(state.instanceSyncPlanId)) {
+        invalidateAutomaticNonRootDiffConfigSelection();
+        state.instanceSyncPlanId = null;
+        state.status = "已切换到手动选择；当前配置勾选保持不变";
+      }
       checkbox.checked
         ? state.instanceSyncConfigPathKeys.add(key)
         : state.instanceSyncConfigPathKeys.delete(key);
@@ -2269,6 +2302,10 @@ function reconcileInstanceSyncInstances() {
       (id) => availableIds.has(id) && id !== state.instanceSyncSourceId,
     ),
   );
+  if (isAutomaticNonRootDiffPlan(state.instanceSyncPlanId)) {
+    invalidateAutomaticNonRootDiffConfigSelection();
+    void refreshAutomaticNonRootDiffConfigSelection();
+  }
 }
 
 function startManagedInstanceRename(instanceId: number) {
@@ -2366,6 +2403,13 @@ function instanceSyncSelection() {
 }
 
 function currentInstanceSyncRequest() {
+  const automaticPlanExecutionBlockMessage = automaticNonRootDiffPlanExecutionBlockMessage(
+    state.instanceSyncPlanId,
+    state.instanceSyncAutomaticConfigSelectionInFlight,
+  );
+  if (automaticPlanExecutionBlockMessage) {
+    return { validation: automaticPlanExecutionBlockMessage, request: null };
+  }
   const initialSelection = instanceSyncSelection();
   const selection = {
     ...initialSelection,
@@ -2394,7 +2438,15 @@ function currentInstanceSyncRequest() {
 async function selectInstanceSyncPlan(planId: number | null) {
   dismissInstanceSyncPreview();
   clearInstanceSyncConfigDiffCache();
+  invalidateAutomaticNonRootDiffConfigSelection();
   state.instanceSyncPlanId = planId;
+  if (isAutomaticNonRootDiffPlan(planId)) {
+    state.instanceSyncPlanName = "";
+    state.instanceSyncConfigPathKeys.clear();
+    clearInstanceSyncOutcome();
+    void refreshAutomaticNonRootDiffConfigSelection();
+    return;
+  }
   const plan = state.instanceSyncPlans.find((candidate) => candidate.id === planId);
   if (!plan) {
     state.status = "未选择已保存同步方案；当前手动选择保持不变";
@@ -2418,6 +2470,7 @@ async function selectInstanceSyncPlan(planId: number | null) {
 async function selectInstanceSyncSource(sourceInstanceId: number | null, clearConfigSelections: boolean) {
   dismissInstanceSyncPreview();
   clearInstanceSyncConfigDiffCache();
+  invalidateAutomaticNonRootDiffConfigSelection();
   state.instanceSyncSourceId = sourceInstanceId;
   if (sourceInstanceId != null) {
     state.instanceSyncTargetIds.delete(sourceInstanceId);
@@ -2428,6 +2481,9 @@ async function selectInstanceSyncSource(sourceInstanceId: number | null, clearCo
   }
   clearInstanceSyncOutcome();
   await loadInstanceSyncSourceData(sourceInstanceId, clearConfigSelections);
+  if (isAutomaticNonRootDiffPlan(state.instanceSyncPlanId)) {
+    void refreshAutomaticNonRootDiffConfigSelection();
+  }
 }
 
 async function loadInstanceSyncSourceData(
@@ -2471,6 +2527,110 @@ function flattenInstanceSyncConfigPaths(nodes: ConfigPathNode[]): string[] {
   ]);
 }
 
+function invalidateAutomaticNonRootDiffConfigSelection() {
+  automaticNonRootDiffSelectionRequestId += 1;
+  state.instanceSyncAutomaticConfigSelectionInFlight = false;
+}
+
+function automaticNonRootDiffSelectionResponseIsCurrent(
+  requestId: number,
+  requestedPlanId: number | null,
+  requestedSourceInstanceId: number,
+  requestedTargetInstanceIds: number[],
+) {
+  return (
+    requestId === automaticNonRootDiffSelectionRequestId &&
+    isCurrentAutomaticNonRootDiffContext(
+      requestedPlanId,
+      requestedSourceInstanceId,
+      requestedTargetInstanceIds,
+      state.instanceSyncPlanId,
+      state.instanceSyncSourceId,
+      [...state.instanceSyncTargetIds],
+    )
+  );
+}
+
+async function refreshAutomaticNonRootDiffConfigSelection() {
+  const requestId = ++automaticNonRootDiffSelectionRequestId;
+  const requestedPlanId = state.instanceSyncPlanId;
+  const sourceInstanceId = state.instanceSyncSourceId;
+  const targetInstanceIds = [...state.instanceSyncTargetIds];
+  state.instanceSyncConfigPathKeys.clear();
+
+  if (
+    !isAutomaticNonRootDiffPlan(requestedPlanId) ||
+    sourceInstanceId == null ||
+    targetInstanceIds.length === 0
+  ) {
+    state.instanceSyncAutomaticConfigSelectionInFlight = false;
+    if (isAutomaticNonRootDiffPlan(requestedPlanId)) {
+      state.status = "请选择源实例和至少一个目标实例后自动选择差异配置";
+    }
+    render({ preserveTableScroll: true });
+    return;
+  }
+
+  state.instanceSyncAutomaticConfigSelectionInFlight = true;
+  state.status = "正在计算非根配置差异...";
+  render({ preserveTableScroll: true });
+  try {
+    const selection = await invoke<InstanceSyncNonRootConfigDifferenceSelection>(
+      "select_instance_sync_non_root_config_differences",
+      {
+        request: {
+          source_instance_id: sourceInstanceId,
+          target_instance_ids: targetInstanceIds,
+        },
+      },
+    );
+    if (
+      !automaticNonRootDiffSelectionResponseIsCurrent(
+        requestId,
+        requestedPlanId,
+        sourceInstanceId,
+        targetInstanceIds,
+      )
+    ) {
+      return;
+    }
+    const returnedKeys = automaticNonRootDiffConfigPathKeys(selection.config_paths);
+    const selectableKeys = new Set(flattenInstanceSyncConfigPaths(state.instanceSyncConfigPaths));
+    state.instanceSyncConfigPathKeys = new Set(
+      selectableKeys.size ? returnedKeys.filter((key) => selectableKeys.has(key)) : returnedKeys,
+    );
+    const unreadable = selection.unreadable_target_instance_ids.length;
+    state.status = unreadable
+      ? `已自动选择 ${state.instanceSyncConfigPathKeys.size} 个差异配置；${unreadable} 个目标无法读取，未据此自动选择`
+      : `已自动选择 ${state.instanceSyncConfigPathKeys.size} 个差异配置`;
+  } catch (error) {
+    if (
+      !automaticNonRootDiffSelectionResponseIsCurrent(
+        requestId,
+        requestedPlanId,
+        sourceInstanceId,
+        targetInstanceIds,
+      )
+    ) {
+      return;
+    }
+    state.instanceSyncConfigPathKeys.clear();
+    state.status = `无法自动选择差异配置：${String(error)}`;
+  } finally {
+    if (
+      automaticNonRootDiffSelectionResponseIsCurrent(
+        requestId,
+        requestedPlanId,
+        sourceInstanceId,
+        targetInstanceIds,
+      )
+    ) {
+      state.instanceSyncAutomaticConfigSelectionInFlight = false;
+      render({ preserveTableScroll: true });
+    }
+  }
+}
+
 function filteredInstanceSyncSessions() {
   const query = state.instanceSyncSessionSearch.trim().toLocaleLowerCase();
   if (!query) return state.instanceSyncSessions;
@@ -2487,6 +2647,7 @@ async function loadInstanceSyncPlans() {
   state.instanceSyncPlans = await invoke<InstanceSyncPlan[]>("list_instance_sync_plans");
   if (
     state.instanceSyncPlanId != null &&
+    !isAutomaticNonRootDiffPlan(state.instanceSyncPlanId) &&
     !state.instanceSyncPlans.some((plan) => plan.id === state.instanceSyncPlanId)
   ) {
     state.instanceSyncPlanId = null;
@@ -2521,7 +2682,7 @@ async function saveInstanceSyncPlan() {
   await runWithProgress("正在保存同步方案", async () => {
     const saved = await invoke<InstanceSyncPlan>("save_instance_sync_plan", {
       draft: {
-        id: state.instanceSyncPlanId,
+        id: isAutomaticNonRootDiffPlan(state.instanceSyncPlanId) ? null : state.instanceSyncPlanId,
         name,
         source_instance_id: sourceInstanceId,
         target_instance_ids: targetInstanceIds,

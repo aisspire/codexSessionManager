@@ -5,9 +5,9 @@ use std::path::Path;
 use codex_session_manager::instance_registry::{list_managed_instances, scan_and_register};
 use codex_session_manager::instance_sync::{
     execute_instance_sync_with_guard, list_instance_sync_source_data, preview_instance_sync,
-    preview_instance_sync_config_diff, ConfigPathNode, InstanceSyncConfigDiffRequest,
-    InstanceSyncConfigDiffStatus, InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncRequest,
-    select_instance_sync_non_root_config_differences,
+    preview_instance_sync_config_diff, select_instance_sync_non_root_config_differences,
+    ConfigPathNode, InstanceSyncConfigDiffRequest, InstanceSyncConfigDiffStatus,
+    InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncRequest,
 };
 use codex_session_manager::state_db::StateDb;
 use rusqlite::{params, Connection};
@@ -589,9 +589,7 @@ enabled = true
         ],
     );
     assert_eq!(selection.unreadable_target_instance_ids, vec![unreadable]);
-    assert!(!selection
-        .config_paths
-        .contains(&vec!["model".to_string()]));
+    assert!(!selection.config_paths.contains(&vec!["model".to_string()]));
     assert_eq!(
         fs::read_to_string(changed_directory.join("config.toml")).unwrap(),
         changed_config,

@@ -32,6 +32,9 @@ export interface InstanceSyncSelection {
   sessionIds: string[];
 }
 
+export const automaticNonRootDiffPlanId = -1;
+export const automaticNonRootDiffPlanLabel = "自动：同步所有差异的非根配置";
+
 export interface InstanceSyncTargetResultLike {
   sessions_added: string[];
   sessions_skipped: string[];
@@ -84,6 +87,39 @@ export function configPathFromKey(key: string) {
   } catch {
     return [];
   }
+}
+
+export function isAutomaticNonRootDiffPlan(planId: number | null) {
+  return planId === automaticNonRootDiffPlanId;
+}
+
+export function automaticNonRootDiffPlanExecutionBlockMessage(
+  planId: number | null,
+  selectionInFlight: boolean,
+) {
+  return isAutomaticNonRootDiffPlan(planId) && selectionInFlight
+    ? "正在计算非根配置差异，请等待自动选择完成"
+    : null;
+}
+
+export function automaticNonRootDiffConfigPathKeys(configPaths: string[][]) {
+  return configPaths.map(configPathKey);
+}
+
+export function isCurrentAutomaticNonRootDiffContext(
+  requestedPlanId: number | null,
+  requestedSourceInstanceId: number,
+  requestedTargetInstanceIds: number[],
+  currentPlanId: number | null,
+  currentSourceInstanceId: number | null,
+  currentTargetInstanceIds: number[],
+) {
+  return (
+    requestedPlanId === currentPlanId &&
+    requestedSourceInstanceId === currentSourceInstanceId &&
+    requestedTargetInstanceIds.length === currentTargetInstanceIds.length &&
+    requestedTargetInstanceIds.every((targetId, index) => targetId === currentTargetInstanceIds[index])
+  );
 }
 
 export function applyInstanceSyncPlan(plan: InstanceSyncPlan): InstanceSyncSelection {

@@ -1,7 +1,12 @@
 import {
   applyInstanceSyncPlan,
+  automaticNonRootDiffConfigPathKeys,
+  automaticNonRootDiffPlanExecutionBlockMessage,
+  automaticNonRootDiffPlanId,
   availableInstanceSyncTargets,
   configPathKey,
+  isAutomaticNonRootDiffPlan,
+  isCurrentAutomaticNonRootDiffContext,
   instanceAvailability,
   instanceSyncTargetSummary,
   managedInstanceDeleteConfirmation,
@@ -104,6 +109,66 @@ expectEqual(
     sessionIds: [],
   },
   "loading a sync plan restores only instance and config choices, never prior session choices",
+);
+expectEqual(
+  isAutomaticNonRootDiffPlan(automaticNonRootDiffPlanId),
+  true,
+  "recognizes the built-in non-root difference plan",
+);
+expectEqual(
+  isAutomaticNonRootDiffPlan(null),
+  false,
+  "keeps the empty plan distinct from the built-in plan",
+);
+expectEqual(
+  automaticNonRootDiffPlanExecutionBlockMessage(automaticNonRootDiffPlanId, true),
+  "正在计算非根配置差异，请等待自动选择完成",
+  "blocks preview and execution while the built-in plan is still calculating",
+);
+expectEqual(
+  automaticNonRootDiffPlanExecutionBlockMessage(automaticNonRootDiffPlanId, false),
+  null,
+  "allows preview and execution after the built-in plan finishes calculating",
+);
+expectEqual(
+  automaticNonRootDiffPlanExecutionBlockMessage(null, true),
+  null,
+  "does not block manually selected sync configurations",
+);
+expectEqual(
+  automaticNonRootDiffConfigPathKeys([
+    ["model_providers", "office", "api_key"],
+    ["features", "enabled"],
+  ]),
+  [
+    configPathKey(["model_providers", "office", "api_key"]),
+    configPathKey(["features", "enabled"]),
+  ],
+  "converts backend-selected paths into config checkbox keys",
+);
+expectEqual(
+  isCurrentAutomaticNonRootDiffContext(
+    automaticNonRootDiffPlanId,
+    availableInstance.id,
+    [secondAvailableInstance.id, 3],
+    automaticNonRootDiffPlanId,
+    availableInstance.id,
+    [3, secondAvailableInstance.id],
+  ),
+  false,
+  "rejects an automatic selection response after target order changes",
+);
+expectEqual(
+  isCurrentAutomaticNonRootDiffContext(
+    automaticNonRootDiffPlanId,
+    availableInstance.id,
+    [secondAvailableInstance.id],
+    automaticNonRootDiffPlanId,
+    availableInstance.id,
+    [secondAvailableInstance.id],
+  ),
+  true,
+  "accepts the latest matching automatic selection response",
 );
 expectEqual(
   validateInstanceSyncSelection({
