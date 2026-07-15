@@ -3,7 +3,9 @@ use std::path::Path;
 
 use codex_session_manager::instance_registry::{
     list_managed_instances, managed_instance_path, rename_managed_instance, scan_and_register,
+    soft_delete_managed_instance,
 };
+use rusqlite::{params, Connection};
 use tempfile::tempdir;
 
 fn write_config(directory: &Path) {
@@ -78,6 +80,88 @@ fn registry_persists_alias_and_marks_missing_config_as_unavailable() {
     assert_eq!(renamed.display_name.as_deref(), Some("办公账号"));
     assert_eq!(persisted.display_name.as_deref(), Some("办公账号"));
     assert!(!persisted.available);
+}
+
+#[test]
+fn logical_delete_hides_instance_and_rescan_reactivates_it_with_its_alias() {
+    let dir = tempdir().unwrap();
+    let instance_directory = dir.path().join("instance");
+    let database_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&instance_directory);
+
+    scan_and_register(&database_path, dir.path()).unwrap();
+    let instance = list_managed_instances(&database_path)
+        .unwrap()
+        .pop()
+        .unwrap();
+    rename_managed_instance(&database_path, instance.id, "保留的实例名称").unwrap();
+
+    soft_delete_managed_instance(&database_path, instance.id).unwrap();
+
+    assert!(list_managed_instances(&database_path).unwrap().is_empty());
+    assert!(managed_instance_path(&database_path, instance.id).is_err());
+    assert!(rename_managed_instance(&database_path, instance.id, "不应保存").is_err());
+
+    let rescan = scan_and_register(&database_path, dir.path()).unwrap();
+    let reactivated = list_managed_instances(&database_path)
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    assert_eq!(rescan.added, 0);
+    assert_eq!(rescan.reactivated, 1);
+    assert_eq!(reactivated.id, instance.id);
+    assert_eq!(reactivated.display_name.as_deref(), Some("保留的实例名称"));
+    assert_eq!(reactivated.path, registered_path(&instance_directory));
+}
+
+#[test]
+fn logical_delete_migrates_an_existing_registry_without_losing_metadata() {
+    let dir = tempdir().unwrap();
+    let instance_directory = dir.path().join("instance");
+    let database_path = dir.path().join("instances.sqlite");
+    write_config(&instance_directory);
+    let stored_path = registered_path(&instance_directory);
+
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE managed_instances (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                display_name TEXT,
+                added_at_unix INTEGER NOT NULL,
+                last_seen_at_unix INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+    connection
+        .execute(
+            r#"
+            INSERT INTO managed_instances (path, display_name, added_at_unix, last_seen_at_unix)
+            VALUES (?1, ?2, 1, 2)
+            "#,
+            params![stored_path, "旧实例名称"],
+        )
+        .unwrap();
+    drop(connection);
+
+    soft_delete_managed_instance(&database_path, 1).unwrap();
+
+    assert!(list_managed_instances(&database_path).unwrap().is_empty());
+    let connection = Connection::open(&database_path).unwrap();
+    let (path, display_name, deleted_at): (String, Option<String>, Option<i64>) = connection
+        .query_row(
+            "SELECT path, display_name, deleted_at_unix FROM managed_instances WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(path, registered_path(&instance_directory));
+    assert_eq!(display_name.as_deref(), Some("旧实例名称"));
+    assert!(deleted_at.is_some());
 }
 
 #[test]

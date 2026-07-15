@@ -23,6 +23,7 @@ pub struct ManagedInstance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct InstanceScanReport {
     pub added: usize,
+    pub reactivated: usize,
     pub already_managed: usize,
     pub skipped: usize,
 }
@@ -81,30 +82,43 @@ pub fn scan_and_register(database_path: &Path, parent_path: &Path) -> Result<Ins
             }
         };
         let instance_path = instance_path.to_string_lossy().into_owned();
-        let exists = transaction
+        let deleted_at = transaction
             .query_row(
-                "SELECT 1 FROM managed_instances WHERE path = ?1 LIMIT 1",
+                "SELECT deleted_at_unix FROM managed_instances WHERE path = ?1 LIMIT 1",
                 [&instance_path],
-                |_| Ok(()),
+                |row| row.get::<_, Option<i64>>(0),
             )
-            .optional()?
-            .is_some();
+            .optional()?;
 
-        if exists {
-            transaction.execute(
-                "UPDATE managed_instances SET last_seen_at_unix = ?1 WHERE path = ?2",
-                params![now, instance_path],
-            )?;
-            report.already_managed += 1;
-        } else {
-            transaction.execute(
-                r#"
-                INSERT INTO managed_instances (path, display_name, added_at_unix, last_seen_at_unix)
-                VALUES (?1, NULL, ?2, ?2)
-                "#,
-                params![instance_path, now],
-            )?;
-            report.added += 1;
+        match deleted_at {
+            Some(Some(_)) => {
+                transaction.execute(
+                    r#"
+                    UPDATE managed_instances
+                    SET deleted_at_unix = NULL, last_seen_at_unix = ?1
+                    WHERE path = ?2
+                    "#,
+                    params![now, instance_path],
+                )?;
+                report.reactivated += 1;
+            }
+            Some(None) => {
+                transaction.execute(
+                    "UPDATE managed_instances SET last_seen_at_unix = ?1 WHERE path = ?2",
+                    params![now, instance_path],
+                )?;
+                report.already_managed += 1;
+            }
+            None => {
+                transaction.execute(
+                    r#"
+                    INSERT INTO managed_instances (path, display_name, added_at_unix, last_seen_at_unix)
+                    VALUES (?1, NULL, ?2, ?2)
+                    "#,
+                    params![instance_path, now],
+                )?;
+                report.added += 1;
+            }
         }
     }
 
@@ -120,6 +134,7 @@ pub fn list_managed_instances(database_path: &Path) -> Result<Vec<ManagedInstanc
         r#"
         SELECT id, path, display_name, added_at_unix, last_seen_at_unix
         FROM managed_instances
+        WHERE deleted_at_unix IS NULL
         ORDER BY
             CASE WHEN COALESCE(TRIM(display_name), '') = '' THEN path ELSE display_name END COLLATE NOCASE,
             path COLLATE NOCASE
@@ -153,7 +168,11 @@ pub fn rename_managed_instance(
 
     let connection = open_registry(database_path)?;
     let changed = connection.execute(
-        "UPDATE managed_instances SET display_name = ?1 WHERE id = ?2",
+        r#"
+        UPDATE managed_instances
+        SET display_name = ?1
+        WHERE id = ?2 AND deleted_at_unix IS NULL
+        "#,
         params![display_name, instance_id],
     )?;
     if changed == 0 {
@@ -163,11 +182,28 @@ pub fn rename_managed_instance(
     read_instance(&connection, instance_id)
 }
 
+pub fn soft_delete_managed_instance(database_path: &Path, instance_id: i64) -> Result<()> {
+    let connection = open_registry(database_path)?;
+    let deleted_at_unix = OffsetDateTime::now_utc().unix_timestamp();
+    let changed = connection.execute(
+        r#"
+        UPDATE managed_instances
+        SET deleted_at_unix = ?1
+        WHERE id = ?2 AND deleted_at_unix IS NULL
+        "#,
+        params![deleted_at_unix, instance_id],
+    )?;
+    if changed == 0 {
+        bail!("managed instance {instance_id} does not exist");
+    }
+    Ok(())
+}
+
 pub fn managed_instance_path(database_path: &Path, instance_id: i64) -> Result<PathBuf> {
     let connection = open_registry(database_path)?;
     let path = connection
         .query_row(
-            "SELECT path FROM managed_instances WHERE id = ?1",
+            "SELECT path FROM managed_instances WHERE id = ?1 AND deleted_at_unix IS NULL",
             [instance_id],
             |row| row.get::<_, String>(0),
         )
@@ -208,11 +244,38 @@ fn open_registry(database_path: &Path) -> Result<Connection> {
             path TEXT NOT NULL UNIQUE,
             display_name TEXT,
             added_at_unix INTEGER NOT NULL,
-            last_seen_at_unix INTEGER NOT NULL
+            last_seen_at_unix INTEGER NOT NULL,
+            deleted_at_unix INTEGER
         );
         "#,
     )?;
+    ensure_deleted_at_column(&connection)?;
     Ok(connection)
+}
+
+fn ensure_deleted_at_column(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(managed_instances)")?;
+    let mut rows = statement.query([])?;
+    let mut has_deleted_at_column = false;
+    while let Some(row) = rows.next()? {
+        let column_name = row.get::<_, String>(1)?;
+        if column_name == "deleted_at_unix" {
+            has_deleted_at_column = true;
+            break;
+        }
+    }
+    drop(rows);
+    drop(statement);
+
+    if !has_deleted_at_column {
+        connection
+            .execute(
+                "ALTER TABLE managed_instances ADD COLUMN deleted_at_unix INTEGER",
+                [],
+            )
+            .context("failed to migrate managed instance registry for logical deletion")?;
+    }
+    Ok(())
 }
 
 fn read_instance(connection: &Connection, instance_id: i64) -> Result<ManagedInstance> {
@@ -221,7 +284,7 @@ fn read_instance(connection: &Connection, instance_id: i64) -> Result<ManagedIns
             r#"
             SELECT id, path, display_name, added_at_unix, last_seen_at_unix
             FROM managed_instances
-            WHERE id = ?1
+            WHERE id = ?1 AND deleted_at_unix IS NULL
             "#,
             [instance_id],
             |row| {

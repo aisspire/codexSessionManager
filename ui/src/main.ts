@@ -14,6 +14,7 @@ import {
   instanceAvailability,
   instanceDisplayName,
   instanceScanSummary,
+  managedInstanceDeleteConfirmation,
   type InstanceScanReport,
   type ManagedInstance,
 } from "./instanceManagement";
@@ -813,6 +814,7 @@ function instanceRow(instance: ManagedInstance) {
             : `<button data-rename-managed-instance="${instance.id}" ${disabledWhenBusy()}>重命名</button>`
         }
         <button data-open-managed-instance="${instance.id}" ${disabledWhenBusy()}>打开路径</button>
+        <button data-delete-managed-instance="${instance.id}" class="danger" ${disabledWhenBusy(renaming)}>删除记录</button>
       </div>
     </article>
   `;
@@ -1085,6 +1087,14 @@ function bindInstanceEvents() {
       const instanceId = Number(button.dataset.openManagedInstance);
       if (Number.isSafeInteger(instanceId)) {
         void openManagedInstancePath(instanceId);
+      }
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-delete-managed-instance]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const instanceId = Number(button.dataset.deleteManagedInstance);
+      if (Number.isSafeInteger(instanceId)) {
+        void deleteManagedInstance(instanceId);
       }
     });
   });
@@ -1435,7 +1445,8 @@ async function scanManagedInstances() {
     state.managedInstances = await invoke<ManagedInstance[]>("list_managed_instances");
     state.instanceRenameId = null;
     state.instanceRenameDraft = "";
-    state.status = `扫描完成：新增 ${report.added} 个，已存在 ${report.already_managed} 个，跳过 ${report.skipped} 个`;
+    const reactivated = report.reactivated ? `，重新登记 ${report.reactivated} 个` : "";
+    state.status = `扫描完成：新增 ${report.added} 个${reactivated}，已存在 ${report.already_managed} 个，跳过 ${report.skipped} 个`;
   });
 }
 
@@ -1485,6 +1496,21 @@ async function openManagedInstancePath(instanceId: number) {
     state.status = `无法打开实例路径：${String(error)}`;
   }
   render({ preserveTableScroll: true });
+}
+
+async function deleteManagedInstance(instanceId: number) {
+  const instance = state.managedInstances.find((candidate) => candidate.id === instanceId);
+  if (!instance || !window.confirm(managedInstanceDeleteConfirmation(instance))) return;
+
+  await runWithProgress("正在删除实例登记记录", async () => {
+    await invoke("delete_managed_instance", { instanceId });
+    state.managedInstances = state.managedInstances.filter((candidate) => candidate.id !== instanceId);
+    if (state.instanceRenameId === instanceId) {
+      state.instanceRenameId = null;
+      state.instanceRenameDraft = "";
+    }
+    state.status = `已删除“${instanceDisplayName(instance)}”的登记记录；文件夹和 config.toml 未被修改`;
+  });
 }
 
 async function mutateSelected(command: SessionCommand) {

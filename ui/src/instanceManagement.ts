@@ -9,6 +9,7 @@ export interface ManagedInstance {
 
 export interface InstanceScanReport {
   added: number;
+  reactivated: number;
   already_managed: number;
   skipped: number;
 }
@@ -24,9 +25,15 @@ export function instanceAvailability(instance: ManagedInstance) {
 }
 
 export function instanceScanSummary(report: InstanceScanReport | null) {
-  return report
-    ? `最近扫描：新增 ${report.added} 个 · 已存在 ${report.already_managed} 个 · 跳过 ${report.skipped} 个`
-    : "扫描只会登记路径，不会切换当前 Codex 主目录或修改实例配置。";
+  if (!report) {
+    return "扫描只会登记路径，不会切换当前 Codex 主目录或修改实例配置。";
+  }
+  const reactivated = report.reactivated ? ` · 重新登记 ${report.reactivated} 个` : "";
+  return `最近扫描：新增 ${report.added} 个${reactivated} · 已存在 ${report.already_managed} 个 · 跳过 ${report.skipped} 个`;
+}
+
+export function managedInstanceDeleteConfirmation(instance: ManagedInstance) {
+  return `删除“${instanceDisplayName(instance)}”的登记记录？此操作不会删除文件夹或 config.toml。`;
 }
 
 function instanceDefaultName(path: string) {
