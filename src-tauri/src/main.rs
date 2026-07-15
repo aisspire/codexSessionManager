@@ -12,7 +12,11 @@ use codex_session_manager::db_repair::{
 };
 use codex_session_manager::favorites::{self, FavoritesFile};
 use codex_session_manager::instance_registry::{
-    self, InstanceScanReport, ManagedInstance,
+    self, InstanceScanReport, InstanceSyncPlan, InstanceSyncPlanDraft, ManagedInstance,
+};
+use codex_session_manager::instance_sync::{
+    self, InstanceSyncExecutionReport, InstanceSyncPreview, InstanceSyncRequest,
+    InstanceSyncSourceData,
 };
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
 use codex_session_manager::path_map::PathMap;
@@ -254,9 +258,13 @@ fn apply_database_sync_from_local(
 }
 
 #[tauri::command]
-fn list_managed_instances(app: tauri::AppHandle) -> Result<Vec<ManagedInstance>, String> {
+async fn list_managed_instances(app: tauri::AppHandle) -> Result<Vec<ManagedInstance>, String> {
     let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    instance_registry::list_managed_instances(&database_path).map_err(format_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_registry::list_managed_instances(&database_path).map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("managed instance list task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -266,7 +274,8 @@ async fn scan_managed_instances(
 ) -> Result<InstanceScanReport, String> {
     let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
     tauri::async_runtime::spawn_blocking(move || {
-        instance_registry::scan_and_register(&database_path, Path::new(&parent_path)).map_err(format_error)
+        instance_registry::scan_and_register(&database_path, Path::new(&parent_path))
+            .map_err(format_error)
     })
     .await
     .map_err(|error| format!("managed instance scan task failed: {error}"))?
@@ -301,6 +310,79 @@ fn open_managed_instance_path(app: tauri::AppHandle, instance_id: i64) -> Result
     let path = instance_registry::managed_instance_path(&database_path, instance_id)
         .map_err(format_error)?;
     open_path_in_default_file_manager(&path)
+}
+
+#[tauri::command]
+async fn list_instance_sync_plans(app: tauri::AppHandle) -> Result<Vec<InstanceSyncPlan>, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_registry::list_instance_sync_plans(&database_path).map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("instance sync plan list task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn save_instance_sync_plan(
+    app: tauri::AppHandle,
+    draft: InstanceSyncPlanDraft,
+) -> Result<InstanceSyncPlan, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_registry::save_instance_sync_plan(&database_path, &draft).map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("instance sync plan save task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn delete_instance_sync_plan(app: tauri::AppHandle, plan_id: i64) -> Result<(), String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_registry::delete_instance_sync_plan(&database_path, plan_id).map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("instance sync plan delete task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn list_instance_sync_source_data(
+    app: tauri::AppHandle,
+    source_instance_id: i64,
+) -> Result<InstanceSyncSourceData, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_sync::list_instance_sync_source_data(&database_path, source_instance_id)
+            .map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("instance sync source data task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn preview_instance_sync(
+    app: tauri::AppHandle,
+    request: InstanceSyncRequest,
+) -> Result<InstanceSyncPreview, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_sync::preview_instance_sync(&database_path, &request).map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("instance sync preview task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn execute_instance_sync(
+    app: tauri::AppHandle,
+    request: InstanceSyncRequest,
+) -> Result<InstanceSyncExecutionReport, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_sync::execute_instance_sync(&database_path, &request).map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("instance sync execution task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -355,7 +437,8 @@ fn delete_managed_instance_from_registry(
     database_path: &Path,
     instance_id: i64,
 ) -> Result<(), String> {
-    instance_registry::soft_delete_managed_instance(database_path, instance_id).map_err(format_error)
+    instance_registry::soft_delete_managed_instance(database_path, instance_id)
+        .map_err(format_error)
 }
 
 fn ignore_managed_instance_from_registry(
@@ -478,6 +561,12 @@ fn main() {
             delete_managed_instance,
             ignore_managed_instance,
             open_managed_instance_path,
+            list_instance_sync_plans,
+            save_instance_sync_plan,
+            delete_instance_sync_plan,
+            list_instance_sync_source_data,
+            preview_instance_sync,
+            execute_instance_sync,
             open_external_url
         ])
         .run(tauri::generate_context!())
@@ -522,7 +611,11 @@ mod tests {
         let instance_directory = test_directory.join("instance");
         let database_path = test_directory.join("managed-instances.sqlite");
         std::fs::create_dir_all(&instance_directory).unwrap();
-        std::fs::write(instance_directory.join("config.toml"), "model = \"gpt-5\"\n").unwrap();
+        std::fs::write(
+            instance_directory.join("config.toml"),
+            "model = \"gpt-5\"\n",
+        )
+        .unwrap();
 
         instance_registry::scan_and_register(&database_path, &test_directory).unwrap();
         let instance = instance_registry::list_managed_instances(&database_path)
@@ -553,7 +646,11 @@ mod tests {
         let instance_directory = test_directory.join("instance");
         let database_path = test_directory.join("managed-instances.sqlite");
         std::fs::create_dir_all(&instance_directory).unwrap();
-        std::fs::write(instance_directory.join("config.toml"), "model = \"gpt-5\"\n").unwrap();
+        std::fs::write(
+            instance_directory.join("config.toml"),
+            "model = \"gpt-5\"\n",
+        )
+        .unwrap();
 
         instance_registry::scan_and_register(&database_path, &test_directory).unwrap();
         let instance = instance_registry::list_managed_instances(&database_path)

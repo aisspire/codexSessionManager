@@ -2,8 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use codex_session_manager::instance_registry::{
-    list_managed_instances, managed_instance_path, permanently_ignore_managed_instance,
-    rename_managed_instance, scan_and_register, soft_delete_managed_instance,
+    delete_instance_sync_plan, list_instance_sync_plans, list_managed_instances,
+    managed_instance_path, permanently_ignore_managed_instance, rename_managed_instance,
+    save_instance_sync_plan, scan_and_register, soft_delete_managed_instance,
+    InstanceSyncPlanDraft,
 };
 use rusqlite::{params, Connection};
 use tempfile::tempdir;
@@ -56,6 +58,115 @@ fn scan_registers_config_parent_directories_without_duplicates() {
     assert!(instances
         .iter()
         .any(|instance| instance.path == registered_path(&second_instance)));
+}
+
+#[test]
+fn saves_sync_plan_without_session_choices_or_configuration_values() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let target_directory = dir.path().join("target");
+    let database_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&source_directory);
+    write_config(&target_directory);
+    scan_and_register(&database_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&database_path).unwrap();
+    let source = instances
+        .iter()
+        .find(|instance| instance.path == registered_path(&source_directory))
+        .unwrap();
+    let target = instances
+        .iter()
+        .find(|instance| instance.path == registered_path(&target_directory))
+        .unwrap();
+
+    let saved = save_instance_sync_plan(
+        &database_path,
+        &InstanceSyncPlanDraft {
+            id: None,
+            name: "办公室同步".to_string(),
+            source_instance_id: source.id,
+            target_instance_ids: vec![target.id],
+            config_paths: vec![
+                vec!["model".to_string()],
+                vec!["model_providers".to_string(), "office".to_string()],
+            ],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(saved.name, "办公室同步");
+    assert_eq!(saved.source_instance_id, source.id);
+    assert_eq!(saved.target_instance_ids, vec![target.id]);
+    assert_eq!(
+        saved.config_paths,
+        vec![
+            vec!["model".to_string()],
+            vec!["model_providers".to_string(), "office".to_string()]
+        ]
+    );
+    assert!(saved.created_at_unix > 0);
+    assert_eq!(
+        list_instance_sync_plans(&database_path).unwrap(),
+        vec![saved]
+    );
+}
+
+#[test]
+fn updates_and_deletes_a_saved_sync_plan() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let first_target_directory = dir.path().join("first-target");
+    let second_target_directory = dir.path().join("second-target");
+    let database_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&source_directory);
+    write_config(&first_target_directory);
+    write_config(&second_target_directory);
+    scan_and_register(&database_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&database_path).unwrap();
+    let source = instance_at(&instances, &source_directory);
+    let first_target = instance_at(&instances, &first_target_directory);
+    let second_target = instance_at(&instances, &second_target_directory);
+    let saved = save_instance_sync_plan(
+        &database_path,
+        &InstanceSyncPlanDraft {
+            id: None,
+            name: "初始方案".to_string(),
+            source_instance_id: source.id,
+            target_instance_ids: vec![first_target.id],
+            config_paths: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    let updated = save_instance_sync_plan(
+        &database_path,
+        &InstanceSyncPlanDraft {
+            id: Some(saved.id),
+            name: "更新后的方案".to_string(),
+            source_instance_id: source.id,
+            target_instance_ids: vec![second_target.id],
+            config_paths: vec![vec!["model".to_string()]],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(updated.id, saved.id);
+    assert_eq!(updated.name, "更新后的方案");
+    assert_eq!(updated.target_instance_ids, vec![second_target.id]);
+    assert_eq!(updated.config_paths, vec![vec!["model".to_string()]]);
+
+    delete_instance_sync_plan(&database_path, updated.id).unwrap();
+    assert!(list_instance_sync_plans(&database_path).unwrap().is_empty());
+}
+
+fn instance_at<'a>(
+    instances: &'a [codex_session_manager::instance_registry::ManagedInstance],
+    directory: &Path,
+) -> &'a codex_session_manager::instance_registry::ManagedInstance {
+    instances
+        .iter()
+        .find(|instance| instance.path == registered_path(directory))
+        .unwrap()
 }
 
 #[test]

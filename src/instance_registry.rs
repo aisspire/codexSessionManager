@@ -29,6 +29,31 @@ pub struct InstanceScanReport {
     pub skipped: usize,
 }
 
+/// A reusable local-instance synchronization recipe.
+///
+/// Session choices deliberately do not belong here: users choose them for
+/// every run. Config paths are represented as TOML key segments so keys that
+/// contain dots are not ambiguous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceSyncPlan {
+    pub id: i64,
+    pub name: String,
+    pub source_instance_id: i64,
+    pub target_instance_ids: Vec<i64>,
+    pub config_paths: Vec<Vec<String>>,
+    pub created_at_unix: i64,
+    pub updated_at_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceSyncPlanDraft {
+    pub id: Option<i64>,
+    pub name: String,
+    pub source_instance_id: i64,
+    pub target_instance_ids: Vec<i64>,
+    pub config_paths: Vec<Vec<String>>,
+}
+
 #[derive(Debug)]
 struct StoredManagedInstance {
     id: i64,
@@ -252,6 +277,112 @@ pub fn managed_instance_path(database_path: &Path, instance_id: i64) -> Result<P
     Ok(path)
 }
 
+pub fn list_instance_sync_plans(database_path: &Path) -> Result<Vec<InstanceSyncPlan>> {
+    let connection = open_registry(database_path)?;
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            id,
+            name,
+            source_instance_id,
+            target_instance_ids_json,
+            config_paths_json,
+            created_at_unix,
+            updated_at_unix
+        FROM instance_sync_plans
+        ORDER BY updated_at_unix DESC, id DESC
+        "#,
+    )?;
+    let rows = statement.query_map([], instance_sync_plan_from_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to list instance sync plans")
+}
+
+pub fn save_instance_sync_plan(
+    database_path: &Path,
+    draft: &InstanceSyncPlanDraft,
+) -> Result<InstanceSyncPlan> {
+    let name = draft.name.trim();
+    if name.is_empty() {
+        bail!("instance sync plan name cannot be empty");
+    }
+
+    let target_instance_ids =
+        normalized_target_instance_ids(draft.source_instance_id, &draft.target_instance_ids)?;
+    let config_paths = normalized_config_paths(&draft.config_paths)?;
+    let connection = open_registry(database_path)?;
+    ensure_sync_plan_instances_available(
+        &connection,
+        draft.source_instance_id,
+        &target_instance_ids,
+    )?;
+
+    let target_instance_ids_json = serde_json::to_string(&target_instance_ids)
+        .context("failed to serialize instance sync plan targets")?;
+    let config_paths_json = serde_json::to_string(&config_paths)
+        .context("failed to serialize instance sync plan config paths")?;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let id = if let Some(id) = draft.id {
+        let changed = connection.execute(
+            r#"
+            UPDATE instance_sync_plans
+            SET
+                name = ?1,
+                source_instance_id = ?2,
+                target_instance_ids_json = ?3,
+                config_paths_json = ?4,
+                updated_at_unix = ?5
+            WHERE id = ?6
+            "#,
+            params![
+                name,
+                draft.source_instance_id,
+                target_instance_ids_json,
+                config_paths_json,
+                now,
+                id,
+            ],
+        )?;
+        if changed == 0 {
+            bail!("instance sync plan {id} does not exist");
+        }
+        id
+    } else {
+        connection.execute(
+            r#"
+            INSERT INTO instance_sync_plans (
+                name,
+                source_instance_id,
+                target_instance_ids_json,
+                config_paths_json,
+                created_at_unix,
+                updated_at_unix
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            "#,
+            params![
+                name,
+                draft.source_instance_id,
+                target_instance_ids_json,
+                config_paths_json,
+                now,
+            ],
+        )?;
+        connection.last_insert_rowid()
+    };
+
+    read_instance_sync_plan(&connection, id)
+}
+
+pub fn delete_instance_sync_plan(database_path: &Path, plan_id: i64) -> Result<()> {
+    let connection = open_registry(database_path)?;
+    let changed = connection.execute("DELETE FROM instance_sync_plans WHERE id = ?1", [plan_id])?;
+    if changed == 0 {
+        bail!("instance sync plan {plan_id} does not exist");
+    }
+    Ok(())
+}
+
 fn open_registry(database_path: &Path) -> Result<Connection> {
     if let Some(parent) = database_path
         .parent()
@@ -281,6 +412,15 @@ fn open_registry(database_path: &Path) -> Result<Connection> {
             deleted_at_unix INTEGER,
             ignored_at_unix INTEGER
         );
+        CREATE TABLE IF NOT EXISTS instance_sync_plans (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            source_instance_id INTEGER NOT NULL,
+            target_instance_ids_json TEXT NOT NULL,
+            config_paths_json TEXT NOT NULL,
+            created_at_unix INTEGER NOT NULL,
+            updated_at_unix INTEGER NOT NULL
+        );
         "#,
     )?;
     ensure_registry_column(
@@ -294,6 +434,123 @@ fn open_registry(database_path: &Path) -> Result<Connection> {
         "ALTER TABLE managed_instances ADD COLUMN ignored_at_unix INTEGER",
     )?;
     Ok(connection)
+}
+
+fn instance_sync_plan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceSyncPlan> {
+    let target_instance_ids_json = row.get::<_, String>(3)?;
+    let config_paths_json = row.get::<_, String>(4)?;
+    let target_instance_ids = serde_json::from_str(&target_instance_ids_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let config_paths = serde_json::from_str(&config_paths_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(InstanceSyncPlan {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        source_instance_id: row.get(2)?,
+        target_instance_ids,
+        config_paths,
+        created_at_unix: row.get(5)?,
+        updated_at_unix: row.get(6)?,
+    })
+}
+
+fn read_instance_sync_plan(connection: &Connection, id: i64) -> Result<InstanceSyncPlan> {
+    connection
+        .query_row(
+            r#"
+            SELECT
+                id,
+                name,
+                source_instance_id,
+                target_instance_ids_json,
+                config_paths_json,
+                created_at_unix,
+                updated_at_unix
+            FROM instance_sync_plans
+            WHERE id = ?1
+            "#,
+            [id],
+            instance_sync_plan_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("instance sync plan {id} does not exist"))
+}
+
+fn normalized_target_instance_ids(
+    source_instance_id: i64,
+    target_instance_ids: &[i64],
+) -> Result<Vec<i64>> {
+    if source_instance_id <= 0 {
+        bail!("instance sync source must be a registered instance");
+    }
+    if target_instance_ids.is_empty() {
+        bail!("instance sync plan must include at least one target instance");
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::with_capacity(target_instance_ids.len());
+    for target_id in target_instance_ids {
+        if *target_id <= 0 {
+            bail!("instance sync target must be a registered instance");
+        }
+        if *target_id == source_instance_id {
+            bail!("instance sync source cannot also be a target");
+        }
+        if !seen.insert(*target_id) {
+            bail!("instance sync targets cannot contain duplicates");
+        }
+        normalized.push(*target_id);
+    }
+    Ok(normalized)
+}
+
+fn normalized_config_paths(config_paths: &[Vec<String>]) -> Result<Vec<Vec<String>>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::with_capacity(config_paths.len());
+    for path in config_paths {
+        if path.is_empty() || path.iter().any(|segment| segment.trim().is_empty()) {
+            bail!("instance sync config paths cannot be empty");
+        }
+        let path = path
+            .iter()
+            .map(|segment| segment.trim().to_string())
+            .collect::<Vec<_>>();
+        let encoded = serde_json::to_string(&path)
+            .context("failed to normalize instance sync config path")?;
+        if seen.insert(encoded) {
+            normalized.push(path);
+        }
+    }
+    Ok(normalized)
+}
+
+fn ensure_sync_plan_instances_available(
+    connection: &Connection,
+    source_instance_id: i64,
+    target_instance_ids: &[i64],
+) -> Result<()> {
+    for instance_id in
+        std::iter::once(source_instance_id).chain(target_instance_ids.iter().copied())
+    {
+        let path = connection
+            .query_row(
+                r#"
+                SELECT path
+                FROM managed_instances
+                WHERE id = ?1 AND deleted_at_unix IS NULL AND ignored_at_unix IS NULL
+                "#,
+                [instance_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("managed instance {instance_id} does not exist"))?;
+        if !instance_is_available(Path::new(&path)) {
+            bail!("managed instance {instance_id} is not available");
+        }
+    }
+    Ok(())
 }
 
 fn ensure_registry_column(

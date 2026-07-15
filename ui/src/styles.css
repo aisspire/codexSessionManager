@@ -905,6 +905,276 @@ select {
   background: #f3f6f8;
 }
 
+.instance-sync-workspace {
+  display: grid;
+  gap: 14px;
+  min-width: 820px;
+  border: 1px solid #bdd3d4;
+  border-radius: 8px;
+  padding: 14px;
+  background: #fbfefe;
+  box-shadow: 0 1px 2px rgb(17 24 39 / 5%);
+}
+
+.instance-sync-heading,
+.instance-sync-panel-title,
+.instance-sync-actions,
+.instance-registry-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.instance-sync-heading h2,
+.instance-sync-panel h3,
+.instance-sync-outcomes h3 {
+  margin: 0;
+  color: #17343a;
+}
+
+.instance-sync-heading h2 {
+  font-size: 16px;
+}
+
+.instance-sync-heading p,
+.instance-sync-risk {
+  margin: 5px 0 0;
+  color: #597079;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.instance-sync-selection {
+  flex: 0 0 auto;
+  border: 1px solid #b9d7d5;
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: #185e62;
+  background: #edf8f7;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.instance-sync-plan-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #d8e5e5;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.instance-sync-plan-actions,
+.instance-sync-actions .action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.instance-sync-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.instance-sync-panel {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  min-height: 214px;
+  border: 1px solid #d8e2e7;
+  border-radius: 7px;
+  padding: 11px;
+  background: #ffffff;
+}
+
+.instance-sync-panel h3,
+.instance-sync-outcomes h3 {
+  font-size: 13px;
+}
+
+.instance-sync-targets {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  color: #314457;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.instance-sync-targets .check-row {
+  align-items: start;
+  padding: 6px 7px;
+  border: 1px solid #e1e8ed;
+  border-radius: 5px;
+  color: #34465a;
+  background: #f8fafc;
+}
+
+.instance-sync-list,
+.instance-sync-config-tree {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-height: 120px;
+  max-height: 250px;
+  overflow: auto;
+  padding: 3px;
+  border: 1px solid #e0e7ec;
+  border-radius: 6px;
+  background: #fbfcfd;
+}
+
+.instance-sync-session-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: #243548;
+}
+
+.instance-sync-session-row:hover {
+  border-color: #b8d5d4;
+  background: #f2faf9;
+}
+
+.instance-sync-session-row input,
+.instance-sync-config-leaf input {
+  width: 17px;
+  min-height: 17px;
+  margin: 1px 0 0;
+}
+
+.instance-sync-session-row span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.instance-sync-session-row strong,
+.instance-sync-session-row small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instance-sync-session-row strong {
+  color: #172537;
+  font-size: 12px;
+}
+
+.instance-sync-session-row small,
+.instance-sync-muted {
+  color: #6b7d8d;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.instance-sync-config-node {
+  display: grid;
+  gap: 4px;
+  margin-left: calc(var(--sync-depth) * 13px);
+}
+
+.instance-sync-config-leaf {
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  padding: 5px;
+  border-radius: 4px;
+  color: #263b4d;
+  font-size: 12px;
+}
+
+.instance-sync-config-leaf:hover {
+  background: #eef7f7;
+}
+
+.instance-sync-config-leaf span {
+  overflow-wrap: anywhere;
+}
+
+.instance-sync-config-group {
+  color: #38586a;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.instance-sync-actions {
+  align-items: center;
+  padding-top: 2px;
+  color: #536b78;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.instance-sync-outcomes {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #d9e4e7;
+  padding-top: 12px;
+}
+
+.instance-sync-outcome {
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid #c8dedc;
+  border-radius: 6px;
+  color: #35515c;
+  background: #f4fbfa;
+  font-size: 12px;
+}
+
+.instance-sync-outcome strong {
+  color: #1e4449;
+}
+
+.instance-sync-outcome small {
+  color: #5b6f7a;
+  overflow-wrap: anywhere;
+}
+
+.instance-sync-outcome.failed {
+  border-color: #deb4af;
+  color: #8b3e39;
+  background: #fff7f6;
+}
+
+.instance-sync-error {
+  color: #9c342e !important;
+  font-weight: 700;
+}
+
+.instance-registry-list {
+  display: grid;
+  gap: 10px;
+}
+
+.instance-registry-heading {
+  align-items: center;
+  padding: 2px 2px 0;
+  color: #3f5366;
+  font-size: 13px;
+}
+
+.instance-registry-heading span {
+  color: #748394;
+  font-size: 12px;
+  font-weight: 750;
+}
+
 .instance-row {
   display: grid;
   grid-template-columns: minmax(250px, 1.35fr) minmax(240px, 0.9fr) auto;
@@ -991,7 +1261,10 @@ select {
 }
 
 .instance-controls button:focus-visible,
-#instance-scan-path:focus-visible {
+#instance-scan-path:focus-visible,
+.instance-sync-workspace input:focus-visible,
+.instance-sync-workspace select:focus-visible,
+.instance-sync-workspace button:focus-visible {
   outline: 3px solid rgb(14 104 112 / 35%);
   outline-offset: 2px;
 }
@@ -1432,6 +1705,18 @@ dd {
   .action-toolbar {
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   }
+
+  .instance-sync-workspace {
+    min-width: 0;
+  }
+
+  .instance-sync-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .instance-sync-grid .instance-sync-panel:last-child {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 820px) {
@@ -1493,6 +1778,25 @@ dd {
   .instance-row {
     grid-template-columns: minmax(0, 1fr);
     min-width: 0;
+  }
+
+  .instance-sync-heading,
+  .instance-sync-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .instance-sync-plan-row,
+  .instance-sync-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .instance-sync-grid .instance-sync-panel:last-child {
+    grid-column: auto;
+  }
+
+  .instance-sync-panel {
+    min-height: 0;
   }
 
   .instance-controls {

@@ -11,13 +11,20 @@ import {
 } from "./codexExitConfirm";
 import { loadInputCache, saveInputCache } from "./inputCache";
 import {
+  applyInstanceSyncPlan,
+  availableInstanceSyncTargets,
+  configPathFromKey,
+  configPathKey,
   instanceAvailability,
   instanceDisplayName,
   instanceScanSummary,
+  instanceSyncTargetSummary,
   managedInstanceDeleteConfirmation,
   managedInstanceIgnoreConfirmation,
+  validateInstanceSyncSelection,
   type InstanceScanReport,
   type ManagedInstance,
+  type InstanceSyncPlan,
 } from "./instanceManagement";
 import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectExpansionCache";
 import {
@@ -211,6 +218,71 @@ interface BackupGroupDeleteReport {
   deleted_dirs: string[];
 }
 
+interface ConfigPathNode {
+  path: string[];
+  label: string;
+  selectable: boolean;
+  children: ConfigPathNode[];
+}
+
+interface InstanceSyncSourceSession {
+  id: string;
+  title?: string;
+  project?: string;
+  archived: boolean;
+  source_path: string;
+  updated_at?: string;
+}
+
+interface InstanceSyncSourceData {
+  source_instance_id: number;
+  sessions: InstanceSyncSourceSession[];
+  config_paths: ConfigPathNode[];
+}
+
+interface InstanceSyncConflict {
+  session_id: string;
+  reason: string;
+  target_path?: string;
+}
+
+interface InstanceSyncTargetPreview {
+  target_instance_id: number;
+  target_path: string;
+  sessions_to_add: string[];
+  sessions_to_skip: string[];
+  session_conflicts: InstanceSyncConflict[];
+  config_paths_to_apply: number;
+  project_path_warnings: string[];
+  error?: string | null;
+}
+
+interface InstanceSyncPreview {
+  source_instance_id: number;
+  session_count: number;
+  config_path_count: number;
+  targets: InstanceSyncTargetPreview[];
+}
+
+interface InstanceSyncTargetReport {
+  target_instance_id: number;
+  target_path: string;
+  backup_dir?: string | null;
+  sessions_added: string[];
+  sessions_skipped: string[];
+  session_conflicts: InstanceSyncConflict[];
+  index_entries: number;
+  sqlite_rows: number;
+  config_paths_applied: number;
+  warnings: string[];
+  error?: string | null;
+}
+
+interface InstanceSyncExecutionReport {
+  source_instance_id: number;
+  targets: InstanceSyncTargetReport[];
+}
+
 type DetailEditField = "title" | "project" | "provider";
 
 interface DetailEditState {
@@ -322,6 +394,18 @@ const state = {
   instanceScanReport: null as InstanceScanReport | null,
   instanceRenameId: null as number | null,
   instanceRenameDraft: "",
+  instanceSyncPlans: [] as InstanceSyncPlan[],
+  instanceSyncPlanId: null as number | null,
+  instanceSyncPlanName: "",
+  instanceSyncSourceId: null as number | null,
+  instanceSyncTargetIds: new Set<number>(),
+  instanceSyncSessions: [] as InstanceSyncSourceSession[],
+  instanceSyncSessionIds: new Set<string>(),
+  instanceSyncSessionSearch: "",
+  instanceSyncConfigPaths: [] as ConfigPathNode[],
+  instanceSyncConfigPathKeys: new Set<string>(),
+  instanceSyncPreview: null as InstanceSyncPreview | null,
+  instanceSyncResult: null as InstanceSyncExecutionReport | null,
   restorePreview: null as RestorePreview | null,
   syncStatus: "",
   codexWasRunning: null as boolean | null,
@@ -455,7 +539,7 @@ function settingsPanel() {
 function pageHeader() {
   const description =
     state.activePage === "instance-management"
-      ? "扫描并登记包含 config.toml 的实例目录；不会切换当前 Codex 主目录。"
+      ? "登记本机实例，并在 Codex 停止后按会话和已选配置项进行安全同步。"
       : state.activePage === "batch-edit"
       ? "批量修改已选会话的名称前缀、提供方和项目路径。"
       : state.activePage === "session-management"
@@ -777,13 +861,228 @@ function instanceTable() {
   return `
     <section class="table-shell instance-table-shell" aria-label="多实例列表">
       <div class="instance-table">
-        ${
-          state.managedInstances.length
-            ? state.managedInstances.map(instanceRow).join("")
-            : `<div class="empty-list">尚未登记实例。输入父路径并扫描其中的 config.toml。</div>`
-        }
+        ${instanceSyncWorkspace()}
+        <section class="instance-registry-list" aria-label="已登记实例">
+          <div class="instance-registry-heading">
+            <strong>已登记实例</strong>
+            <span>${state.managedInstances.length} 个</span>
+          </div>
+          ${
+            state.managedInstances.length
+              ? state.managedInstances.map(instanceRow).join("")
+              : `<div class="empty-list">尚未登记实例。输入父路径并扫描其中的 config.toml。</div>`
+          }
+        </section>
       </div>
     </section>
+  `;
+}
+
+function instanceSyncWorkspace() {
+  const availableInstances = state.managedInstances.filter((instance) => instance.available);
+  const targetInstances = availableInstanceSyncTargets(
+    state.managedInstances,
+    state.instanceSyncSourceId,
+  );
+  const visibleSessions = filteredInstanceSyncSessions();
+  const selectedSessions = state.instanceSyncSessionIds.size;
+  const selectedConfigs = state.instanceSyncConfigPathKeys.size;
+  const selectedPlan = state.instanceSyncPlans.find((plan) => plan.id === state.instanceSyncPlanId);
+
+  return `
+    <section class="instance-sync-workspace" aria-label="本机同步工作区">
+      <div class="instance-sync-heading">
+        <div>
+          <h2>本机同步工作区</h2>
+          <p>每次手动选择会话；同步方案只保存源、目标和配置路径，不保存会话选择或配置值。</p>
+        </div>
+        <span class="instance-sync-selection">会话 ${selectedSessions} · 配置 ${selectedConfigs}</span>
+      </div>
+
+      <div class="instance-sync-plan-row">
+        <label>同步方案
+          <select id="instance-sync-plan" ${disabledWhenBusy()}>
+            <option value="">未选择已保存方案</option>
+            ${state.instanceSyncPlans
+              .map(
+                (plan) =>
+                  `<option value="${plan.id}" ${plan.id === state.instanceSyncPlanId ? "selected" : ""}>${escapeHtml(plan.name)}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>
+        <label>方案名称
+          <input id="instance-sync-plan-name" value="${escapeHtml(state.instanceSyncPlanName)}" placeholder="例如 办公室同步" ${disabledWhenBusy()} />
+        </label>
+        <div class="instance-sync-plan-actions">
+          <button id="save-instance-sync-plan" ${disabledWhenBusy()}>保存方案</button>
+          <button id="delete-instance-sync-plan" class="danger" ${disabledWhenBusy(!selectedPlan)}>删除方案</button>
+        </div>
+      </div>
+
+      <div class="instance-sync-grid">
+        <section class="instance-sync-panel" aria-label="同步对象">
+          <h3>1. 选择实例</h3>
+          <label>源实例
+            <select id="instance-sync-source" ${disabledWhenBusy()}>
+              <option value="">请选择源实例</option>
+              ${availableInstances
+                .map(
+                  (instance) =>
+                    `<option value="${instance.id}" ${instance.id === state.instanceSyncSourceId ? "selected" : ""}>${escapeHtml(instanceDisplayName(instance))}</option>`,
+                )
+                .join("")}
+            </select>
+          </label>
+          <div class="instance-sync-targets" role="group" aria-label="目标实例（可多选）">
+            <span>目标实例（可多选）</span>
+            ${
+              targetInstances.length
+                ? targetInstances
+                    .map(
+                      (instance) => `
+                        <label class="check-row">
+                          <input type="checkbox" data-instance-sync-target="${instance.id}" ${state.instanceSyncTargetIds.has(instance.id) ? "checked" : ""} ${disabledWhenBusy()} />
+                          <span>${escapeHtml(instanceDisplayName(instance))}</span>
+                        </label>`,
+                    )
+                    .join("")
+                : `<span class="instance-sync-muted">先选择可用源实例后再选择目标。</span>`
+            }
+          </div>
+        </section>
+
+        <section class="instance-sync-panel" aria-label="会话选择">
+          <div class="instance-sync-panel-title">
+            <h3>2. 每次选择会话</h3>
+            <button id="select-visible-instance-sync-sessions" ${disabledWhenBusy(visibleSessions.length === 0)}>全选筛选结果</button>
+          </div>
+          <label>筛选会话
+            <input id="instance-sync-session-search" value="${escapeHtml(state.instanceSyncSessionSearch)}" placeholder="按标题、ID 或项目筛选" ${disabledWhenBusy()} />
+          </label>
+          <div class="instance-sync-list" role="group" aria-label="源会话">
+            ${
+              state.instanceSyncSourceId == null
+                ? `<span class="instance-sync-muted">请选择源实例以加载会话。</span>`
+                : visibleSessions.length
+                  ? visibleSessions.map(instanceSyncSessionRow).join("")
+                  : `<span class="instance-sync-muted">没有匹配的源会话。</span>`
+            }
+          </div>
+        </section>
+
+        <section class="instance-sync-panel" aria-label="配置选择">
+          <h3>3. 选择 config.toml 路径</h3>
+          <p class="instance-sync-risk">已选配置项会以源值覆盖目标值；配置可能含密钥，方案不会保存其值。</p>
+          <div class="instance-sync-config-tree" role="group" aria-label="可同步配置路径">
+            ${
+              state.instanceSyncSourceId == null
+                ? `<span class="instance-sync-muted">请选择源实例以读取配置路径。</span>`
+                : state.instanceSyncConfigPaths.length
+                  ? instanceSyncConfigTree(state.instanceSyncConfigPaths)
+                  : `<span class="instance-sync-muted">源配置中没有可选择的路径。</span>`
+            }
+          </div>
+        </section>
+      </div>
+
+      <div class="instance-sync-actions">
+        <span>同步仅在本机目录之间进行。执行前会再次预检，并为每个目标创建元数据备份。</span>
+        <div class="action-buttons">
+          <button id="preview-instance-sync" ${disabledWhenBusy()}>预览同步</button>
+          <button id="execute-instance-sync" class="primary" ${disabledWhenBusy()}>开始同步</button>
+        </div>
+      </div>
+      ${instanceSyncOutcomeMarkup()}
+    </section>
+  `;
+}
+
+function instanceSyncSessionRow(session: InstanceSyncSourceSession) {
+  const title = session.title || session.id;
+  return `
+    <label class="instance-sync-session-row">
+      <input type="checkbox" data-instance-sync-session="${escapeHtml(session.id)}" ${state.instanceSyncSessionIds.has(session.id) ? "checked" : ""} ${disabledWhenBusy()} />
+      <span>
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(session.id)} · ${session.archived ? "已归档" : "活动"}${session.project ? ` · ${escapeHtml(session.project)}` : ""}</small>
+      </span>
+    </label>
+  `;
+}
+
+function instanceSyncConfigTree(nodes: ConfigPathNode[], depth = 0): string {
+  return nodes
+    .map((node) => {
+      const key = configPathKey(node.path);
+      const control = node.selectable
+        ? `<label class="instance-sync-config-leaf">
+             <input type="checkbox" data-instance-sync-config="${escapeHtml(key)}" ${state.instanceSyncConfigPathKeys.has(key) ? "checked" : ""} ${disabledWhenBusy()} />
+             <span>${escapeHtml(node.label)}</span>
+           </label>`
+        : `<span class="instance-sync-config-group">${escapeHtml(node.label)}</span>`;
+      return `
+        <div class="instance-sync-config-node" style="--sync-depth:${depth}">
+          ${control}
+          ${node.children.length ? instanceSyncConfigTree(node.children, depth + 1) : ""}
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function instanceSyncOutcomeMarkup() {
+  const preview = state.instanceSyncPreview;
+  const result = state.instanceSyncResult;
+  if (!preview && !result) return "";
+  const title = result ? "执行结果" : "预览结果";
+  const cards = result
+    ? result.targets.map(instanceSyncResultOutcomeCard).join("")
+    : (preview?.targets || []).map(instanceSyncPreviewOutcomeCard).join("");
+  return `
+    <section class="instance-sync-outcomes" aria-label="${title}">
+      <h3>${title}</h3>
+      ${cards}
+    </section>
+  `;
+}
+
+function instanceSyncPreviewOutcomeCard(target: InstanceSyncTargetPreview) {
+  return instanceSyncOutcomeCard(
+    target,
+    `将新增 ${target.sessions_to_add.length} · 相同跳过 ${target.sessions_to_skip.length} · 冲突 ${target.session_conflicts.length} · 配置 ${target.config_paths_to_apply} 项`,
+    target.project_path_warnings,
+    [],
+  );
+}
+
+function instanceSyncResultOutcomeCard(target: InstanceSyncTargetReport) {
+  return instanceSyncOutcomeCard(target, instanceSyncTargetSummary(target), [], target.warnings);
+}
+
+function instanceSyncOutcomeCard(
+  target: Pick<InstanceSyncTargetPreview, "target_instance_id" | "target_path" | "session_conflicts" | "error"> & {
+    backup_dir?: string | null;
+  },
+  summary: string,
+  projectWarnings: string[],
+  warnings: string[],
+) {
+  const instance = state.managedInstances.find((candidate) => candidate.id === target.target_instance_id);
+  const name = instance ? instanceDisplayName(instance) : target.target_path;
+  const conflicts = target.session_conflicts
+    .map((conflict) => `${conflict.session_id}：${conflict.reason}`)
+    .join("；");
+  return `
+    <article class="instance-sync-outcome ${target.error ? "failed" : ""}">
+      <strong>${escapeHtml(name)}</strong>
+      <span>${escapeHtml(summary)}</span>
+      ${target.error ? `<small class="instance-sync-error">失败：${escapeHtml(target.error)}</small>` : ""}
+      ${target.backup_dir ? `<small>备份：${escapeHtml(target.backup_dir)}</small>` : ""}
+      ${conflicts ? `<small>冲突：${escapeHtml(conflicts)}</small>` : ""}
+      ${projectWarnings.length ? `<small>提示：${escapeHtml(projectWarnings.join("；"))}</small>` : ""}
+      ${warnings.length ? `<small>说明：${escapeHtml(warnings.join("；"))}</small>` : ""}
+    </article>
   `;
 }
 
@@ -1062,6 +1361,70 @@ function bindInstanceEvents() {
   });
   document.querySelector("#refresh-managed-instances")?.addEventListener("click", () => {
     void loadManagedInstances(true);
+  });
+  document.querySelector<HTMLSelectElement>("#instance-sync-plan")?.addEventListener("change", (event) => {
+    const value = (event.target as HTMLSelectElement).value;
+    void selectInstanceSyncPlan(value ? Number(value) : null);
+  });
+  document.querySelector<HTMLInputElement>("#instance-sync-plan-name")?.addEventListener("input", (event) => {
+    state.instanceSyncPlanName = (event.target as HTMLInputElement).value;
+  });
+  document.querySelector("#save-instance-sync-plan")?.addEventListener("click", () => {
+    void saveInstanceSyncPlan();
+  });
+  document.querySelector("#delete-instance-sync-plan")?.addEventListener("click", () => {
+    void deleteInstanceSyncPlan();
+  });
+  document.querySelector<HTMLSelectElement>("#instance-sync-source")?.addEventListener("change", (event) => {
+    const value = (event.target as HTMLSelectElement).value;
+    void selectInstanceSyncSource(value ? Number(value) : null, true);
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-instance-sync-target]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const instanceId = Number(checkbox.dataset.instanceSyncTarget);
+      if (!Number.isSafeInteger(instanceId)) return;
+      checkbox.checked
+        ? state.instanceSyncTargetIds.add(instanceId)
+        : state.instanceSyncTargetIds.delete(instanceId);
+      clearInstanceSyncOutcome();
+      render({ preserveTableScroll: true });
+    });
+  });
+  document.querySelector<HTMLInputElement>("#instance-sync-session-search")?.addEventListener("input", (event) => {
+    state.instanceSyncSessionSearch = (event.target as HTMLInputElement).value;
+    render({ preserveTableScroll: true });
+    document.querySelector<HTMLInputElement>("#instance-sync-session-search")?.focus();
+  });
+  document.querySelector("#select-visible-instance-sync-sessions")?.addEventListener("click", () => {
+    filteredInstanceSyncSessions().forEach((session) => state.instanceSyncSessionIds.add(session.id));
+    clearInstanceSyncOutcome();
+    render({ preserveTableScroll: true });
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-instance-sync-session]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const sessionId = checkbox.dataset.instanceSyncSession || "";
+      checkbox.checked
+        ? state.instanceSyncSessionIds.add(sessionId)
+        : state.instanceSyncSessionIds.delete(sessionId);
+      clearInstanceSyncOutcome();
+      render({ preserveTableScroll: true });
+    });
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-instance-sync-config]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const key = checkbox.dataset.instanceSyncConfig || "";
+      checkbox.checked
+        ? state.instanceSyncConfigPathKeys.add(key)
+        : state.instanceSyncConfigPathKeys.delete(key);
+      clearInstanceSyncOutcome();
+      render({ preserveTableScroll: true });
+    });
+  });
+  document.querySelector("#preview-instance-sync")?.addEventListener("click", () => {
+    void previewInstanceSync();
+  });
+  document.querySelector("#execute-instance-sync")?.addEventListener("click", () => {
+    void executeInstanceSync();
   });
   document.querySelectorAll<HTMLElement>("[data-rename-managed-instance]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1428,7 +1791,12 @@ async function loadSessions(activeId?: string) {
 
 async function loadManagedInstances(showStatus: boolean) {
   try {
-    state.managedInstances = await invoke<ManagedInstance[]>("list_managed_instances");
+    const [instances] = await Promise.all([
+      invoke<ManagedInstance[]>("list_managed_instances"),
+      loadInstanceSyncPlans(),
+    ]);
+    state.managedInstances = instances;
+    reconcileInstanceSyncInstances();
     if (showStatus) {
       const unavailable = state.managedInstances.filter((instance) => !instance.available).length;
       state.status = unavailable
@@ -1452,13 +1820,35 @@ async function scanManagedInstances() {
   await runWithProgress("正在扫描并登记实例", async () => {
     const report = await invoke<InstanceScanReport>("scan_managed_instances", { parentPath });
     state.instanceScanReport = report;
-    state.managedInstances = await invoke<ManagedInstance[]>("list_managed_instances");
+    await loadManagedInstances(false);
     state.instanceRenameId = null;
     state.instanceRenameDraft = "";
     const reactivated = report.reactivated ? `，重新登记 ${report.reactivated} 个` : "";
     const ignored = report.ignored ? `，永久忽略 ${report.ignored} 个` : "";
     state.status = `扫描完成：新增 ${report.added} 个${reactivated}${ignored}，已存在 ${report.already_managed} 个，跳过 ${report.skipped} 个`;
   });
+}
+
+function reconcileInstanceSyncInstances() {
+  const availableIds = new Set(
+    state.managedInstances.filter((instance) => instance.available).map((instance) => instance.id),
+  );
+  if (
+    state.instanceSyncSourceId != null &&
+    !availableIds.has(state.instanceSyncSourceId)
+  ) {
+    state.instanceSyncSourceId = null;
+    state.instanceSyncSessions = [];
+    state.instanceSyncSessionIds.clear();
+    state.instanceSyncConfigPaths = [];
+    state.instanceSyncConfigPathKeys.clear();
+    clearInstanceSyncOutcome();
+  }
+  state.instanceSyncTargetIds = new Set(
+    [...state.instanceSyncTargetIds].filter(
+      (id) => availableIds.has(id) && id !== state.instanceSyncSourceId,
+    ),
+  );
 }
 
 function startManagedInstanceRename(instanceId: number) {
@@ -1516,6 +1906,7 @@ async function deleteManagedInstance(instanceId: number) {
   await runWithProgress("正在删除实例登记记录", async () => {
     await invoke("delete_managed_instance", { instanceId });
     state.managedInstances = state.managedInstances.filter((candidate) => candidate.id !== instanceId);
+    reconcileInstanceSyncInstances();
     if (state.instanceRenameId === instanceId) {
       state.instanceRenameId = null;
       state.instanceRenameDraft = "";
@@ -1531,11 +1922,254 @@ async function ignoreManagedInstance(instanceId: number) {
   await runWithProgress("正在永久忽略实例", async () => {
     await invoke("ignore_managed_instance", { instanceId });
     state.managedInstances = state.managedInstances.filter((candidate) => candidate.id !== instanceId);
+    reconcileInstanceSyncInstances();
     if (state.instanceRenameId === instanceId) {
       state.instanceRenameId = null;
       state.instanceRenameDraft = "";
     }
     state.status = `已永久忽略“${instanceDisplayName(instance)}”；文件夹和 config.toml 未被修改，后续扫描不会自动重新添加`;
+  });
+}
+
+function clearInstanceSyncOutcome() {
+  state.instanceSyncPreview = null;
+  state.instanceSyncResult = null;
+}
+
+function instanceSyncSelection() {
+  return {
+    sourceInstanceId: state.instanceSyncSourceId,
+    targetInstanceIds: [...state.instanceSyncTargetIds],
+    sessionIds: [...state.instanceSyncSessionIds],
+    configPathKeys: [...state.instanceSyncConfigPathKeys],
+  };
+}
+
+function currentInstanceSyncRequest() {
+  const initialSelection = instanceSyncSelection();
+  const selection = {
+    ...initialSelection,
+    configPathKeys: initialSelection.configPathKeys.filter(
+      (key) => configPathFromKey(key).length > 0,
+    ),
+  };
+  const validation = validateInstanceSyncSelection(selection);
+  if (validation || selection.sourceInstanceId == null) {
+    return { validation: validation || "请选择源实例", request: null };
+  }
+  const configPaths = selection.configPathKeys
+    .map(configPathFromKey)
+    .filter((path) => path.length > 0);
+  return {
+    validation: null,
+    request: {
+      source_instance_id: selection.sourceInstanceId,
+      target_instance_ids: selection.targetInstanceIds,
+      session_ids: selection.sessionIds,
+      config_paths: configPaths,
+    },
+  };
+}
+
+async function selectInstanceSyncPlan(planId: number | null) {
+  state.instanceSyncPlanId = planId;
+  const plan = state.instanceSyncPlans.find((candidate) => candidate.id === planId);
+  if (!plan) {
+    state.status = "未选择已保存同步方案；当前手动选择保持不变";
+    render({ preserveTableScroll: true });
+    return;
+  }
+
+  const selection = applyInstanceSyncPlan(plan);
+  state.instanceSyncPlanName = plan.name;
+  state.instanceSyncSourceId = selection.sourceInstanceId;
+  state.instanceSyncTargetIds = new Set(selection.targetInstanceIds);
+  state.instanceSyncSessionIds.clear();
+  state.instanceSyncConfigPathKeys = new Set(selection.configPathKeys);
+  reconcileInstanceSyncInstances();
+  clearInstanceSyncOutcome();
+  await loadInstanceSyncSourceData(state.instanceSyncSourceId, false);
+  state.status = `已加载方案“${plan.name}”；请重新选择本次会话`;
+  render({ preserveTableScroll: true });
+}
+
+async function selectInstanceSyncSource(sourceInstanceId: number | null, clearConfigSelections: boolean) {
+  state.instanceSyncSourceId = sourceInstanceId;
+  if (sourceInstanceId != null) {
+    state.instanceSyncTargetIds.delete(sourceInstanceId);
+  }
+  state.instanceSyncSessionIds.clear();
+  if (clearConfigSelections) {
+    state.instanceSyncConfigPathKeys.clear();
+  }
+  clearInstanceSyncOutcome();
+  await loadInstanceSyncSourceData(sourceInstanceId, clearConfigSelections);
+}
+
+async function loadInstanceSyncSourceData(
+  sourceInstanceId: number | null,
+  clearOnMissing: boolean,
+) {
+  state.instanceSyncSessions = [];
+  state.instanceSyncConfigPaths = [];
+  if (sourceInstanceId == null) {
+    if (clearOnMissing) state.instanceSyncConfigPathKeys.clear();
+    render({ preserveTableScroll: true });
+    return;
+  }
+
+  state.status = "正在读取源实例的会话和配置路径...";
+  render({ preserveTableScroll: true });
+  try {
+    const data = await invoke<InstanceSyncSourceData>("list_instance_sync_source_data", {
+      sourceInstanceId,
+    });
+    if (state.instanceSyncSourceId !== sourceInstanceId) return;
+    state.instanceSyncSessions = data.sessions;
+    state.instanceSyncConfigPaths = data.config_paths;
+    const selectableKeys = new Set(flattenInstanceSyncConfigPaths(data.config_paths));
+    state.instanceSyncConfigPathKeys = new Set(
+      [...state.instanceSyncConfigPathKeys].filter((key) => selectableKeys.has(key)),
+    );
+    state.status = `已读取源实例：${data.sessions.length} 个会话、${selectableKeys.size} 个可选配置项`;
+  } catch (error) {
+    if (state.instanceSyncSourceId !== sourceInstanceId) return;
+    state.status = `无法读取源实例数据：${String(error)}`;
+  }
+  render({ preserveTableScroll: true });
+}
+
+function flattenInstanceSyncConfigPaths(nodes: ConfigPathNode[]): string[] {
+  return nodes.flatMap((node) => [
+    ...(node.selectable ? [configPathKey(node.path)] : []),
+    ...flattenInstanceSyncConfigPaths(node.children),
+  ]);
+}
+
+function filteredInstanceSyncSessions() {
+  const query = state.instanceSyncSessionSearch.trim().toLocaleLowerCase();
+  if (!query) return state.instanceSyncSessions;
+  return state.instanceSyncSessions.filter((session) =>
+    [session.id, session.title, session.project]
+      .filter((value): value is string => Boolean(value))
+      .join("\n")
+      .toLocaleLowerCase()
+      .includes(query),
+  );
+}
+
+async function loadInstanceSyncPlans() {
+  state.instanceSyncPlans = await invoke<InstanceSyncPlan[]>("list_instance_sync_plans");
+  if (
+    state.instanceSyncPlanId != null &&
+    !state.instanceSyncPlans.some((plan) => plan.id === state.instanceSyncPlanId)
+  ) {
+    state.instanceSyncPlanId = null;
+  }
+}
+
+async function saveInstanceSyncPlan() {
+  const name = state.instanceSyncPlanName.trim();
+  if (!name) {
+    state.status = "请输入同步方案名称";
+    render({ preserveTableScroll: true });
+    return;
+  }
+  const sourceInstanceId = state.instanceSyncSourceId;
+  if (sourceInstanceId == null) {
+    state.status = "请选择同步方案的源实例";
+    render({ preserveTableScroll: true });
+    return;
+  }
+  const targetInstanceIds = [...state.instanceSyncTargetIds];
+  if (targetInstanceIds.length === 0) {
+    state.status = "请至少选择一个同步方案的目标实例";
+    render({ preserveTableScroll: true });
+    return;
+  }
+  if (targetInstanceIds.includes(sourceInstanceId)) {
+    state.status = "源实例不能同时作为目标实例";
+    render({ preserveTableScroll: true });
+    return;
+  }
+
+  await runWithProgress("正在保存同步方案", async () => {
+    const saved = await invoke<InstanceSyncPlan>("save_instance_sync_plan", {
+      draft: {
+        id: state.instanceSyncPlanId,
+        name,
+        source_instance_id: sourceInstanceId,
+        target_instance_ids: targetInstanceIds,
+        config_paths: [...state.instanceSyncConfigPathKeys]
+          .map(configPathFromKey)
+          .filter((path) => path.length > 0),
+      },
+    });
+    await loadInstanceSyncPlans();
+    state.instanceSyncPlanId = saved.id;
+    state.instanceSyncPlanName = saved.name;
+    state.status = `已保存同步方案“${saved.name}”`;
+  });
+}
+
+async function deleteInstanceSyncPlan() {
+  const plan = state.instanceSyncPlans.find((candidate) => candidate.id === state.instanceSyncPlanId);
+  if (!plan) return;
+  if (!window.confirm(`删除同步方案“${plan.name}”？不会删除实例、会话或配置。`)) return;
+
+  await runWithProgress("正在删除同步方案", async () => {
+    await invoke("delete_instance_sync_plan", { planId: plan.id });
+    await loadInstanceSyncPlans();
+    state.instanceSyncPlanId = null;
+    state.instanceSyncPlanName = "";
+    state.status = `已删除同步方案“${plan.name}”`;
+  });
+}
+
+async function previewInstanceSync() {
+  const { validation, request } = currentInstanceSyncRequest();
+  if (validation || !request) {
+    state.status = validation || "同步选择无效";
+    render({ preserveTableScroll: true });
+    return;
+  }
+
+  await runWithProgress("正在预检本机同步", async () => {
+    state.instanceSyncPreview = await invoke<InstanceSyncPreview>("preview_instance_sync", { request });
+    state.instanceSyncResult = null;
+    const failed = state.instanceSyncPreview.targets.filter((target) => target.error).length;
+    state.status = failed
+      ? `预览完成：${failed} 个目标无法应用，请查看按目标结果`
+      : `预览完成：${state.instanceSyncPreview.targets.length} 个目标可处理`;
+  });
+}
+
+async function executeInstanceSync() {
+  const { validation, request } = currentInstanceSyncRequest();
+  if (validation || !request) {
+    state.status = validation || "同步选择无效";
+    render({ preserveTableScroll: true });
+    return;
+  }
+  if (!(await ensureCodexStoppedBefore("执行本机多实例同步"))) return;
+  const accepted = window.confirm(
+    "将把所选会话和配置项同步到目标实例。会话冲突会保留目标内容，已选配置将以源值覆盖目标值。每个目标会先创建元数据备份。是否继续？",
+  );
+  if (!accepted) return;
+
+  await runWithProgress("正在执行本机同步", async () => {
+    state.instanceSyncResult = await invoke<InstanceSyncExecutionReport>("execute_instance_sync", {
+      request,
+    });
+    state.instanceSyncPreview = null;
+    const failed = state.instanceSyncResult.targets.filter((target) => target.error).length;
+    const added = state.instanceSyncResult.targets.reduce(
+      (total, target) => total + target.sessions_added.length,
+      0,
+    );
+    state.status = failed
+      ? `同步完成：新增 ${added} 个会话，${failed} 个目标失败；请查看按目标结果`
+      : `同步完成：新增 ${added} 个会话，已处理 ${state.instanceSyncResult.targets.length} 个目标`;
   });
 }
 
