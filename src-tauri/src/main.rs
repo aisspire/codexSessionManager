@@ -16,6 +16,7 @@ use codex_session_manager::instance_registry::{
 };
 use codex_session_manager::instance_sync::{
     self, InstanceSyncConfigDiff, InstanceSyncConfigDiffRequest, InstanceSyncExecutionReport,
+    InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncNonRootConfigDifferenceSelection,
     InstanceSyncPreview, InstanceSyncRequest, InstanceSyncSourceData,
 };
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
@@ -374,6 +375,20 @@ async fn preview_instance_sync_config_diff(
 }
 
 #[tauri::command]
+async fn select_instance_sync_non_root_config_differences(
+    app: tauri::AppHandle,
+    request: InstanceSyncNonRootConfigDifferenceRequest,
+) -> Result<InstanceSyncNonRootConfigDifferenceSelection, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_sync::select_instance_sync_non_root_config_differences(&database_path, &request)
+            .map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("instance sync non-root config selection task failed: {error}"))?
+}
+
+#[tauri::command]
 async fn preview_instance_sync(
     app: tauri::AppHandle,
     request: InstanceSyncRequest,
@@ -581,6 +596,7 @@ fn main() {
             delete_instance_sync_plan,
             list_instance_sync_source_data,
             preview_instance_sync_config_diff,
+            select_instance_sync_non_root_config_differences,
             preview_instance_sync,
             execute_instance_sync,
             open_external_url

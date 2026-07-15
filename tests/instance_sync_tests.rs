@@ -6,7 +6,8 @@ use codex_session_manager::instance_registry::{list_managed_instances, scan_and_
 use codex_session_manager::instance_sync::{
     execute_instance_sync_with_guard, list_instance_sync_source_data, preview_instance_sync,
     preview_instance_sync_config_diff, ConfigPathNode, InstanceSyncConfigDiffRequest,
-    InstanceSyncConfigDiffStatus, InstanceSyncRequest,
+    InstanceSyncConfigDiffStatus, InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncRequest,
+    select_instance_sync_non_root_config_differences,
 };
 use codex_session_manager::state_db::StateDb;
 use rusqlite::{params, Connection};
@@ -506,6 +507,126 @@ fn config_diff_rejects_an_unavailable_registered_target() {
             source_instance_id: source,
             target_instance_ids: vec![target],
             config_path: vec!["model".to_string()],
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("not available"));
+}
+
+#[test]
+fn select_instance_sync_non_root_config_differences_excludes_root_and_preserves_target_configs() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let changed_directory = dir.path().join("changed");
+    let missing_directory = dir.path().join("missing");
+    let unreadable_directory = dir.path().join("unreadable");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(
+        &source_directory,
+        r#"model = "source-model"
+
+[model_providers.office]
+api_key = "source-key"
+timeout = 30
+
+[features]
+enabled = true
+"#,
+    );
+    let changed_config = r#"model = "target-model"
+
+[model_providers.office]
+api_key = "target-key"
+timeout = 30
+
+[features]
+enabled = false
+"#;
+    write_config(&changed_directory, changed_config);
+    let missing_config = r#"model = "source-model"
+
+[model_providers.office]
+api_key = "source-key"
+
+[features]
+enabled = true
+"#;
+    write_config(&missing_directory, missing_config);
+    write_config(&unreadable_directory, "model = [\n");
+
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&registry_path).unwrap();
+    let source = instance_id_at(&instances, &source_directory);
+    let changed = instance_id_at(&instances, &changed_directory);
+    let missing = instance_id_at(&instances, &missing_directory);
+    let unreadable = instance_id_at(&instances, &unreadable_directory);
+
+    let selection = select_instance_sync_non_root_config_differences(
+        &registry_path,
+        &InstanceSyncNonRootConfigDifferenceRequest {
+            source_instance_id: source,
+            target_instance_ids: vec![changed, missing, unreadable],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(selection.source_instance_id, source);
+    assert_eq!(
+        selection.config_paths,
+        vec![
+            vec![
+                "model_providers".to_string(),
+                "office".to_string(),
+                "api_key".to_string(),
+            ],
+            vec![
+                "model_providers".to_string(),
+                "office".to_string(),
+                "timeout".to_string(),
+            ],
+            vec!["features".to_string(), "enabled".to_string()],
+        ],
+    );
+    assert_eq!(selection.unreadable_target_instance_ids, vec![unreadable]);
+    assert!(!selection
+        .config_paths
+        .contains(&vec!["model".to_string()]));
+    assert_eq!(
+        fs::read_to_string(changed_directory.join("config.toml")).unwrap(),
+        changed_config,
+    );
+    assert_eq!(
+        fs::read_to_string(missing_directory.join("config.toml")).unwrap(),
+        missing_config,
+    );
+}
+
+#[test]
+fn select_instance_sync_non_root_config_differences_rejects_an_unavailable_target() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let target_directory = dir.path().join("target");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(
+        &source_directory,
+        "[model_providers.office]\napi_key = \"source-key\"\n",
+    );
+    write_config(
+        &target_directory,
+        "[model_providers.office]\napi_key = \"target-key\"\n",
+    );
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&registry_path).unwrap();
+    let source = instance_id_at(&instances, &source_directory);
+    let target = instance_id_at(&instances, &target_directory);
+    fs::remove_file(target_directory.join("config.toml")).unwrap();
+
+    let error = select_instance_sync_non_root_config_differences(
+        &registry_path,
+        &InstanceSyncNonRootConfigDifferenceRequest {
+            source_instance_id: source,
+            target_instance_ids: vec![target],
         },
     )
     .unwrap_err();

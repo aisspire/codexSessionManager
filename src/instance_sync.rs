@@ -51,6 +51,19 @@ pub struct InstanceSyncConfigDiffRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceSyncNonRootConfigDifferenceRequest {
+    pub source_instance_id: i64,
+    pub target_instance_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceSyncNonRootConfigDifferenceSelection {
+    pub source_instance_id: i64,
+    pub config_paths: Vec<Vec<String>>,
+    pub unreadable_target_instance_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceSyncConfigDiff {
     pub source_instance_id: i64,
     pub config_path: Vec<String>,
@@ -294,6 +307,50 @@ pub fn preview_instance_sync_config_diff(
         config_path,
         source_value,
         targets,
+    })
+}
+
+pub fn select_instance_sync_non_root_config_differences(
+    registry_database_path: &Path,
+    request: &InstanceSyncNonRootConfigDifferenceRequest,
+) -> Result<InstanceSyncNonRootConfigDifferenceSelection> {
+    let instances = list_managed_instances(registry_database_path)?;
+    let source = resolve_available_instance(&instances, request.source_instance_id)?;
+    let target_ids =
+        normalized_target_ids(request.source_instance_id, &request.target_instance_ids)?;
+    let targets = target_ids
+        .into_iter()
+        .map(|target_id| resolve_available_instance(&instances, target_id))
+        .collect::<Result<Vec<_>>>()?;
+    let source_document = read_config_document(&source.profile.config_path())?;
+    let non_root_paths = non_root_config_paths(source_document.as_table(), &[]);
+    let mut readable_target_documents = Vec::with_capacity(targets.len());
+    let mut unreadable_target_instance_ids = Vec::new();
+
+    for target in targets {
+        match read_config_document(&target.profile.config_path()) {
+            Ok(document) => readable_target_documents.push(document),
+            Err(_) => unreadable_target_instance_ids.push(target.id),
+        }
+    }
+
+    let config_paths = non_root_paths
+        .into_iter()
+        .filter(|config_path| {
+            let Some(source_item) = config_item_at_path(&source_document, config_path) else {
+                return false;
+            };
+            readable_target_documents.iter().any(|target_document| {
+                config_item_at_path(target_document, config_path)
+                    .is_none_or(|target_item| !config_items_match(source_item, target_item))
+            })
+        })
+        .collect();
+
+    Ok(InstanceSyncNonRootConfigDifferenceSelection {
+        source_instance_id: request.source_instance_id,
+        config_paths,
+        unreadable_target_instance_ids,
     })
 }
 
@@ -956,6 +1013,20 @@ fn config_path_tree(table: &Table, parent_path: &[String]) -> Vec<ConfigPathNode
             }
         })
         .collect()
+}
+
+fn non_root_config_paths(table: &Table, parent_path: &[String]) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    for (key, item) in table.iter() {
+        let mut path = parent_path.to_vec();
+        path.push(key.to_string());
+        if let Some(child_table) = item.as_table() {
+            paths.extend(non_root_config_paths(child_table, &path));
+        } else if path.len() > 1 {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 fn target_thread_ids(profile: &CodexProfile) -> Result<Option<HashSet<String>>> {
