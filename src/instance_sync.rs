@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,7 @@ pub struct InstanceSyncSourceSession {
     pub model: Option<String>,
     pub source_path: String,
     pub updated_at: Option<String>,
+    pub sort_updated_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +225,11 @@ pub fn list_instance_sync_source_data(
         .map(|session| {
             let thread = source_threads.get(&session.id);
             let index = source_index_entries.get(&session.id);
+            let updated_at = raw_index_string(index, "updated_at")
+                .or_else(|| thread.and_then(|thread| thread.updated_at.clone()));
+            let sort_updated_at_ms = modified_unix_ms(&session.path)
+                .or_else(|| thread.and_then(|thread| thread.updated_at_ms))
+                .or_else(|| thread.and_then(|thread| thread.created_at_ms));
             InstanceSyncSourceSession {
                 id: session.id,
                 title: thread
@@ -249,12 +256,18 @@ pub fn list_instance_sync_source_data(
                     .and_then(|thread| thread.model.clone())
                     .or_else(|| raw_index_string(index, "model")),
                 source_path: session.path.display().to_string(),
-                updated_at: raw_index_string(index, "updated_at")
-                    .or_else(|| thread.and_then(|thread| thread.updated_at.clone())),
+                updated_at,
+                sort_updated_at_ms,
             }
         })
         .collect::<Vec<_>>();
-    sessions.sort_by(|left, right| left.id.cmp(&right.id));
+    sessions.sort_by(|left, right| {
+        right
+            .sort_updated_at_ms
+            .cmp(&left.sort_updated_at_ms)
+            .then(right.updated_at.cmp(&left.updated_at))
+            .then(left.id.cmp(&right.id))
+    });
     let config_document = read_config_document(&source.profile.config_path())?;
 
     Ok(InstanceSyncSourceData {
@@ -262,6 +275,12 @@ pub fn list_instance_sync_source_data(
         sessions,
         config_paths: config_path_tree(config_document.as_table(), &[]),
     })
+}
+
+fn modified_unix_ms(path: &Path) -> Option<i64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(duration.as_millis().min(i64::MAX as u128) as i64)
 }
 
 pub fn preview_instance_sync_config_diff(

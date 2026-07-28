@@ -1,6 +1,7 @@
 use std::cell::Cell;
-use std::fs;
+use std::fs::{self, FileTimes};
 use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
 
 use codex_session_manager::instance_registry::{list_managed_instances, scan_and_register};
 use codex_session_manager::instance_sync::{
@@ -362,6 +363,73 @@ base_url = "https://source.example/v1"
         true
     )));
     assert!(paths.contains(&(vec!["model_providers".to_string()], false)));
+}
+
+#[test]
+fn lists_source_sessions_by_latest_update_then_text_time_and_id() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&source_directory, "model = \"source\"\n");
+
+    let newest = source_directory
+        .join("sessions")
+        .join("thread-newest.jsonl");
+    let text_later = source_directory
+        .join("sessions")
+        .join("thread-text-later.jsonl");
+    let text_earlier = source_directory
+        .join("sessions")
+        .join("thread-text-earlier.jsonl");
+    let id_alpha = source_directory.join("sessions").join("thread-alpha.jsonl");
+    let id_zeta = source_directory.join("sessions").join("thread-zeta.jsonl");
+    for (path, id) in [
+        (&newest, "thread-newest"),
+        (&text_later, "thread-text-later"),
+        (&text_earlier, "thread-text-earlier"),
+        (&id_alpha, "thread-alpha"),
+        (&id_zeta, "thread-zeta"),
+    ] {
+        write_rollout(path, id);
+    }
+    set_modified_at(&newest, 500);
+    set_modified_at(&text_later, 400);
+    set_modified_at(&text_earlier, 400);
+    set_modified_at(&id_alpha, 300);
+    set_modified_at(&id_zeta, 300);
+    fs::write(
+        source_directory.join("session_index.jsonl"),
+        concat!(
+            "{\"id\":\"thread-text-later\",\"updated_at\":\"2026-07-03T00:00:00Z\"}\n",
+            "{\"id\":\"thread-text-earlier\",\"updated_at\":\"2026-07-02T00:00:00Z\"}\n",
+        ),
+    )
+    .unwrap();
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let source = instance_id_at(
+        &list_managed_instances(&registry_path).unwrap(),
+        &source_directory,
+    );
+
+    let data = list_instance_sync_source_data(&registry_path, source).unwrap();
+
+    assert_eq!(
+        data.sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "thread-newest",
+            "thread-text-later",
+            "thread-text-earlier",
+            "thread-alpha",
+            "thread-zeta",
+        ]
+    );
+    assert!(data
+        .sessions
+        .iter()
+        .all(|session| session.sort_updated_at_ms.is_some()));
 }
 
 #[test]
@@ -1042,6 +1110,16 @@ fn write_rollout_with_details(path: &Path, id: &str, provider: &str, cwd: &str) 
         ),
     )
     .unwrap();
+}
+
+fn set_modified_at(path: &Path, seconds_after_epoch: u64) {
+    let time = UNIX_EPOCH + Duration::from_secs(seconds_after_epoch);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(time))
+        .unwrap();
 }
 
 fn instance_id_at(

@@ -258,6 +258,7 @@ interface InstanceSyncSourceSession {
   model?: string;
   source_path: string;
   updated_at?: string;
+  sort_updated_at_ms?: number;
 }
 
 interface InstanceSyncSourceData {
@@ -1796,9 +1797,17 @@ function bindInstanceEvents() {
     });
   });
   document.querySelector<HTMLInputElement>("#instance-sync-session-search")?.addEventListener("input", (event) => {
-    state.instanceSyncSessionSearch = (event.target as HTMLInputElement).value;
+    const input = event.target as HTMLInputElement;
+    const selectionStart = input.selectionStart;
+    const selectionEnd = input.selectionEnd;
+    const selectionDirection = input.selectionDirection;
+    state.instanceSyncSessionSearch = input.value;
     render({ preserveTableScroll: true });
-    document.querySelector<HTMLInputElement>("#instance-sync-session-search")?.focus();
+    const restoredInput = document.querySelector<HTMLInputElement>("#instance-sync-session-search");
+    restoredInput?.focus();
+    if (restoredInput && selectionStart != null && selectionEnd != null) {
+      restoredInput.setSelectionRange(selectionStart, selectionEnd, selectionDirection ?? undefined);
+    }
   });
   document.querySelector("#select-visible-instance-sync-sessions")?.addEventListener("click", () => {
     filteredInstanceSyncSessions().forEach((session) => state.instanceSyncSessionIds.add(session.id));
