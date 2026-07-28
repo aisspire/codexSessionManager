@@ -90,6 +90,7 @@ fn saves_sync_plan_without_session_choices_or_configuration_values() {
                 vec!["model".to_string()],
                 vec!["model_providers".to_string(), "office".to_string()],
             ],
+            project_selections: Vec::new(),
         },
     )
     .unwrap();
@@ -105,6 +106,103 @@ fn saves_sync_plan_without_session_choices_or_configuration_values() {
         ]
     );
     assert!(saved.created_at_unix > 0);
+    assert_eq!(
+        list_instance_sync_plans(&database_path).unwrap(),
+        vec![saved]
+    );
+}
+
+#[test]
+fn migrates_legacy_sync_plans_with_empty_project_selections() {
+    let dir = tempdir().unwrap();
+    let database_path = dir.path().join("instances.sqlite");
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE managed_instances (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                display_name TEXT,
+                added_at_unix INTEGER NOT NULL,
+                last_seen_at_unix INTEGER NOT NULL
+            );
+            CREATE TABLE instance_sync_plans (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_instance_id INTEGER NOT NULL,
+                target_instance_ids_json TEXT NOT NULL,
+                config_paths_json TEXT NOT NULL,
+                created_at_unix INTEGER NOT NULL,
+                updated_at_unix INTEGER NOT NULL
+            );
+            INSERT INTO instance_sync_plans (
+                id,
+                name,
+                source_instance_id,
+                target_instance_ids_json,
+                config_paths_json,
+                created_at_unix,
+                updated_at_unix
+            )
+            VALUES (1, '旧方案', 1, '[2]', '[["model"]]', 1, 2);
+            "#,
+        )
+        .unwrap();
+    drop(connection);
+
+    let plans = list_instance_sync_plans(&database_path).unwrap();
+
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].name, "旧方案");
+    assert_eq!(
+        serde_json::to_value(&plans[0])
+            .unwrap()
+            .get("project_selections")
+            .cloned(),
+        Some(serde_json::json!([]))
+    );
+    let connection = Connection::open(&database_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT project_selections_json FROM instance_sync_plans WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "[]"
+    );
+}
+
+#[test]
+fn saves_and_reads_normalized_project_selections() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let target_directory = dir.path().join("target");
+    let database_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&source_directory);
+    write_config(&target_directory);
+    scan_and_register(&database_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&database_path).unwrap();
+    let source = instance_at(&instances, &source_directory);
+    let target = instance_at(&instances, &target_directory);
+    let draft = serde_json::from_value::<InstanceSyncPlanDraft>(serde_json::json!({
+        "id": null,
+        "name": "项目同步",
+        "source_instance_id": source.id,
+        "target_instance_ids": [target.id],
+        "config_paths": [],
+        "project_selections": ["E:\\work\\office\\", null]
+    }))
+    .unwrap();
+
+    let saved = save_instance_sync_plan(&database_path, &draft).unwrap();
+
+    assert_eq!(
+        saved.project_selections,
+        vec![Some("e:/work/office".to_string()), None]
+    );
     assert_eq!(
         list_instance_sync_plans(&database_path).unwrap(),
         vec![saved]
@@ -134,6 +232,7 @@ fn updates_and_deletes_a_saved_sync_plan() {
             source_instance_id: source.id,
             target_instance_ids: vec![first_target.id],
             config_paths: Vec::new(),
+            project_selections: Vec::new(),
         },
     )
     .unwrap();
@@ -146,6 +245,7 @@ fn updates_and_deletes_a_saved_sync_plan() {
             source_instance_id: source.id,
             target_instance_ids: vec![second_target.id],
             config_paths: vec![vec!["model".to_string()]],
+            project_selections: Vec::new(),
         },
     )
     .unwrap();

@@ -10,7 +10,7 @@ use toml_edit::{DocumentMut, Item, Table};
 
 use crate::backup;
 use crate::instance_registry::{list_managed_instances, ManagedInstance};
-use crate::path_map::path_buf_for_current_os;
+use crate::path_map::{normalize_path_text, path_buf_for_current_os};
 use crate::profile::CodexProfile;
 use crate::rollout::{read_all_rollout_meta, RolloutMeta};
 use crate::safety;
@@ -21,6 +21,8 @@ pub struct InstanceSyncRequest {
     pub source_instance_id: i64,
     pub target_instance_ids: Vec<i64>,
     pub session_ids: Vec<String>,
+    #[serde(default)]
+    pub project_selections: Vec<Option<String>>,
     pub config_paths: Vec<Vec<String>>,
 }
 
@@ -236,11 +238,13 @@ pub fn list_instance_sync_source_data(
                     .and_then(|thread| thread.title.clone())
                     .or_else(|| thread.and_then(|thread| thread.first_user_message.clone()))
                     .or_else(|| raw_index_string(index, "thread_name")),
-                project: session
-                    .meta
-                    .cwd
-                    .clone()
-                    .or_else(|| thread.and_then(|thread| thread.cwd.clone())),
+                project: normalized_project_selection(
+                    session
+                        .meta
+                        .cwd
+                        .as_deref()
+                        .or_else(|| thread.and_then(|thread| thread.cwd.as_deref())),
+                ),
                 archived: session.archived,
                 source: session
                     .meta
@@ -508,8 +512,9 @@ fn prepare_request(
     request: &InstanceSyncRequest,
 ) -> Result<PreparedRequest> {
     let session_ids = normalized_session_ids(&request.session_ids)?;
+    let project_selections = normalized_project_selections(&request.project_selections);
     let config_paths = normalized_config_paths(&request.config_paths)?;
-    if session_ids.is_empty() && config_paths.is_empty() {
+    if session_ids.is_empty() && project_selections.is_empty() && config_paths.is_empty() {
         bail!("instance sync request must select at least one session or configuration path");
     }
 
@@ -521,7 +526,17 @@ fn prepare_request(
         .into_iter()
         .map(|target_id| resolve_available_instance(&instances, target_id))
         .collect::<Result<Vec<_>>>()?;
-    let sessions = selected_source_sessions(&source.profile, &session_ids)?;
+    let source_threads = if project_selections.is_empty() {
+        HashMap::new()
+    } else {
+        source_threads_by_id(&source.profile)?
+    };
+    let sessions = selected_source_sessions(
+        &source.profile,
+        &session_ids,
+        &project_selections,
+        &source_threads,
+    )?;
     validate_source_config_paths(&source.profile, &config_paths)?;
 
     Ok(PreparedRequest {
@@ -592,6 +607,24 @@ fn normalized_session_ids(session_ids: &[String]) -> Result<Vec<String>> {
     Ok(normalized)
 }
 
+fn normalized_project_selections(project_selections: &[Option<String>]) -> Vec<Option<String>> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(project_selections.len());
+    for project in project_selections {
+        let project = normalized_project_selection(project.as_deref());
+        if seen.insert(project.clone()) {
+            normalized.push(project);
+        }
+    }
+    normalized
+}
+
+fn normalized_project_selection(project: Option<&str>) -> Option<String> {
+    project
+        .map(normalize_path_text)
+        .filter(|project| !project.is_empty())
+}
+
 fn normalized_config_paths(config_paths: &[Vec<String>]) -> Result<Vec<Vec<String>>> {
     let mut seen = HashSet::new();
     let mut normalized = Vec::with_capacity(config_paths.len());
@@ -616,26 +649,53 @@ fn normalized_config_paths(config_paths: &[Vec<String>]) -> Result<Vec<Vec<Strin
 fn selected_source_sessions(
     profile: &CodexProfile,
     session_ids: &[String],
+    project_selections: &[Option<String>],
+    source_threads: &HashMap<String, ThreadRecord>,
 ) -> Result<Vec<LocatedSession>> {
-    if session_ids.is_empty() {
-        return Ok(Vec::new());
+    let mut by_id = source_sessions_by_id(profile)?;
+    let mut selected = Vec::with_capacity(session_ids.len());
+    for session_id in session_ids {
+        selected.push(take_single_source_session(&mut by_id, session_id)?);
     }
 
-    let mut by_id = source_sessions_by_id(profile)?;
-    session_ids
+    let mut project_session_ids = by_id
         .iter()
-        .map(|session_id| {
-            let sessions = by_id
-                .remove(session_id)
-                .ok_or_else(|| anyhow::anyhow!("source session {session_id} does not exist"))?;
-            if sessions.len() != 1 {
-                bail!(
-                    "source session {session_id} has multiple JSONL files; refusing to choose one"
-                );
-            }
-            Ok(sessions.into_iter().next().expect("length already checked"))
+        .filter(|(_, sessions)| {
+            sessions.iter().any(|session| {
+                project_selections.contains(&located_session_project(session, source_threads))
+            })
         })
-        .collect()
+        .map(|(session_id, _)| session_id.clone())
+        .collect::<Vec<_>>();
+    project_session_ids.sort();
+    for session_id in project_session_ids {
+        selected.push(take_single_source_session(&mut by_id, &session_id)?);
+    }
+    Ok(selected)
+}
+
+fn take_single_source_session(
+    by_id: &mut HashMap<String, Vec<LocatedSession>>,
+    session_id: &str,
+) -> Result<LocatedSession> {
+    let sessions = by_id
+        .remove(session_id)
+        .ok_or_else(|| anyhow::anyhow!("source session {session_id} does not exist"))?;
+    if sessions.len() != 1 {
+        bail!("source session {session_id} has multiple JSONL files; refusing to choose one");
+    }
+    Ok(sessions.into_iter().next().expect("length already checked"))
+}
+
+fn located_session_project(
+    session: &LocatedSession,
+    source_threads: &HashMap<String, ThreadRecord>,
+) -> Option<String> {
+    normalized_project_selection(session.meta.cwd.as_deref().or_else(|| {
+        source_threads
+            .get(&session.id)
+            .and_then(|thread| thread.cwd.as_deref())
+    }))
 }
 
 fn source_sessions_by_id(profile: &CodexProfile) -> Result<HashMap<String, Vec<LocatedSession>>> {

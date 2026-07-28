@@ -1048,7 +1048,7 @@ function instanceSyncWorkspace() {
       <div class="instance-sync-heading">
         <div>
           <h2>本机同步工作区</h2>
-          <p>项目全选可作为同步方案条件；单独会话仅用于本次同步。配置方案不保存配置值，内置自动方案不会保存。</p>
+          <p>项目全选会保存为方案条件，并在预览和执行时按当前源会话动态展开；单独会话仅用于本次同步。配置方案不保存配置值，内置自动方案不会保存。</p>
         </div>
         <span class="instance-sync-selection" aria-live="polite">会话 ${selectedSessions} · 项目 ${selectedProjects} · ${configSelectionStatus}</span>
       </div>
@@ -1116,7 +1116,7 @@ function instanceSyncWorkspace() {
           <div class="instance-sync-panel-title">
             <div>
               <h3>② 选择会话</h3>
-              <p class="instance-sync-risk">按项目分组，项目内按最新时间排序。项目全选会包含该项目当前所有会话；单独勾选只用于本次同步。</p>
+              <p class="instance-sync-risk">按项目分组，项目内按最新时间排序。项目全选会在预览和执行时纳入该项目当前所有会话；单独勾选只用于本次同步。</p>
             </div>
             <button id="select-visible-instance-sync-sessions" ${disabledWhenBusy(visibleSessionCount === 0)}>选中筛选结果（本次）</button>
           </div>
@@ -2629,7 +2629,8 @@ function instanceSyncSelection() {
   return {
     sourceInstanceId: state.instanceSyncSourceId,
     targetInstanceIds: [...state.instanceSyncTargetIds],
-    sessionIds: currentInstanceSyncSessionIds(),
+    projectSelections: [...state.instanceSyncProjectSelections],
+    sessionIds: [...state.instanceSyncSessionIds],
     configPathKeys: [...state.instanceSyncConfigPathKeys],
   };
 }
@@ -2662,6 +2663,7 @@ function currentInstanceSyncRequest() {
       source_instance_id: selection.sourceInstanceId,
       target_instance_ids: selection.targetInstanceIds,
       session_ids: selection.sessionIds,
+      project_selections: selection.projectSelections,
       config_paths: configPaths,
     },
   };
@@ -2690,13 +2692,13 @@ async function selectInstanceSyncPlan(planId: number | null) {
   state.instanceSyncPlanName = plan.name;
   state.instanceSyncSourceId = selection.sourceInstanceId;
   state.instanceSyncTargetIds = new Set(selection.targetInstanceIds);
-  state.instanceSyncProjectSelections.clear();
+  state.instanceSyncProjectSelections = new Set(selection.projectSelections);
   state.instanceSyncSessionIds.clear();
   state.instanceSyncConfigPathKeys = new Set(selection.configPathKeys);
   reconcileInstanceSyncInstances();
   clearInstanceSyncOutcome();
   await loadInstanceSyncSourceData(state.instanceSyncSourceId, false);
-  state.status = `已加载方案“${plan.name}”；请重新选择本次会话`;
+  state.status = `已加载方案“${plan.name}”；已恢复项目选择，可调整本次会话`;
   render({ preserveTableScroll: true });
 }
 
@@ -2947,6 +2949,7 @@ async function saveInstanceSyncPlan() {
         name,
         source_instance_id: sourceInstanceId,
         target_instance_ids: targetInstanceIds,
+        project_selections: [...state.instanceSyncProjectSelections],
         config_paths: [...state.instanceSyncConfigPathKeys]
           .map(configPathFromKey)
           .filter((path) => path.length > 0),

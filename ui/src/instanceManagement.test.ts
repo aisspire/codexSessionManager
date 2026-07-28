@@ -29,6 +29,7 @@ import {
   instanceSyncProjectSelectionFromKey,
   instanceSyncProjectSelectionKey,
   isInstanceSyncSessionSelected,
+  reconcileInstanceSyncSessionSelection,
   selectedInstanceSyncSessionIds,
   setInstanceSyncProjectSelection,
   setInstanceSyncSessionSelection,
@@ -108,6 +109,7 @@ expectEqual(
     source_instance_id: availableInstance.id,
     target_instance_ids: [secondAvailableInstance.id],
     config_paths: [["model"], ["model_providers", "office", "api_key"]],
+    project_selections: ["e:/work/office", null],
     created_at_unix: 1,
     updated_at_unix: 2,
   }),
@@ -115,9 +117,10 @@ expectEqual(
     sourceInstanceId: availableInstance.id,
     targetInstanceIds: [secondAvailableInstance.id],
     configPathKeys: [configPathKey(["model"]), configPathKey(["model_providers", "office", "api_key"])],
+    projectSelections: ["e:/work/office", null],
     sessionIds: [],
   },
-  "loading a sync plan restores only instance and config choices, never prior session choices",
+  "loading a sync plan restores project selections but never prior single-session choices",
 );
 expectEqual(
   isAutomaticNonRootDiffPlan(automaticNonRootDiffPlanId),
@@ -183,11 +186,12 @@ expectEqual(
   validateInstanceSyncSelection({
     sourceInstanceId: availableInstance.id,
     targetInstanceIds: [secondAvailableInstance.id],
+    projectSelections: [],
     sessionIds: [],
     configPathKeys: [],
   }),
-  "请至少选择一个会话或配置项",
-  "rejects a sync request with neither sessions nor configuration paths",
+  "请至少选择一个会话、项目或配置项",
+  "rejects a sync request with neither sessions, projects, nor configuration paths",
 );
 expectEqual(
   instanceSyncTargetSummary({
@@ -403,6 +407,21 @@ expectEqual(
   isInstanceSyncSessionSelected(instanceSyncSelectionSessions[0], instanceSyncSelection),
   false,
   "the deselected project session stays excluded after conversion",
+);
+const reconciledProjectSelection = reconcileInstanceSyncSessionSelection(
+  [],
+  {
+    projectSelections: new Set(["e:/work/future", null]),
+    sessionIds: new Set(["removed-session"]),
+  },
+);
+expectEqual(
+  {
+    projectSelections: [...reconciledProjectSelection.projectSelections],
+    sessionIds: [...reconciledProjectSelection.sessionIds],
+  },
+  { projectSelections: ["e:/work/future", null], sessionIds: [] },
+  "keeps saved project conditions when the source currently has no matching sessions",
 );
 expectEqual(
   [

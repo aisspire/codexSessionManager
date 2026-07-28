@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use walkdir::WalkDir;
 
+use crate::path_map::normalize_path_text;
+
 const CONFIG_FILE_NAME: &str = "config.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,9 +33,10 @@ pub struct InstanceScanReport {
 
 /// A reusable local-instance synchronization recipe.
 ///
-/// Session choices deliberately do not belong here: users choose them for
-/// every run. Config paths are represented as TOML key segments so keys that
-/// contain dots are not ambiguous.
+/// Explicit session choices deliberately do not belong here: users choose
+/// those for every run. Project selections are durable conditions, while config
+/// paths are represented as TOML key segments so keys that contain dots are not
+/// ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceSyncPlan {
     pub id: i64,
@@ -41,6 +44,8 @@ pub struct InstanceSyncPlan {
     pub source_instance_id: i64,
     pub target_instance_ids: Vec<i64>,
     pub config_paths: Vec<Vec<String>>,
+    #[serde(default)]
+    pub project_selections: Vec<Option<String>>,
     pub created_at_unix: i64,
     pub updated_at_unix: i64,
 }
@@ -52,6 +57,8 @@ pub struct InstanceSyncPlanDraft {
     pub source_instance_id: i64,
     pub target_instance_ids: Vec<i64>,
     pub config_paths: Vec<Vec<String>>,
+    #[serde(default)]
+    pub project_selections: Vec<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -287,6 +294,7 @@ pub fn list_instance_sync_plans(database_path: &Path) -> Result<Vec<InstanceSync
             source_instance_id,
             target_instance_ids_json,
             config_paths_json,
+            project_selections_json,
             created_at_unix,
             updated_at_unix
         FROM instance_sync_plans
@@ -310,6 +318,7 @@ pub fn save_instance_sync_plan(
     let target_instance_ids =
         normalized_target_instance_ids(draft.source_instance_id, &draft.target_instance_ids)?;
     let config_paths = normalized_config_paths(&draft.config_paths)?;
+    let project_selections = normalized_project_selections(&draft.project_selections);
     let connection = open_registry(database_path)?;
     ensure_sync_plan_instances_available(
         &connection,
@@ -321,6 +330,8 @@ pub fn save_instance_sync_plan(
         .context("failed to serialize instance sync plan targets")?;
     let config_paths_json = serde_json::to_string(&config_paths)
         .context("failed to serialize instance sync plan config paths")?;
+    let project_selections_json = serde_json::to_string(&project_selections)
+        .context("failed to serialize instance sync plan project selections")?;
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let id = if let Some(id) = draft.id {
         let changed = connection.execute(
@@ -331,14 +342,16 @@ pub fn save_instance_sync_plan(
                 source_instance_id = ?2,
                 target_instance_ids_json = ?3,
                 config_paths_json = ?4,
-                updated_at_unix = ?5
-            WHERE id = ?6
+                project_selections_json = ?5,
+                updated_at_unix = ?6
+            WHERE id = ?7
             "#,
             params![
                 name,
                 draft.source_instance_id,
                 target_instance_ids_json,
                 config_paths_json,
+                project_selections_json,
                 now,
                 id,
             ],
@@ -355,16 +368,18 @@ pub fn save_instance_sync_plan(
                 source_instance_id,
                 target_instance_ids_json,
                 config_paths_json,
+                project_selections_json,
                 created_at_unix,
                 updated_at_unix
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
             "#,
             params![
                 name,
                 draft.source_instance_id,
                 target_instance_ids_json,
                 config_paths_json,
+                project_selections_json,
                 now,
             ],
         )?;
@@ -418,6 +433,7 @@ fn open_registry(database_path: &Path) -> Result<Connection> {
             source_instance_id INTEGER NOT NULL,
             target_instance_ids_json TEXT NOT NULL,
             config_paths_json TEXT NOT NULL,
+            project_selections_json TEXT NOT NULL DEFAULT '[]',
             created_at_unix INTEGER NOT NULL,
             updated_at_unix INTEGER NOT NULL
         );
@@ -425,13 +441,21 @@ fn open_registry(database_path: &Path) -> Result<Connection> {
     )?;
     ensure_registry_column(
         &connection,
+        "managed_instances",
         "deleted_at_unix",
         "ALTER TABLE managed_instances ADD COLUMN deleted_at_unix INTEGER",
     )?;
     ensure_registry_column(
         &connection,
+        "managed_instances",
         "ignored_at_unix",
         "ALTER TABLE managed_instances ADD COLUMN ignored_at_unix INTEGER",
+    )?;
+    ensure_registry_column(
+        &connection,
+        "instance_sync_plans",
+        "project_selections_json",
+        "ALTER TABLE instance_sync_plans ADD COLUMN project_selections_json TEXT NOT NULL DEFAULT '[]'",
     )?;
     Ok(connection)
 }
@@ -439,11 +463,15 @@ fn open_registry(database_path: &Path) -> Result<Connection> {
 fn instance_sync_plan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceSyncPlan> {
     let target_instance_ids_json = row.get::<_, String>(3)?;
     let config_paths_json = row.get::<_, String>(4)?;
+    let project_selections_json = row.get::<_, String>(5)?;
     let target_instance_ids = serde_json::from_str(&target_instance_ids_json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
     })?;
     let config_paths = serde_json::from_str(&config_paths_json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let project_selections = serde_json::from_str(&project_selections_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(InstanceSyncPlan {
         id: row.get(0)?,
@@ -451,8 +479,9 @@ fn instance_sync_plan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Inst
         source_instance_id: row.get(2)?,
         target_instance_ids,
         config_paths,
-        created_at_unix: row.get(5)?,
-        updated_at_unix: row.get(6)?,
+        project_selections,
+        created_at_unix: row.get(6)?,
+        updated_at_unix: row.get(7)?,
     })
 }
 
@@ -466,6 +495,7 @@ fn read_instance_sync_plan(connection: &Connection, id: i64) -> Result<InstanceS
                 source_instance_id,
                 target_instance_ids_json,
                 config_paths_json,
+                project_selections_json,
                 created_at_unix,
                 updated_at_unix
             FROM instance_sync_plans
@@ -526,6 +556,21 @@ fn normalized_config_paths(config_paths: &[Vec<String>]) -> Result<Vec<Vec<Strin
     Ok(normalized)
 }
 
+fn normalized_project_selections(project_selections: &[Option<String>]) -> Vec<Option<String>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::with_capacity(project_selections.len());
+    for project in project_selections {
+        let project = project
+            .as_deref()
+            .map(normalize_path_text)
+            .filter(|project| !project.is_empty());
+        if seen.insert(project.clone()) {
+            normalized.push(project);
+        }
+    }
+    normalized
+}
+
 fn ensure_sync_plan_instances_available(
     connection: &Connection,
     source_instance_id: i64,
@@ -555,10 +600,11 @@ fn ensure_sync_plan_instances_available(
 
 fn ensure_registry_column(
     connection: &Connection,
+    table_name: &str,
     column_name: &str,
     migration_statement: &str,
 ) -> Result<()> {
-    let mut statement = connection.prepare("PRAGMA table_info(managed_instances)")?;
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table_name})"))?;
     let mut rows = statement.query([])?;
     let mut has_column = false;
     while let Some(row) = rows.next()? {

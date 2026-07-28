@@ -148,12 +148,9 @@ export function reconcileInstanceSyncSessionSelection<TSession extends InstanceS
   sessions: TSession[],
   selection: InstanceSyncSessionSelection,
 ): InstanceSyncSessionSelection {
-  const availableProjects = new Set(sessions.map((session) => normalizeInstanceSyncProject(session.project)));
   const availableSessionIds = new Set(sessions.map((session) => session.id));
   return {
-    projectSelections: new Set(
-      [...selection.projectSelections].filter((project) => availableProjects.has(project)),
-    ),
+    projectSelections: new Set(selection.projectSelections),
     sessionIds: new Set([...selection.sessionIds].filter((id) => availableSessionIds.has(id))),
   };
 }

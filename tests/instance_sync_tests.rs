@@ -3,7 +3,9 @@ use std::fs::{self, FileTimes};
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
-use codex_session_manager::instance_registry::{list_managed_instances, scan_and_register};
+use codex_session_manager::instance_registry::{
+    list_managed_instances, save_instance_sync_plan, scan_and_register, InstanceSyncPlanDraft,
+};
 use codex_session_manager::instance_sync::{
     execute_instance_sync_with_guard, list_instance_sync_source_data, preview_instance_sync,
     preview_instance_sync_config_diff, select_instance_sync_non_root_config_differences,
@@ -40,6 +42,7 @@ fn imports_a_selected_archived_session_without_changing_its_state() {
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
         || Ok(()),
@@ -101,6 +104,7 @@ api_key = "target-secret"
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: Vec::new(),
+            project_selections: Vec::new(),
             config_paths: vec![
                 vec!["model".to_string()],
                 vec![
@@ -180,6 +184,7 @@ fn merges_index_and_upserts_only_the_imported_session_thread() {
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: vec!["thread-import".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
         || Ok(()),
@@ -246,6 +251,7 @@ fn skips_identical_sessions_and_preserves_conflicting_target_sessions() {
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: vec!["thread-same".to_string(), "thread-conflict".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
         || Ok(()),
@@ -291,6 +297,7 @@ fn continues_with_later_targets_when_one_target_fails_preflight() {
             source_instance_id: source,
             target_instance_ids: vec![healthy_target, invalid_target],
             session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
             config_paths: vec![vec!["model".to_string()]],
         },
         || Ok(()),
@@ -478,7 +485,7 @@ fn lists_source_session_hover_metadata_without_reading_session_contents() {
         .unwrap();
 
     assert_eq!(session.title.as_deref(), Some("完整的会话标题"));
-    assert_eq!(session.project.as_deref(), Some("E:\\project\\metadata"));
+    assert_eq!(session.project.as_deref(), Some("e:/project/metadata"));
     assert!(!session.archived);
     assert_eq!(session.source.as_deref(), Some("cli"));
     assert_eq!(session.model_provider.as_deref(), Some("openai"));
@@ -744,6 +751,7 @@ fn previews_new_skipped_and_conflicting_sessions_without_writing() {
                 "thread-conflict".to_string(),
                 "thread-new".to_string(),
             ],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
     )
@@ -762,6 +770,78 @@ fn previews_new_skipped_and_conflicting_sessions_without_writing() {
         .join("sessions")
         .join("thread-new.jsonl")
         .exists());
+}
+
+#[test]
+fn saved_project_selections_expand_new_source_sessions_for_preview_and_execution() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let target_directory = dir.path().join("target");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    let project = r"E:\project\dynamic";
+    write_config(&source_directory, "model = \"source\"\n");
+    write_config(&target_directory, "model = \"target\"\n");
+    write_rollout_with_details(
+        &source_directory
+            .join("sessions")
+            .join("thread-before.jsonl"),
+        "thread-before",
+        "openai",
+        project,
+    );
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&registry_path).unwrap();
+    let source = instance_id_at(&instances, &source_directory);
+    let target = instance_id_at(&instances, &target_directory);
+    let plan = save_instance_sync_plan(
+        &registry_path,
+        &InstanceSyncPlanDraft {
+            id: None,
+            name: "动态项目同步".to_string(),
+            source_instance_id: source,
+            target_instance_ids: vec![target],
+            config_paths: Vec::new(),
+            project_selections: vec![Some(format!("{project}\\"))],
+        },
+    )
+    .unwrap();
+    write_rollout_with_details(
+        &source_directory.join("sessions").join("thread-after.jsonl"),
+        "thread-after",
+        "openai",
+        project,
+    );
+    let request = serde_json::from_value::<InstanceSyncRequest>(serde_json::json!({
+        "source_instance_id": plan.source_instance_id,
+        "target_instance_ids": plan.target_instance_ids,
+        "session_ids": ["thread-before"],
+        "project_selections": plan.project_selections,
+        "config_paths": plan.config_paths,
+    }))
+    .unwrap();
+
+    let preview = preview_instance_sync(&registry_path, &request).unwrap();
+
+    assert_eq!(preview.session_count, 2);
+    let mut previewed_ids = preview.targets[0].sessions_to_add.clone();
+    previewed_ids.sort();
+    assert_eq!(previewed_ids, vec!["thread-after", "thread-before"]);
+    assert!(!target_directory
+        .join("sessions")
+        .join("thread-after.jsonl")
+        .exists());
+
+    let report = execute_instance_sync_with_guard(&registry_path, &request, || Ok(())).unwrap();
+
+    assert_eq!(report.targets[0].sessions_added.len(), 2);
+    assert!(target_directory
+        .join("sessions")
+        .join("thread-before.jsonl")
+        .is_file());
+    assert!(target_directory
+        .join("sessions")
+        .join("thread-after.jsonl")
+        .is_file());
 }
 
 #[test]
@@ -787,6 +867,7 @@ fn refuses_every_target_before_writing_when_codex_is_running() {
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
         || Err(anyhow::anyhow!("Codex appears to be running")),
@@ -828,6 +909,7 @@ fn keeps_project_path_verbatim_and_warns_when_it_is_missing_on_the_target_machin
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
         || Ok(()),
@@ -885,6 +967,7 @@ fn treats_any_different_duplicate_target_session_as_a_conflict() {
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
         || Ok(()),
@@ -925,6 +1008,7 @@ fn stops_remaining_targets_when_codex_starts_between_target_preflights() {
             source_instance_id: source,
             target_instance_ids: vec![first_target, second_target, third_target],
             session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
         || {
@@ -996,6 +1080,7 @@ fn treats_a_different_target_session_index_entry_as_a_conflict() {
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
     )
@@ -1008,6 +1093,7 @@ fn treats_a_different_target_session_index_entry_as_a_conflict() {
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
         || Ok(()),
@@ -1065,6 +1151,7 @@ fn retains_backup_and_completed_session_details_when_index_write_fails() {
             source_instance_id: source,
             target_instance_ids: vec![target],
             session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
             config_paths: Vec::new(),
         },
         || Ok(()),

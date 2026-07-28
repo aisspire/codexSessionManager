@@ -21,6 +21,7 @@ export interface InstanceSyncPlan {
   source_instance_id: number;
   target_instance_ids: number[];
   config_paths: string[][];
+  project_selections: Array<string | null>;
   created_at_unix: number;
   updated_at_unix: number;
 }
@@ -29,6 +30,7 @@ export interface InstanceSyncSelection {
   sourceInstanceId: number | null;
   targetInstanceIds: number[];
   configPathKeys: string[];
+  projectSelections: Array<string | null>;
   sessionIds: string[];
 }
 
@@ -127,6 +129,7 @@ export function applyInstanceSyncPlan(plan: InstanceSyncPlan): InstanceSyncSelec
     sourceInstanceId: plan.source_instance_id,
     targetInstanceIds: [...plan.target_instance_ids],
     configPathKeys: plan.config_paths.map(configPathKey),
+    projectSelections: [...plan.project_selections],
     sessionIds: [],
   };
 }
@@ -140,8 +143,12 @@ export function validateInstanceSyncSelection(selection: InstanceSyncSelection) 
   if (new Set(selection.targetInstanceIds).size !== selection.targetInstanceIds.length) {
     return "目标实例不能重复";
   }
-  if (selection.sessionIds.length === 0 && selection.configPathKeys.length === 0) {
-    return "请至少选择一个会话或配置项";
+  if (
+    selection.sessionIds.length === 0 &&
+    selection.projectSelections.length === 0 &&
+    selection.configPathKeys.length === 0
+  ) {
+    return "请至少选择一个会话、项目或配置项";
   }
   return null;
 }
