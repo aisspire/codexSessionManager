@@ -473,6 +473,7 @@ const state = {
   instanceSyncSourceId: null as number | null,
   instanceSyncTargetIds: new Set<number>(),
   instanceSyncSessions: [] as InstanceSyncSourceSession[],
+  instanceSyncExpandedProjectKeys: new Set<string>(),
   instanceSyncProjectSelections: new Set<InstanceSyncProjectSelection>(),
   instanceSyncSessionIds: new Set<string>(),
   instanceSyncSessionSearch: "",
@@ -1190,21 +1191,43 @@ function instanceSyncSessionProjectGroup(
   visibleSessions: InstanceSyncSourceSession[],
 ) {
   const projectSelected = state.instanceSyncProjectSelections.has(group.project);
+  const selectedCount = group.sessions.filter((session) =>
+    isInstanceSyncSessionSelected(session, currentInstanceSyncSessionSelection()),
+  ).length;
+  const expanded =
+    state.instanceSyncSessionSearch.trim().length > 0 ||
+    state.instanceSyncExpandedProjectKeys.has(group.key);
+  const sessionSummary =
+    visibleSessions.length === group.sessions.length
+      ? `${group.sessions.length} 个会话 · 已选 ${selectedCount}`
+      : `匹配 ${visibleSessions.length}/${group.sessions.length} · 已选 ${selectedCount}`;
   return `
-    <section class="instance-sync-session-project">
+    <section class="instance-sync-session-project ${expanded ? "is-expanded" : ""} ${projectSelected ? "is-project-selected" : ""}">
       <div class="instance-sync-session-project-heading">
+        <button
+          type="button"
+          class="instance-sync-project-toggle"
+          data-toggle-instance-sync-project="${escapeHtml(group.key)}"
+          aria-expanded="${expanded}"
+          aria-label="${expanded ? "折叠" : "展开"}项目 ${escapeHtml(group.label)}"
+          ${disabledWhenBusy()}
+        >
+          ${folderIcon(expanded)}
+          <span class="instance-sync-project-title" title="${escapeHtml(group.label)}">${escapeHtml(group.label)}</span>
+          <span class="instance-sync-project-meta">${escapeHtml(sessionSummary)}</span>
+        </button>
         <label class="instance-sync-project-select">
-          <input type="checkbox" data-instance-sync-project="${escapeHtml(group.key)}" ${projectSelected ? "checked" : ""} ${disabledWhenBusy()} />
-          <span>
-            <strong>${escapeHtml(group.label)}</strong>
-            <small>${group.sessions.length} 个会话 · 项目全选可保存</small>
-          </span>
+          <input type="checkbox" data-instance-sync-project="${escapeHtml(group.key)}" data-instance-sync-project-selected-count="${selectedCount}" ${projectSelected ? "checked" : ""} ${disabledWhenBusy()} />
+          <span>${projectSelected ? "已项目全选" : "项目全选"}</span>
         </label>
-        <span class="instance-sync-project-selection">${projectSelected ? "已项目全选" : "项目全选"}</span>
       </div>
-      <div class="instance-sync-session-project-list">
-        ${visibleSessions.map(instanceSyncSessionRow).join("")}
-      </div>
+      ${
+        expanded
+          ? `<div class="instance-sync-session-project-list">${visibleSessions
+              .map(instanceSyncSessionRow)
+              .join("")}</div>`
+          : ""
+      }
     </section>
   `;
 }
@@ -2043,16 +2066,33 @@ function bindInstanceEvents() {
     clearInstanceSyncOutcome();
     render({ preserveTableScroll: true });
   });
+  document
+    .querySelectorAll<HTMLButtonElement>("[data-toggle-instance-sync-project]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        const key = button.dataset.toggleInstanceSyncProject;
+        if (key == null) return;
+        state.instanceSyncExpandedProjectKeys.has(key)
+          ? state.instanceSyncExpandedProjectKeys.delete(key)
+          : state.instanceSyncExpandedProjectKeys.add(key);
+        render({ preserveTableScroll: true });
+      });
+    });
   document.querySelectorAll<HTMLInputElement>("[data-instance-sync-project]").forEach((checkbox) => {
+    const project = instanceSyncProjectSelectionFromKey(checkbox.dataset.instanceSyncProject || "");
+    if (project === undefined) return;
+    const selectedCount = Number(checkbox.dataset.instanceSyncProjectSelectedCount ?? "0");
+    checkbox.indeterminate =
+      !state.instanceSyncProjectSelections.has(project) && selectedCount > 0;
     checkbox.addEventListener("change", () => {
       const key = checkbox.dataset.instanceSyncProject || "";
-      const project = instanceSyncProjectSelectionFromKey(key);
-      if (project === undefined) return;
+      const selectedProject = instanceSyncProjectSelectionFromKey(key);
+      if (selectedProject === undefined) return;
       applyInstanceSyncSessionSelection(
         setInstanceSyncProjectSelection(
           state.instanceSyncSessions,
           currentInstanceSyncSessionSelection(),
-          project,
+          selectedProject,
           checkbox.checked,
         ),
       );
@@ -2879,6 +2919,7 @@ async function loadInstanceSyncSourceData(
   dismissInstanceSyncPreview();
   invalidateInstanceSyncConfigDifferenceSummary();
   state.instanceSyncSessions = [];
+  state.instanceSyncExpandedProjectKeys.clear();
   state.instanceSyncConfigPaths = [];
   if (sourceInstanceId == null) {
     state.instanceSyncProjectSelections.clear();
@@ -2896,6 +2937,9 @@ async function loadInstanceSyncSourceData(
     });
     if (state.instanceSyncSourceId !== sourceInstanceId) return;
     state.instanceSyncSessions = data.sessions;
+    state.instanceSyncExpandedProjectKeys = new Set(
+      buildInstanceSyncProjectGroups(data.sessions).map((group) => group.key),
+    );
     applyInstanceSyncSessionSelection(
       reconcileInstanceSyncSessionSelection(
         data.sessions,

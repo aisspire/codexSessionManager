@@ -1164,70 +1164,108 @@ select {
 
 .instance-sync-session-project {
   display: grid;
-  gap: 5px;
-  border: 1px solid #d8e5e8;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #ccdce1;
   border-radius: 6px;
-  padding: 6px;
   background: #ffffff;
+  box-shadow: 0 1px 2px rgb(17 24 39 / 3%);
 }
 
 .instance-sync-session-project-heading {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
   min-width: 0;
+  min-height: 42px;
+  background: #eef5f6;
 }
 
-.instance-sync-project-select {
+.instance-sync-session-project.is-expanded .instance-sync-session-project-heading {
+  border-bottom: 1px solid #dbe7ea;
+}
+
+.instance-sync-session-project.is-project-selected .instance-sync-session-project-heading {
+  background: #e3f2ef;
+}
+
+.instance-sync-project-toggle {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  align-items: start;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
   gap: 7px;
   min-width: 0;
+  min-height: 41px;
+  border: 0;
+  border-radius: 5px 0 0 5px;
+  padding: 7px 8px;
+  background: transparent;
+  text-align: left;
 }
 
-.instance-sync-project-select input {
-  width: 17px;
-  min-height: 17px;
-  margin: 1px 0 0;
+.instance-sync-project-toggle:hover {
+  background: #e4f1f2;
 }
 
-.instance-sync-project-select span {
-  display: grid;
-  gap: 2px;
+.instance-sync-project-toggle:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #0e6870;
+  outline-offset: -2px;
+}
+
+.instance-sync-project-toggle .folder-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.instance-sync-project-title,
+.instance-sync-project-meta {
   min-width: 0;
-}
-
-.instance-sync-project-select strong,
-.instance-sync-project-select small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.instance-sync-project-select strong {
-  color: #264754;
+.instance-sync-project-title {
+  color: #1d3442;
   font-size: 12px;
+  font-weight: 800;
 }
 
-.instance-sync-project-select small,
-.instance-sync-project-selection {
+.instance-sync-project-meta {
   color: #607785;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 700;
 }
 
-.instance-sync-project-selection {
-  flex: 0 0 auto;
-  border-radius: 999px;
-  padding: 3px 6px;
-  background: #edf6f6;
+.instance-sync-project-select {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 41px;
+  min-width: 0;
+  margin: 0;
+  padding: 0 9px;
+  border-left: 1px solid #dbe7ea;
+  color: #45606d;
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.instance-sync-project-select input {
+  width: 17px;
+  min-height: 17px;
+  margin: 0;
 }
 
 .instance-sync-session-project-list {
   display: grid;
   gap: 2px;
+  margin: 7px 8px 8px 17px;
+  padding-left: 8px;
+  border-left: 2px solid #d6e5e7;
 }
 
 .instance-sync-config-node {
@@ -2144,5 +2182,23 @@ dd {
 
   .detail-drawer {
     width: 100vw;
+  }
+}
+
+@media (max-width: 520px) {
+  .instance-sync-project-toggle {
+    grid-template-columns: 20px minmax(0, 1fr);
+  }
+
+  .instance-sync-project-meta {
+    display: none;
+  }
+
+  .instance-sync-project-select {
+    padding: 0 7px;
+  }
+
+  .instance-sync-session-project-list {
+    margin-left: 13px;
   }
 }
