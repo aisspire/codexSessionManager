@@ -15,6 +15,7 @@ import {
   pathFieldMarkup,
   pathPickerDirectory,
   pickSinglePath,
+  registeredCodexHomePickerMarkup,
   type PathPickerTarget,
 } from "./pathPicker";
 import {
@@ -486,6 +487,7 @@ const instanceSyncPreviewController = new DelayedInstanceSyncPreview();
 const instanceSyncPreviewInputMode = new InstanceSyncPreviewInputMode();
 const instanceSyncConfigDiffCache = new ExpiringInstanceSyncPreviewCache<InstanceSyncConfigDiff>();
 let automaticNonRootDiffSelectionRequestId = 0;
+let profileDataRequestId = 0;
 let instanceSyncPreviewDescriptionTarget: HTMLElement | null = null;
 let lastRenderedPage: AppPage | null = null;
 
@@ -730,12 +732,7 @@ function filterBar() {
   return `
     <section class="toolbar filter-toolbar" aria-label="搜索筛选">
       <div class="filter-path-row">
-        ${pathFieldMarkup({
-          target: "codex-home",
-          label: "Codex 主目录",
-          value: state.profile.codex_home,
-          escapeHtml,
-        })}
+        ${codexHomePickerMarkup()}
         <button id="refresh" class="primary" ${disabledWhenBusy()}>开始扫描</button>
       </div>
       <div class="filter-grid">
@@ -758,6 +755,38 @@ function filterBar() {
   `;
 }
 
+function codexHomePickerMarkup() {
+  const selectedInstanceId = currentCodexHomeManagedInstanceId();
+  return registeredCodexHomePickerMarkup({
+    target: "codex-home",
+    label: "Codex 主目录",
+    value: state.profile.codex_home,
+    escapeHtml,
+    disabled: state.busy.active,
+    selectedInstanceId,
+    instances: state.managedInstances.map((instance) => ({
+      id: instance.id,
+      label: instanceDisplayName(instance),
+      path: instance.path,
+      available: instance.available,
+    })),
+  });
+}
+
+function currentCodexHomeManagedInstanceId() {
+  const currentPath = comparableDirectoryPath(state.profile.codex_home);
+  return (
+    state.managedInstances.find(
+      (instance) =>
+        instance.available && comparableDirectoryPath(instance.path) === currentPath,
+    )?.id ?? null
+  );
+}
+
+function comparableDirectoryPath(path: string) {
+  return path.trim().replace(/[\\/]+$/, "");
+}
+
 function instanceFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="实例扫描">
@@ -777,12 +806,7 @@ function instanceFilterBar() {
 function repairFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="数据库修复范围">
-      ${pathFieldMarkup({
-        target: "codex-home",
-        label: "Codex 主目录",
-        value: state.profile.codex_home,
-        escapeHtml,
-      })}
+      ${codexHomePickerMarkup()}
       <button id="refresh" class="primary" ${disabledWhenBusy()}>扫描修复项</button>
     </section>
   `;
@@ -791,12 +815,7 @@ function repairFilterBar() {
 function backupFilterBar() {
   return `
     <section class="toolbar repair-filter-toolbar" aria-label="备份范围">
-      ${pathFieldMarkup({
-        target: "codex-home",
-        label: "Codex 主目录",
-        value: state.profile.codex_home,
-        escapeHtml,
-      })}
+      ${codexHomePickerMarkup()}
       <button id="refresh" class="primary" ${disabledWhenBusy()}>扫描备份</button>
     </section>
   `;
@@ -1990,6 +2009,11 @@ function bindPageSwitching() {
 
 function bindFilters() {
   bindInput("codex-home", updateCodexHome);
+  document.querySelector<HTMLSelectElement>("#registered-codex-home")?.addEventListener("change", (event) => {
+    const instanceId = Number((event.target as HTMLSelectElement).value);
+    if (!Number.isSafeInteger(instanceId)) return;
+    void selectRegisteredCodexHome(instanceId);
+  });
   document.querySelector<HTMLInputElement>("#codex-home")?.addEventListener("change", () => {
     void loadAppSettings(false);
   });
@@ -2185,22 +2209,28 @@ function saveCurrentInputCache() {
 
 async function refresh() {
   await runWithProgress("正在加载会话", async () => {
-    await loadSessions();
-    state.status = "已加载会话";
+    if (await loadSessions()) {
+      state.status = "已加载会话";
+    }
   });
 }
 
-async function loadSessions(activeId?: string) {
-  state.sessions = await invoke<SessionSummary[]>("list_sessions", {
-    profile: state.profile,
-    filter: state.filter,
+async function loadSessions(activeId?: string, requestId = profileDataRequestId) {
+  const profile = profileSnapshot();
+  const filter = { ...state.filter };
+  const sessions = await invoke<SessionSummary[]>("list_sessions", {
+    profile,
+    filter,
   });
+  if (!isCurrentProfileDataRequest(requestId)) return false;
+  state.sessions = sessions;
   state.selectedIds.clear();
   state.activeId =
     activeId && state.sessions.some((session) => session.id === activeId)
       ? activeId
       : state.sessions[0]?.id || "";
   state.detailOpen = Boolean(activeId && state.activeId);
+  return true;
 }
 
 function bindPathPickerEvents() {
@@ -2219,10 +2249,7 @@ async function selectPathForTarget(target: PathPickerTarget) {
     if (!selectedPath) return;
 
     if (target === "codex-home") {
-      updateCodexHome(selectedPath);
-      saveCurrentInputCache();
-      render({ preserveTableScroll: true });
-      await loadAppSettings(false);
+      switchCodexHomeDirectory(selectedPath, "已切换手工选择的 Codex 主目录");
       return;
     }
 
@@ -2243,11 +2270,90 @@ async function selectPathForTarget(target: PathPickerTarget) {
 
 function updateCodexHome(value: string) {
   if (state.profile.codex_home !== value) {
+    invalidateProfileDataRequests();
     state.settings = null;
     state.settingsDraft = null;
     state.backupSummary = null;
   }
   state.profile.codex_home = value;
+}
+
+function profileSnapshot(): ProfileInput {
+  return {
+    ...state.profile,
+    path_maps: [...state.profile.path_maps],
+  };
+}
+
+function invalidateProfileDataRequests() {
+  profileDataRequestId += 1;
+  return profileDataRequestId;
+}
+
+function isCurrentProfileDataRequest(requestId: number) {
+  return requestId === profileDataRequestId;
+}
+
+async function selectRegisteredCodexHome(instanceId: number) {
+  const instance = state.managedInstances.find(
+    (candidate) => candidate.id === instanceId && candidate.available,
+  );
+  if (!instance) return;
+  switchCodexHomeDirectory(instance.path, `正在切换到“${instanceDisplayName(instance)}”`);
+}
+
+function switchCodexHomeDirectory(path: string, initialStatus: string) {
+  updateCodexHome(path);
+  const requestId = invalidateProfileDataRequests();
+  clearProfileScopedState();
+  saveCurrentInputCache();
+  state.status = initialStatus;
+  render({ preserveTableScroll: true });
+  void refreshCurrentPageForCodexHome(requestId);
+}
+
+function clearProfileScopedState() {
+  state.sessions = [];
+  state.selectedIds.clear();
+  state.activeId = "";
+  state.detailOpen = false;
+  state.detailEdit = blankDetailEdit();
+  state.repairItems = [];
+  state.selectedRepairIds.clear();
+  state.repairBackupNote = "";
+  state.backupRows = [];
+  state.selectedSnapshotBySession = {};
+  state.selectedBackupSessionIds.clear();
+  state.restorePreview = null;
+  state.backupSummary = null;
+  state.settings = null;
+  state.settingsDraft = null;
+  state.syncStatus = "";
+  state.codexWasRunning = null;
+}
+
+async function refreshCurrentPageForCodexHome(requestId: number) {
+  const page = state.activePage;
+  try {
+    let loaded = false;
+    if (page === "database-repair") {
+      loaded = await loadDatabaseRepairPreview(requestId);
+      if (loaded) state.status = `已预览 ${state.repairItems.length} 个修复项目`;
+    } else if (page === "restore-backups") {
+      loaded = await loadBackups(requestId);
+      if (loaded) state.status = `已加载 ${state.backupRows.length} 个会话备份`;
+    } else if (page === "batch-edit" || page === "session-management") {
+      loaded = await loadSessions(undefined, requestId);
+      if (loaded) state.status = `已加载 ${state.sessions.length} 个会话`;
+    }
+  } catch (error) {
+    if (!isCurrentProfileDataRequest(requestId)) return;
+    state.status = `无法加载当前目录数据：${formatErrorMessage(error)}`;
+  } finally {
+    if (isCurrentProfileDataRequest(requestId)) {
+      render({ preserveTableScroll: true });
+    }
+  }
 }
 
 async function loadManagedInstances(showStatus: boolean) {
@@ -3237,13 +3343,17 @@ async function openSettings() {
 }
 
 async function loadAppSettings(showStatus: boolean) {
+  const requestId = profileDataRequestId;
+  const profile = profileSnapshot();
   await runWithProgress(showStatus ? "正在加载设置" : "正在加载备份设置", async () => {
-    const settings = await invoke<AppSettings>("load_settings", { profile: state.profile });
+    const settings = await invoke<AppSettings>("load_settings", { profile });
+    if (!isCurrentProfileDataRequest(requestId)) return;
     state.settings = settings;
     state.settingsDraft = cloneSettings(settings);
     const backups = await invoke<SessionBackupSummary[]>("list_session_backups", {
-      profile: state.profile,
+      profile,
     });
+    if (!isCurrentProfileDataRequest(requestId)) return;
     state.backupSummary = summarizeBackups(backups);
     if (showStatus) {
       state.status = "设置已加载";
@@ -3265,15 +3375,22 @@ async function saveAppSettings() {
 }
 
 async function refreshDatabaseRepairs() {
+  const requestId = profileDataRequestId;
   await runWithProgress("正在预览数据库修复", async () => {
-    const preview = await invoke<DatabaseRepairPreview>("preview_database_repairs", {
-      profile: state.profile,
-    });
-    state.repairItems = preview.items;
-    state.repairBackupNote = preview.backup_note;
-    state.selectedRepairIds.clear();
-    state.status = `已预览 ${preview.items.length} 个修复项目`;
+    if (await loadDatabaseRepairPreview(requestId)) {
+      state.status = `已预览 ${state.repairItems.length} 个修复项目`;
+    }
   });
+}
+
+async function loadDatabaseRepairPreview(requestId = profileDataRequestId) {
+  const profile = profileSnapshot();
+  const preview = await invoke<DatabaseRepairPreview>("preview_database_repairs", { profile });
+  if (!isCurrentProfileDataRequest(requestId)) return false;
+  state.repairItems = preview.items;
+  state.repairBackupNote = preview.backup_note;
+  state.selectedRepairIds.clear();
+  return true;
 }
 
 async function applySelectedRepairs() {
@@ -3305,15 +3422,23 @@ async function applySelectedRepairs() {
 }
 
 async function refreshBackups() {
+  const requestId = profileDataRequestId;
   await runWithProgress("正在加载备份", async () => {
-    state.backupRows = await invoke<SessionBackupSummary[]>("list_session_backups", {
-      profile: state.profile,
-    });
-    state.backupSummary = summarizeBackups(state.backupRows);
-    state.selectedBackupSessionIds.clear();
-    state.restorePreview = null;
-    state.status = `已加载 ${state.backupRows.length} 个会话备份`;
+    if (await loadBackups(requestId)) {
+      state.status = `已加载 ${state.backupRows.length} 个会话备份`;
+    }
   });
+}
+
+async function loadBackups(requestId = profileDataRequestId) {
+  const profile = profileSnapshot();
+  const backups = await invoke<SessionBackupSummary[]>("list_session_backups", { profile });
+  if (!isCurrentProfileDataRequest(requestId)) return false;
+  state.backupRows = backups;
+  state.backupSummary = summarizeBackups(backups);
+  state.selectedBackupSessionIds.clear();
+  state.restorePreview = null;
+  return true;
 }
 
 async function restoreSelectedBackup(sessionId: string) {
@@ -3427,19 +3552,24 @@ async function pollCodexProcess() {
   if (state.autoSyncInFlight || state.settings?.database_sync.mode !== "auto-when-codex-stops") {
     return;
   }
+  const requestId = profileDataRequestId;
+  const profile = profileSnapshot();
   try {
     const running = await invoke<boolean>("detect_codex_running");
+    if (!isCurrentProfileDataRequest(requestId)) return;
     if (state.codexWasRunning === true && !running) {
       state.autoSyncInFlight = true;
       const report = await invoke<DatabaseRepairApplyReport>("apply_database_sync_from_local", {
-        profile: state.profile,
+        profile,
       });
+      if (!isCurrentProfileDataRequest(requestId)) return;
       state.syncStatus = `Codex 已停止，已同步 SQLite：${report.applied_items} 项`;
       state.status = state.syncStatus;
       if (state.activePage === "database-repair") {
         const preview = await invoke<DatabaseRepairPreview>("preview_database_repairs", {
-          profile: state.profile,
+          profile,
         });
+        if (!isCurrentProfileDataRequest(requestId)) return;
         state.repairItems = preview.items;
         state.repairBackupNote = preview.backup_note;
       }
@@ -3452,7 +3582,9 @@ async function pollCodexProcess() {
     }
     state.codexWasRunning = running;
   } catch (error) {
-    state.syncStatus = `自动同步跳过：${String(error)}`;
+    if (isCurrentProfileDataRequest(requestId)) {
+      state.syncStatus = `自动同步跳过：${String(error)}`;
+    }
   } finally {
     state.autoSyncInFlight = false;
   }

@@ -2,6 +2,7 @@ import {
   pathFieldMarkup,
   pathPickerDirectory,
   pickSinglePath,
+  registeredCodexHomePickerMarkup,
   type NativeDialogOpen,
 } from "./pathPicker.js";
 
@@ -54,4 +55,25 @@ if (fieldMarkup.indexOf("</label>") > fieldMarkup.indexOf("<button")) {
 }
 if (!fieldMarkup.includes("选择文件夹")) {
   throw new Error("directory field should describe the picker action");
+}
+
+const registeredPickerMarkup = registeredCodexHomePickerMarkup({
+  target: "codex-home",
+  label: "Codex 主目录",
+  value: "E:\\Codex\\office",
+  escapeHtml: (value) => value,
+  selectedInstanceId: 1,
+  instances: [
+    { id: 1, label: "办公室", path: "E:\\Codex\\office", available: true },
+    { id: 2, label: "已失效", path: "E:\\Codex\\missing", available: false },
+  ],
+});
+if (!registeredPickerMarkup.includes('id="registered-codex-home"')) {
+  throw new Error("registered Codex home picker should include the instance selector");
+}
+if (!registeredPickerMarkup.includes('value="1" selected')) {
+  throw new Error("registered Codex home picker should select the active instance");
+}
+if (registeredPickerMarkup.includes("已失效")) {
+  throw new Error("registered Codex home picker should omit unavailable instances");
 }
