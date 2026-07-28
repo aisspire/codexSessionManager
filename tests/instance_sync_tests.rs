@@ -9,7 +9,8 @@ use codex_session_manager::instance_registry::{
 use codex_session_manager::instance_sync::{
     execute_instance_sync_with_guard, list_instance_sync_source_data, preview_instance_sync,
     preview_instance_sync_config_diff, select_instance_sync_non_root_config_differences,
-    ConfigPathNode, InstanceSyncConfigDiffRequest, InstanceSyncConfigDiffStatus,
+    summarize_instance_sync_config_differences, ConfigPathNode, InstanceSyncConfigDiffRequest,
+    InstanceSyncConfigDiffStatus, InstanceSyncConfigDifferenceSummaryRequest,
     InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncRequest,
 };
 use codex_session_manager::state_db::StateDb;
@@ -560,6 +561,107 @@ fn previews_config_diff_for_each_target_without_writing_configuration() {
         fs::read_to_string(changed_directory.join("config.toml")).unwrap(),
         "model = \"target-model\"\n",
     );
+}
+
+#[test]
+fn summarizes_all_selectable_config_paths_without_exposing_configuration_values() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let changed_directory = dir.path().join("changed");
+    let same_directory = dir.path().join("same");
+    let missing_directory = dir.path().join("missing");
+    let unreadable_directory = dir.path().join("unreadable");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    let source_config = r#"model = "source-model"
+root_same = true
+api_key = "source-secret"
+
+[features]
+enabled = true
+missing = "source-value"
+"#;
+    write_config(&source_directory, source_config);
+    write_config(
+        &changed_directory,
+        r#"model = "target-model"
+root_same = true
+api_key = "source-secret"
+
+[features]
+enabled = false
+missing = "source-value"
+"#,
+    );
+    write_config(&same_directory, source_config);
+    write_config(
+        &missing_directory,
+        r#"model = "source-model"
+root_same = true
+api_key = "source-secret"
+
+[features]
+enabled = true
+"#,
+    );
+    write_config(&unreadable_directory, "model = [\n");
+
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&registry_path).unwrap();
+    let source = instance_id_at(&instances, &source_directory);
+    let changed = instance_id_at(&instances, &changed_directory);
+    let same = instance_id_at(&instances, &same_directory);
+    let missing = instance_id_at(&instances, &missing_directory);
+    let unreadable = instance_id_at(&instances, &unreadable_directory);
+
+    let summary = summarize_instance_sync_config_differences(
+        &registry_path,
+        &InstanceSyncConfigDifferenceSummaryRequest {
+            source_instance_id: source,
+            target_instance_ids: vec![changed, same, missing, unreadable],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.source_instance_id, source);
+    assert_eq!(summary.unreadable_target_count, 1);
+    assert_eq!(summary.paths.len(), 5);
+
+    let model = summary
+        .paths
+        .iter()
+        .find(|path| path.config_path == vec!["model".to_string()])
+        .unwrap();
+    assert_eq!(model.different_target_count, 1);
+    assert_eq!(model.readable_target_count, 3);
+
+    let root_same = summary
+        .paths
+        .iter()
+        .find(|path| path.config_path == vec!["root_same".to_string()])
+        .unwrap();
+    assert_eq!(root_same.different_target_count, 0);
+    assert_eq!(root_same.readable_target_count, 3);
+
+    let enabled = summary
+        .paths
+        .iter()
+        .find(|path| path.config_path == vec!["features".to_string(), "enabled".to_string()])
+        .unwrap();
+    assert_eq!(enabled.different_target_count, 1);
+    assert_eq!(enabled.readable_target_count, 3);
+
+    let missing_path = summary
+        .paths
+        .iter()
+        .find(|path| path.config_path == vec!["features".to_string(), "missing".to_string()])
+        .unwrap();
+    assert_eq!(missing_path.different_target_count, 1);
+    assert_eq!(missing_path.readable_target_count, 3);
+
+    let serialized = serde_json::to_string(&summary).unwrap();
+    assert!(!serialized.contains("source-secret"));
+    assert!(!serialized.contains("original_value"));
+    assert!(!serialized.contains("target_path"));
 }
 
 #[test]

@@ -15,9 +15,11 @@ use codex_session_manager::instance_registry::{
     self, InstanceScanReport, InstanceSyncPlan, InstanceSyncPlanDraft, ManagedInstance,
 };
 use codex_session_manager::instance_sync::{
-    self, InstanceSyncConfigDiff, InstanceSyncConfigDiffRequest, InstanceSyncExecutionReport,
-    InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncNonRootConfigDifferenceSelection,
-    InstanceSyncPreview, InstanceSyncRequest, InstanceSyncSourceData,
+    self, InstanceSyncConfigDiff, InstanceSyncConfigDiffRequest,
+    InstanceSyncConfigDifferenceSummary, InstanceSyncConfigDifferenceSummaryRequest,
+    InstanceSyncExecutionReport, InstanceSyncNonRootConfigDifferenceRequest,
+    InstanceSyncNonRootConfigDifferenceSelection, InstanceSyncPreview, InstanceSyncRequest,
+    InstanceSyncSourceData,
 };
 use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
 use codex_session_manager::path_map::PathMap;
@@ -375,6 +377,20 @@ async fn preview_instance_sync_config_diff(
 }
 
 #[tauri::command]
+async fn summarize_instance_sync_config_differences(
+    app: tauri::AppHandle,
+    request: InstanceSyncConfigDifferenceSummaryRequest,
+) -> Result<InstanceSyncConfigDifferenceSummary, String> {
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_sync::summarize_instance_sync_config_differences(&database_path, &request)
+            .map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("instance sync config difference summary task failed: {error}"))?
+}
+
+#[tauri::command]
 async fn select_instance_sync_non_root_config_differences(
     app: tauri::AppHandle,
     request: InstanceSyncNonRootConfigDifferenceRequest,
@@ -596,6 +612,7 @@ fn main() {
             delete_instance_sync_plan,
             list_instance_sync_source_data,
             preview_instance_sync_config_diff,
+            summarize_instance_sync_config_differences,
             select_instance_sync_non_root_config_differences,
             preview_instance_sync,
             execute_instance_sync,

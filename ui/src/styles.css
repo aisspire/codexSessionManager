@@ -1251,8 +1251,53 @@ select {
   background: #eef7f7;
 }
 
+.instance-sync-config-leaf.has-difference,
+.instance-sync-config-leaf.has-difference:hover {
+  box-shadow: inset 3px 0 0 #d7a7ac;
+  color: #765057;
+  background: #fff8f8;
+}
+
+.instance-sync-config-leaf.has-read-warning,
+.instance-sync-config-leaf.has-read-warning:hover {
+  box-shadow: inset 3px 0 0 #dfca9c;
+  color: #715f43;
+  background: #fffdf6;
+}
+
 .instance-sync-config-leaf span {
   overflow-wrap: anywhere;
+}
+
+.instance-sync-config-leaf-label {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.instance-sync-config-difference {
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.instance-sync-config-difference.difference {
+  color: #9a5c64;
+}
+
+.instance-sync-config-difference.warning {
+  color: #876e47;
+}
+
+.instance-sync-config-summary-notice {
+  margin: -2px 0 0;
+  color: #5a717b;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.instance-sync-config-summary-notice.warning {
+  color: #806541;
 }
 
 .instance-sync-config-group {

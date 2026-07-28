@@ -51,6 +51,11 @@ import {
   type InstanceSyncConfigDiffStatus,
 } from "./instanceSyncPreview";
 import {
+  instanceSyncConfigDifferenceTreeState,
+  isCurrentInstanceSyncConfigDifferenceSummaryContext,
+  type InstanceSyncConfigDifferenceSummaryPathLike,
+} from "./instanceSyncConfigSummary";
+import {
   buildInstanceSyncProjectGroups,
   instanceSyncProjectSelectionFromKey,
   isInstanceSyncSessionSelected,
@@ -295,6 +300,12 @@ interface InstanceSyncConfigDiff {
   targets: InstanceSyncConfigDiffTarget[];
 }
 
+interface InstanceSyncConfigDifferenceSummary {
+  source_instance_id: number;
+  paths: InstanceSyncConfigDifferenceSummaryPathLike[];
+  unreadable_target_count: number;
+}
+
 interface InstanceSyncNonRootConfigDifferenceSelection {
   source_instance_id: number;
   config_paths: string[][];
@@ -467,6 +478,9 @@ const state = {
   instanceSyncSessionSearch: "",
   instanceSyncConfigPaths: [] as ConfigPathNode[],
   instanceSyncConfigPathKeys: new Set<string>(),
+  instanceSyncConfigDifferenceSummary: null as InstanceSyncConfigDifferenceSummary | null,
+  instanceSyncConfigDifferenceSummaryInFlight: false,
+  instanceSyncConfigDifferenceSummaryFailed: false,
   instanceSyncAutomaticConfigSelectionInFlight: false,
   instanceSyncPreview: null as InstanceSyncPreview | null,
   instanceSyncResult: null as InstanceSyncExecutionReport | null,
@@ -501,6 +515,7 @@ const instanceSyncPreviewController = new DelayedInstanceSyncPreview();
 const instanceSyncPreviewInputMode = new InstanceSyncPreviewInputMode();
 const instanceSyncConfigDiffCache = new ExpiringInstanceSyncPreviewCache<InstanceSyncConfigDiff>();
 let automaticNonRootDiffSelectionRequestId = 0;
+let instanceSyncConfigDifferenceSummaryRequestId = 0;
 let profileDataRequestId = 0;
 let instanceSyncPreviewDescriptionTarget: HTMLElement | null = null;
 let lastRenderedPage: AppPage | null = null;
@@ -519,6 +534,7 @@ function render(options: RenderOptions = {}) {
   const tableScroll = options.preserveTableScroll ? readTableScroll() : undefined;
   if (lastRenderedPage === "instance-management" && state.activePage !== "instance-management") {
     clearInstanceSyncConfigDiffCache();
+    invalidateInstanceSyncConfigDifferenceSummary();
   }
   const instanceSyncScroll =
     state.activePage === "instance-management"
@@ -1138,7 +1154,8 @@ function instanceSyncWorkspace() {
 
         <section class="instance-sync-panel instance-sync-step-panel instance-sync-config-step ${state.instanceSyncStep === 3 ? "is-active" : ""}" id="instance-sync-step-3" role="tabpanel" aria-hidden="${state.instanceSyncStep !== 3}">
           <h3>③ 选择 config.toml 路径</h3>
-          <p class="instance-sync-risk">已选配置项会以源值覆盖目标值；配置可能含密钥，方案不会保存其值。</p>
+          <p class="instance-sync-risk">已选配置项会以源值覆盖目标值；配置可能含密钥，方案不会保存其值。差异汇总不读取具体值，悬浮路径后才会按需显示原值和替换值。</p>
+          ${instanceSyncConfigDifferenceSummaryNoticeMarkup()}
           <div class="instance-sync-config-tree" data-instance-sync-scroll="config" role="group" aria-label="可同步配置路径">
             ${
               state.instanceSyncSourceId == null
@@ -1210,10 +1227,20 @@ function instanceSyncConfigTree(nodes: ConfigPathNode[], depth = 0): string {
   return nodes
     .map((node) => {
       const key = configPathKey(node.path);
+      const difference = node.selectable
+        ? instanceSyncConfigDifferenceTreeState(
+            instanceSyncConfigDifferenceSummaryPathForKey(key),
+            state.instanceSyncConfigDifferenceSummary?.unreadable_target_count ?? 0,
+          )
+        : null;
+      const differenceDetail =
+        difference && difference.tone !== "none"
+          ? `<small class="instance-sync-config-difference ${difference.tone}">${escapeHtml(difference.label)}</small>`
+          : "";
       const control = node.selectable
-        ? `<label class="instance-sync-config-leaf" data-instance-sync-config-preview="${escapeHtml(key)}">
+        ? `<label class="instance-sync-config-leaf ${difference?.className || ""}" data-instance-sync-config-preview="${escapeHtml(key)}">
              <input type="checkbox" data-instance-sync-config="${escapeHtml(key)}" ${state.instanceSyncConfigPathKeys.has(key) ? "checked" : ""} ${disabledWhenBusy()} />
-             <span>${escapeHtml(node.label)}</span>
+             <span class="instance-sync-config-leaf-label">${escapeHtml(node.label)}${differenceDetail}</span>
            </label>`
         : `<span class="instance-sync-config-group">${escapeHtml(node.label)}</span>`;
       return `
@@ -1224,6 +1251,25 @@ function instanceSyncConfigTree(nodes: ConfigPathNode[], depth = 0): string {
       `;
     })
     .join("");
+}
+
+function instanceSyncConfigDifferenceSummaryPathForKey(key: string) {
+  return state.instanceSyncConfigDifferenceSummary?.paths.find(
+    (path) => configPathKey(path.config_path) === key,
+  );
+}
+
+function instanceSyncConfigDifferenceSummaryNoticeMarkup() {
+  if (state.instanceSyncConfigDifferenceSummaryInFlight) {
+    return `<p class="instance-sync-config-summary-notice" role="status">正在汇总源端与目标端的配置差异…</p>`;
+  }
+  if (state.instanceSyncConfigDifferenceSummaryFailed) {
+    return `<p class="instance-sync-config-summary-notice warning">无法汇总配置差异；仍可悬浮路径按需查看具体值。</p>`;
+  }
+  const unreadable = state.instanceSyncConfigDifferenceSummary?.unreadable_target_count ?? 0;
+  return unreadable
+    ? `<p class="instance-sync-config-summary-notice warning">${unreadable} 个目标无法读取配置；红色标识仅依据可读取目标。</p>`
+    : "";
 }
 
 function bindInstanceSyncPreviewEvents() {
@@ -1505,6 +1551,98 @@ function scheduleInstanceSyncConfigDiffCacheClear() {
 
 function clearInstanceSyncConfigDiffCache() {
   instanceSyncConfigDiffCache.clear();
+}
+
+function invalidateInstanceSyncConfigDifferenceSummary() {
+  instanceSyncConfigDifferenceSummaryRequestId += 1;
+  state.instanceSyncConfigDifferenceSummary = null;
+  state.instanceSyncConfigDifferenceSummaryInFlight = false;
+  state.instanceSyncConfigDifferenceSummaryFailed = false;
+}
+
+function instanceSyncConfigDifferenceSummaryResponseIsCurrent(
+  requestId: number,
+  requestedPlanId: number | null,
+  requestedSourceInstanceId: number,
+  requestedTargetInstanceIds: number[],
+) {
+  return (
+    requestId === instanceSyncConfigDifferenceSummaryRequestId &&
+    isCurrentInstanceSyncConfigDifferenceSummaryContext(
+      requestedPlanId,
+      requestedSourceInstanceId,
+      requestedTargetInstanceIds,
+      state.instanceSyncPlanId,
+      state.instanceSyncSourceId,
+      [...state.instanceSyncTargetIds],
+    )
+  );
+}
+
+async function refreshInstanceSyncConfigDifferenceSummary() {
+  const requestId = ++instanceSyncConfigDifferenceSummaryRequestId;
+  const requestedPlanId = state.instanceSyncPlanId;
+  const sourceInstanceId = state.instanceSyncSourceId;
+  const targetInstanceIds = [...state.instanceSyncTargetIds];
+  state.instanceSyncConfigDifferenceSummary = null;
+  state.instanceSyncConfigDifferenceSummaryFailed = false;
+
+  if (
+    sourceInstanceId == null ||
+    targetInstanceIds.length === 0 ||
+    state.instanceSyncConfigPaths.length === 0
+  ) {
+    state.instanceSyncConfigDifferenceSummaryInFlight = false;
+    return;
+  }
+
+  state.instanceSyncConfigDifferenceSummaryInFlight = true;
+  try {
+    const summary = await invoke<InstanceSyncConfigDifferenceSummary>(
+      "summarize_instance_sync_config_differences",
+      {
+        request: {
+          source_instance_id: sourceInstanceId,
+          target_instance_ids: targetInstanceIds,
+        },
+      },
+    );
+    if (
+      !instanceSyncConfigDifferenceSummaryResponseIsCurrent(
+        requestId,
+        requestedPlanId,
+        sourceInstanceId,
+        targetInstanceIds,
+      )
+    ) {
+      return;
+    }
+    state.instanceSyncConfigDifferenceSummary = summary;
+  } catch {
+    if (
+      !instanceSyncConfigDifferenceSummaryResponseIsCurrent(
+        requestId,
+        requestedPlanId,
+        sourceInstanceId,
+        targetInstanceIds,
+      )
+    ) {
+      return;
+    }
+    state.instanceSyncConfigDifferenceSummaryFailed = true;
+  } finally {
+    if (
+      instanceSyncConfigDifferenceSummaryResponseIsCurrent(
+        requestId,
+        requestedPlanId,
+        sourceInstanceId,
+        targetInstanceIds,
+      )
+    ) {
+      state.instanceSyncConfigDifferenceSummaryInFlight = false;
+      render({ preserveTableScroll: true });
+    }
+  }
 }
 
 function instanceSyncOutcomeMarkup() {
@@ -1870,10 +2008,12 @@ function bindInstanceEvents() {
       if (!Number.isSafeInteger(instanceId)) return;
       dismissInstanceSyncPreview();
       clearInstanceSyncConfigDiffCache();
+      invalidateInstanceSyncConfigDifferenceSummary();
       checkbox.checked
         ? state.instanceSyncTargetIds.add(instanceId)
         : state.instanceSyncTargetIds.delete(instanceId);
       clearInstanceSyncOutcome();
+      void refreshInstanceSyncConfigDifferenceSummary();
       if (isAutomaticNonRootDiffPlan(state.instanceSyncPlanId)) {
         invalidateAutomaticNonRootDiffConfigSelection();
         void refreshAutomaticNonRootDiffConfigSelection();
@@ -1943,6 +2083,8 @@ function bindInstanceEvents() {
       if (isAutomaticNonRootDiffPlan(state.instanceSyncPlanId)) {
         invalidateAutomaticNonRootDiffConfigSelection();
         state.instanceSyncPlanId = null;
+        invalidateInstanceSyncConfigDifferenceSummary();
+        void refreshInstanceSyncConfigDifferenceSummary();
         state.status = "已切换到手动选择；当前配置勾选保持不变";
       }
       checkbox.checked
@@ -2490,8 +2632,9 @@ async function scanManagedInstances() {
   });
 }
 
-function reconcileInstanceSyncInstances() {
+function reconcileInstanceSyncInstances(refreshConfigDifferenceSummary = true) {
   clearInstanceSyncConfigDiffCache();
+  invalidateInstanceSyncConfigDifferenceSummary();
   const availableIds = new Set(
     state.managedInstances.filter((instance) => instance.available).map((instance) => instance.id),
   );
@@ -2512,6 +2655,9 @@ function reconcileInstanceSyncInstances() {
       (id) => availableIds.has(id) && id !== state.instanceSyncSourceId,
     ),
   );
+  if (refreshConfigDifferenceSummary) {
+    void refreshInstanceSyncConfigDifferenceSummary();
+  }
   if (isAutomaticNonRootDiffPlan(state.instanceSyncPlanId)) {
     invalidateAutomaticNonRootDiffConfigSelection();
     void refreshAutomaticNonRootDiffConfigSelection();
@@ -2672,18 +2818,21 @@ function currentInstanceSyncRequest() {
 async function selectInstanceSyncPlan(planId: number | null) {
   dismissInstanceSyncPreview();
   clearInstanceSyncConfigDiffCache();
+  invalidateInstanceSyncConfigDifferenceSummary();
   invalidateAutomaticNonRootDiffConfigSelection();
   state.instanceSyncPlanId = planId;
   if (isAutomaticNonRootDiffPlan(planId)) {
     state.instanceSyncPlanName = "";
     state.instanceSyncConfigPathKeys.clear();
     clearInstanceSyncOutcome();
+    void refreshInstanceSyncConfigDifferenceSummary();
     void refreshAutomaticNonRootDiffConfigSelection();
     return;
   }
   const plan = state.instanceSyncPlans.find((candidate) => candidate.id === planId);
   if (!plan) {
     state.status = "未选择已保存同步方案；当前手动选择保持不变";
+    void refreshInstanceSyncConfigDifferenceSummary();
     render({ preserveTableScroll: true });
     return;
   }
@@ -2695,7 +2844,7 @@ async function selectInstanceSyncPlan(planId: number | null) {
   state.instanceSyncProjectSelections = new Set(selection.projectSelections);
   state.instanceSyncSessionIds.clear();
   state.instanceSyncConfigPathKeys = new Set(selection.configPathKeys);
-  reconcileInstanceSyncInstances();
+  reconcileInstanceSyncInstances(false);
   clearInstanceSyncOutcome();
   await loadInstanceSyncSourceData(state.instanceSyncSourceId, false);
   state.status = `已加载方案“${plan.name}”；已恢复项目选择，可调整本次会话`;
@@ -2705,6 +2854,7 @@ async function selectInstanceSyncPlan(planId: number | null) {
 async function selectInstanceSyncSource(sourceInstanceId: number | null, clearConfigSelections: boolean) {
   dismissInstanceSyncPreview();
   clearInstanceSyncConfigDiffCache();
+  invalidateInstanceSyncConfigDifferenceSummary();
   invalidateAutomaticNonRootDiffConfigSelection();
   state.instanceSyncSourceId = sourceInstanceId;
   if (sourceInstanceId != null) {
@@ -2727,6 +2877,7 @@ async function loadInstanceSyncSourceData(
   clearOnMissing: boolean,
 ) {
   dismissInstanceSyncPreview();
+  invalidateInstanceSyncConfigDifferenceSummary();
   state.instanceSyncSessions = [];
   state.instanceSyncConfigPaths = [];
   if (sourceInstanceId == null) {
@@ -2756,6 +2907,7 @@ async function loadInstanceSyncSourceData(
     state.instanceSyncConfigPathKeys = new Set(
       [...state.instanceSyncConfigPathKeys].filter((key) => selectableKeys.has(key)),
     );
+    void refreshInstanceSyncConfigDifferenceSummary();
     state.status = `已读取源实例：${data.sessions.length} 个会话、${selectableKeys.size} 个可选配置项`;
   } catch (error) {
     if (state.instanceSyncSourceId !== sourceInstanceId) return;
@@ -2958,6 +3110,8 @@ async function saveInstanceSyncPlan() {
     await loadInstanceSyncPlans();
     state.instanceSyncPlanId = saved.id;
     state.instanceSyncPlanName = saved.name;
+    invalidateInstanceSyncConfigDifferenceSummary();
+    void refreshInstanceSyncConfigDifferenceSummary();
     state.status = `已保存同步方案“${saved.name}”`;
   });
 }
@@ -2972,6 +3126,8 @@ async function deleteInstanceSyncPlan() {
     await loadInstanceSyncPlans();
     state.instanceSyncPlanId = null;
     state.instanceSyncPlanName = "";
+    invalidateInstanceSyncConfigDifferenceSummary();
+    void refreshInstanceSyncConfigDifferenceSummary();
     state.status = `已删除同步方案“${plan.name}”`;
   });
 }
@@ -3012,6 +3168,8 @@ async function executeInstanceSync() {
       request,
     });
     clearInstanceSyncConfigDiffCache();
+    invalidateInstanceSyncConfigDifferenceSummary();
+    void refreshInstanceSyncConfigDifferenceSummary();
     state.instanceSyncPreview = null;
     const failed = state.instanceSyncResult.targets.filter((target) => target.error).length;
     const added = state.instanceSyncResult.targets.reduce(

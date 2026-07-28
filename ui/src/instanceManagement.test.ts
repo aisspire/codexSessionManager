@@ -25,6 +25,10 @@ import {
   snapshotInstanceSyncScroll,
 } from "./instanceSyncPreview.js";
 import {
+  instanceSyncConfigDifferenceTreeState,
+  isCurrentInstanceSyncConfigDifferenceSummaryContext,
+} from "./instanceSyncConfigSummary.js";
+import {
   buildInstanceSyncProjectGroups,
   instanceSyncProjectSelectionFromKey,
   instanceSyncProjectSelectionKey,
@@ -342,6 +346,78 @@ expectEqual(
   configDiffTargetDisplay({ status: "same", original_value: "\"source\"" }, "\"source\""),
   { statusLabel: "无变化", detail: "目标值与源值相同" },
   "does not invent red and green values when a target is unchanged",
+);
+expectEqual(
+  instanceSyncConfigDifferenceTreeState(
+    { config_path: ["model"], different_target_count: 2, readable_target_count: 3 },
+    1,
+  ),
+  { tone: "difference", className: "has-difference", label: "与 2 个目标不同" },
+  "maps any readable configuration difference to the muted red tree class",
+);
+expectEqual(
+  instanceSyncConfigDifferenceTreeState(
+    { config_path: ["model"], different_target_count: 0, readable_target_count: 3 },
+    1,
+  ),
+  { tone: "none", className: "" },
+  "does not manufacture a difference when readable targets match",
+);
+expectEqual(
+  instanceSyncConfigDifferenceTreeState(
+    { config_path: ["model"], different_target_count: 0, readable_target_count: 0 },
+    2,
+  ),
+  { tone: "warning", className: "has-read-warning", label: "全部 2 个目标无法读取" },
+  "maps only unreadable targets to a warning instead of a difference",
+);
+expectEqual(
+  isCurrentInstanceSyncConfigDifferenceSummaryContext(
+    4,
+    availableInstance.id,
+    [secondAvailableInstance.id],
+    4,
+    availableInstance.id,
+    [secondAvailableInstance.id],
+  ),
+  true,
+  "accepts a configuration summary response for the active plan context",
+);
+expectEqual(
+  isCurrentInstanceSyncConfigDifferenceSummaryContext(
+    4,
+    availableInstance.id,
+    [secondAvailableInstance.id],
+    null,
+    availableInstance.id,
+    [secondAvailableInstance.id],
+  ),
+  false,
+  "rejects a configuration summary response after the plan changes",
+);
+expectEqual(
+  isCurrentInstanceSyncConfigDifferenceSummaryContext(
+    4,
+    availableInstance.id,
+    [secondAvailableInstance.id, 3],
+    4,
+    availableInstance.id,
+    [3, secondAvailableInstance.id],
+  ),
+  false,
+  "rejects a configuration summary response after the targets change",
+);
+expectEqual(
+  isCurrentInstanceSyncConfigDifferenceSummaryContext(
+    4,
+    availableInstance.id,
+    [secondAvailableInstance.id],
+    4,
+    3,
+    [secondAvailableInstance.id],
+  ),
+  false,
+  "rejects a configuration summary response after the source changes",
 );
 
 const instanceSyncSelectionSessions = [
