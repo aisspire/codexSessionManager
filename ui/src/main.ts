@@ -1213,8 +1213,10 @@ function instanceSyncSessionProjectGroup(
           ${disabledWhenBusy()}
         >
           ${folderIcon(expanded)}
-          <span class="instance-sync-project-title" title="${escapeHtml(group.label)}">${escapeHtml(group.label)}</span>
-          <span class="instance-sync-project-meta">${escapeHtml(sessionSummary)}</span>
+          <span class="instance-sync-project-summary">
+            <span class="instance-sync-project-title" title="${escapeHtml(group.label)}">${escapeHtml(group.label)}</span>
+            <span class="instance-sync-project-meta">${escapeHtml(sessionSummary)}</span>
+          </span>
         </button>
         <label class="instance-sync-project-select">
           <input type="checkbox" data-instance-sync-project="${escapeHtml(group.key)}" data-instance-sync-project-selected-count="${selectedCount}" ${projectSelected ? "checked" : ""} ${disabledWhenBusy()} />
