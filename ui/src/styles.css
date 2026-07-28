@@ -1014,6 +1014,29 @@ select {
   gap: 7px;
 }
 
+.instance-sync-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.instance-sync-step {
+  border-color: #c9d9df;
+  color: #476170;
+  background: #f6fafb;
+  font-weight: 800;
+}
+
+.instance-sync-step.is-active {
+  border-color: #19757a;
+  color: #ffffff;
+  background: #19757a;
+}
+
+.instance-sync-step-panels {
+  min-width: 0;
+}
+
 .instance-sync-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(220px, 1fr));
@@ -1030,6 +1053,20 @@ select {
   border-radius: 7px;
   padding: 11px;
   background: #ffffff;
+}
+
+.instance-sync-step-panel {
+  display: none;
+  min-height: 300px;
+}
+
+.instance-sync-step-panel.is-active {
+  display: grid;
+}
+
+.instance-sync-config-step .instance-sync-config-tree {
+  min-height: 260px;
+  max-height: min(460px, 52vh);
 }
 
 .instance-sync-panel h3,
@@ -1123,6 +1160,74 @@ select {
   color: #6b7d8d;
   font-size: 11px;
   font-weight: 650;
+}
+
+.instance-sync-session-project {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #d8e5e8;
+  border-radius: 6px;
+  padding: 6px;
+  background: #ffffff;
+}
+
+.instance-sync-session-project-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.instance-sync-project-select {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.instance-sync-project-select input {
+  width: 17px;
+  min-height: 17px;
+  margin: 1px 0 0;
+}
+
+.instance-sync-project-select span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.instance-sync-project-select strong,
+.instance-sync-project-select small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instance-sync-project-select strong {
+  color: #264754;
+  font-size: 12px;
+}
+
+.instance-sync-project-select small,
+.instance-sync-project-selection {
+  color: #607785;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.instance-sync-project-selection {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 3px 6px;
+  background: #edf6f6;
+}
+
+.instance-sync-session-project-list {
+  display: grid;
+  gap: 2px;
 }
 
 .instance-sync-config-node {
@@ -1975,7 +2080,8 @@ dd {
   }
 
   .instance-sync-plan-row,
-  .instance-sync-grid {
+  .instance-sync-grid,
+  .instance-sync-steps {
     grid-template-columns: 1fr;
   }
 

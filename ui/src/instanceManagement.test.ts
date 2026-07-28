@@ -24,6 +24,15 @@ import {
   restoreInstanceSyncScroll,
   snapshotInstanceSyncScroll,
 } from "./instanceSyncPreview.js";
+import {
+  buildInstanceSyncProjectGroups,
+  instanceSyncProjectSelectionFromKey,
+  instanceSyncProjectSelectionKey,
+  isInstanceSyncSessionSelected,
+  selectedInstanceSyncSessionIds,
+  setInstanceSyncProjectSelection,
+  setInstanceSyncSessionSelection,
+} from "./instanceSyncSelection.js";
 
 function expectEqual<T>(actual: T, expected: T, message: string) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -329,6 +338,71 @@ expectEqual(
   configDiffTargetDisplay({ status: "same", original_value: "\"source\"" }, "\"source\""),
   { statusLabel: "无变化", detail: "目标值与源值相同" },
   "does not invent red and green values when a target is unchanged",
+);
+
+const instanceSyncSelectionSessions = [
+  { id: "alpha-old", project: "E:\\code\\alpha", sort_updated_at_ms: 20, updated_at: "2026-07-01" },
+  { id: "alpha-new", project: "e:/code/alpha/", sort_updated_at_ms: 80, updated_at: "2026-07-03" },
+  { id: "beta", project: "E:\\code\\beta", sort_updated_at_ms: 100, updated_at: "2026-07-04" },
+  { id: "ungrouped", sort_updated_at_ms: 60, updated_at: "2026-07-02" },
+];
+const instanceSyncProjectGroups = buildInstanceSyncProjectGroups(instanceSyncSelectionSessions);
+expectEqual(
+  instanceSyncProjectGroups.map((group) => [group.project, group.sessions.map((session) => session.id)]),
+  [
+    ["e:/code/beta", ["beta"]],
+    ["e:/code/alpha", ["alpha-new", "alpha-old"]],
+    [null, ["ungrouped"]],
+  ],
+  "groups source sessions by normalized project and sorts each project by recency",
+);
+expectEqual(
+  [
+    instanceSyncProjectSelectionKey(null),
+    instanceSyncProjectSelectionFromKey(instanceSyncProjectSelectionKey("E:\\code\\alpha\\")),
+  ],
+  ["null", "e:/code/alpha"],
+  "uses null rather than the display label as the ungrouped project identity",
+);
+
+let instanceSyncSelection = {
+  projectSelections: new Set<string | null>(),
+  sessionIds: new Set<string>(),
+};
+instanceSyncSelection = setInstanceSyncProjectSelection(
+  instanceSyncSelectionSessions,
+  instanceSyncSelection,
+  "e:/code/alpha",
+  true,
+);
+expectEqual(
+  selectedInstanceSyncSessionIds(instanceSyncSelectionSessions, instanceSyncSelection),
+  ["alpha-old", "alpha-new"],
+  "a project-level selection includes all currently loaded sessions in that project",
+);
+instanceSyncSelection = setInstanceSyncSessionSelection(
+  instanceSyncSelectionSessions,
+  instanceSyncSelection,
+  instanceSyncSelectionSessions[0],
+  false,
+);
+expectEqual(
+  {
+    projectSelections: [...instanceSyncSelection.projectSelections],
+    sessionIds: [...instanceSyncSelection.sessionIds],
+  },
+  { projectSelections: [], sessionIds: ["alpha-new"] },
+  "deselecting one project-selected session converts the project to explicit current-run sessions",
+);
+expectEqual(
+  isInstanceSyncSessionSelected(instanceSyncSelectionSessions[1], instanceSyncSelection),
+  true,
+  "the remaining project session stays selected after conversion",
+);
+expectEqual(
+  isInstanceSyncSessionSelected(instanceSyncSelectionSessions[0], instanceSyncSelection),
+  false,
+  "the deselected project session stays excluded after conversion",
 );
 expectEqual(
   [

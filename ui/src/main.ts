@@ -50,6 +50,17 @@ import {
   snapshotInstanceSyncScroll,
   type InstanceSyncConfigDiffStatus,
 } from "./instanceSyncPreview";
+import {
+  buildInstanceSyncProjectGroups,
+  instanceSyncProjectSelectionFromKey,
+  isInstanceSyncSessionSelected,
+  reconcileInstanceSyncSessionSelection,
+  selectedInstanceSyncSessionIds,
+  setInstanceSyncProjectSelection,
+  setInstanceSyncSessionSelection,
+  type InstanceSyncProjectGroup,
+  type InstanceSyncProjectSelection,
+} from "./instanceSyncSelection";
 import { loadProjectExpansionCache, saveProjectExpansionCache } from "./projectExpansionCache";
 import {
   buildSessionMetaItems,
@@ -71,6 +82,7 @@ type AppPage =
   | "restore-backups"
   | "database-repair"
   | "instance-management";
+type InstanceSyncStep = 1 | 2 | 3;
 type SessionScope = "active" | "archived" | "favorite" | "all";
 type SessionCommand =
   | "archive_sessions"
@@ -446,9 +458,11 @@ const state = {
   instanceSyncPlans: [] as InstanceSyncPlan[],
   instanceSyncPlanId: null as number | null,
   instanceSyncPlanName: "",
+  instanceSyncStep: 1 as InstanceSyncStep,
   instanceSyncSourceId: null as number | null,
   instanceSyncTargetIds: new Set<number>(),
   instanceSyncSessions: [] as InstanceSyncSourceSession[],
+  instanceSyncProjectSelections: new Set<InstanceSyncProjectSelection>(),
   instanceSyncSessionIds: new Set<string>(),
   instanceSyncSessionSearch: "",
   instanceSyncConfigPaths: [] as ConfigPathNode[],
@@ -1011,8 +1025,13 @@ function instanceSyncWorkspace() {
     state.managedInstances,
     state.instanceSyncSourceId,
   );
-  const visibleSessions = filteredInstanceSyncSessions();
-  const selectedSessions = state.instanceSyncSessionIds.size;
+  const visibleSessionGroups = filteredInstanceSyncSessionGroups();
+  const visibleSessionCount = visibleSessionGroups.reduce(
+    (count, group) => count + group.visibleSessions.length,
+    0,
+  );
+  const selectedSessions = currentInstanceSyncSessionIds().length;
+  const selectedProjects = state.instanceSyncProjectSelections.size;
   const selectedConfigs = state.instanceSyncConfigPathKeys.size;
   const selectedPlan = state.instanceSyncPlans.find((plan) => plan.id === state.instanceSyncPlanId);
   const automaticPlanSelected = isAutomaticNonRootDiffPlan(state.instanceSyncPlanId);
@@ -1029,36 +1048,41 @@ function instanceSyncWorkspace() {
       <div class="instance-sync-heading">
         <div>
           <h2>本机同步工作区</h2>
-          <p>每次手动选择会话；同步方案只保存源、目标和配置路径，不保存会话选择或配置值。内置自动方案不会保存。</p>
+          <p>项目全选可作为同步方案条件；单独会话仅用于本次同步。配置方案不保存配置值，内置自动方案不会保存。</p>
         </div>
-        <span class="instance-sync-selection" aria-live="polite">会话 ${selectedSessions} · ${configSelectionStatus}</span>
+        <span class="instance-sync-selection" aria-live="polite">会话 ${selectedSessions} · 项目 ${selectedProjects} · ${configSelectionStatus}</span>
       </div>
 
-      <div class="instance-sync-plan-row">
-        <label>同步方案
-          <select id="instance-sync-plan" ${disabledWhenBusy()}>
-            <option value="">未选择已保存方案</option>
-            <option value="${automaticNonRootDiffPlanId}" ${automaticPlanSelected ? "selected" : ""}>${automaticNonRootDiffPlanLabel}</option>
-            ${state.instanceSyncPlans
-              .map(
-                (plan) =>
-                  `<option value="${plan.id}" ${plan.id === state.instanceSyncPlanId ? "selected" : ""}>${escapeHtml(plan.name)}</option>`,
-              )
-              .join("")}
-          </select>
-        </label>
-        <label>方案名称
-          <input id="instance-sync-plan-name" value="${escapeHtml(state.instanceSyncPlanName)}" placeholder="例如 办公室同步" ${disabledWhenBusy()} />
-        </label>
-        <div class="instance-sync-plan-actions">
-          <button id="save-instance-sync-plan" ${disabledWhenBusy()}>保存方案</button>
-          <button id="delete-instance-sync-plan" class="danger" ${disabledWhenBusy(!selectedPlan)}>删除方案</button>
-        </div>
+      <div class="instance-sync-steps" role="tablist" aria-label="同步步骤">
+        ${instanceSyncStepButton(1, "① 源实例与方案")}
+        ${instanceSyncStepButton(2, "② 选择会话")}
+        ${instanceSyncStepButton(3, "③ 选择 config.toml")}
       </div>
 
-      <div class="instance-sync-grid">
-        <section class="instance-sync-panel" aria-label="同步对象">
-          <h3>1. 选择实例</h3>
+      <div class="instance-sync-step-panels">
+        <section class="instance-sync-panel instance-sync-step-panel ${state.instanceSyncStep === 1 ? "is-active" : ""}" id="instance-sync-step-1" role="tabpanel" aria-hidden="${state.instanceSyncStep !== 1}">
+          <h3>① 源实例与方案</h3>
+          <div class="instance-sync-plan-row">
+            <label>同步方案
+              <select id="instance-sync-plan" ${disabledWhenBusy()}>
+                <option value="">未选择已保存方案</option>
+                <option value="${automaticNonRootDiffPlanId}" ${automaticPlanSelected ? "selected" : ""}>${automaticNonRootDiffPlanLabel}</option>
+                ${state.instanceSyncPlans
+                  .map(
+                    (plan) =>
+                      `<option value="${plan.id}" ${plan.id === state.instanceSyncPlanId ? "selected" : ""}>${escapeHtml(plan.name)}</option>`,
+                  )
+                  .join("")}
+              </select>
+            </label>
+            <label>方案名称
+              <input id="instance-sync-plan-name" value="${escapeHtml(state.instanceSyncPlanName)}" placeholder="例如 办公室同步" ${disabledWhenBusy()} />
+            </label>
+            <div class="instance-sync-plan-actions">
+              <button id="save-instance-sync-plan" ${disabledWhenBusy()}>保存方案</button>
+              <button id="delete-instance-sync-plan" class="danger" ${disabledWhenBusy(!selectedPlan)}>删除方案</button>
+            </div>
+          </div>
           <label>源实例
             <select id="instance-sync-source" ${disabledWhenBusy()}>
               <option value="">请选择源实例</option>
@@ -1088,10 +1112,13 @@ function instanceSyncWorkspace() {
           </div>
         </section>
 
-        <section class="instance-sync-panel" aria-label="会话选择">
+        <section class="instance-sync-panel instance-sync-step-panel ${state.instanceSyncStep === 2 ? "is-active" : ""}" id="instance-sync-step-2" role="tabpanel" aria-hidden="${state.instanceSyncStep !== 2}">
           <div class="instance-sync-panel-title">
-            <h3>2. 每次选择会话</h3>
-            <button id="select-visible-instance-sync-sessions" ${disabledWhenBusy(visibleSessions.length === 0)}>全选筛选结果</button>
+            <div>
+              <h3>② 选择会话</h3>
+              <p class="instance-sync-risk">按项目分组，项目内按最新时间排序。项目全选会包含该项目当前所有会话；单独勾选只用于本次同步。</p>
+            </div>
+            <button id="select-visible-instance-sync-sessions" ${disabledWhenBusy(visibleSessionCount === 0)}>选中筛选结果（本次）</button>
           </div>
           <label>筛选会话
             <input id="instance-sync-session-search" value="${escapeHtml(state.instanceSyncSessionSearch)}" placeholder="按标题、ID 或项目筛选" ${disabledWhenBusy()} />
@@ -1100,15 +1127,17 @@ function instanceSyncWorkspace() {
             ${
               state.instanceSyncSourceId == null
                 ? `<span class="instance-sync-muted">请选择源实例以加载会话。</span>`
-                : visibleSessions.length
-                  ? visibleSessions.map(instanceSyncSessionRow).join("")
+                : visibleSessionGroups.length
+                  ? visibleSessionGroups
+                      .map(({ group, visibleSessions }) => instanceSyncSessionProjectGroup(group, visibleSessions))
+                      .join("")
                   : `<span class="instance-sync-muted">没有匹配的源会话。</span>`
             }
           </div>
         </section>
 
-        <section class="instance-sync-panel" aria-label="配置选择">
-          <h3>3. 选择 config.toml 路径</h3>
+        <section class="instance-sync-panel instance-sync-step-panel instance-sync-config-step ${state.instanceSyncStep === 3 ? "is-active" : ""}" id="instance-sync-step-3" role="tabpanel" aria-hidden="${state.instanceSyncStep !== 3}">
+          <h3>③ 选择 config.toml 路径</h3>
           <p class="instance-sync-risk">已选配置项会以源值覆盖目标值；配置可能含密钥，方案不会保存其值。</p>
           <div class="instance-sync-config-tree" data-instance-sync-scroll="config" role="group" aria-label="可同步配置路径">
             ${
@@ -1134,14 +1163,44 @@ function instanceSyncWorkspace() {
   `;
 }
 
+function instanceSyncStepButton(step: InstanceSyncStep, label: string) {
+  const active = state.instanceSyncStep === step;
+  return `<button type="button" class="instance-sync-step ${active ? "is-active" : ""}" data-instance-sync-step="${step}" role="tab" aria-selected="${active}" aria-controls="instance-sync-step-${step}" ${disabledWhenBusy()}>${label}</button>`;
+}
+
+function instanceSyncSessionProjectGroup(
+  group: InstanceSyncProjectGroup<InstanceSyncSourceSession>,
+  visibleSessions: InstanceSyncSourceSession[],
+) {
+  const projectSelected = state.instanceSyncProjectSelections.has(group.project);
+  return `
+    <section class="instance-sync-session-project">
+      <div class="instance-sync-session-project-heading">
+        <label class="instance-sync-project-select">
+          <input type="checkbox" data-instance-sync-project="${escapeHtml(group.key)}" ${projectSelected ? "checked" : ""} ${disabledWhenBusy()} />
+          <span>
+            <strong>${escapeHtml(group.label)}</strong>
+            <small>${group.sessions.length} 个会话 · 项目全选可保存</small>
+          </span>
+        </label>
+        <span class="instance-sync-project-selection">${projectSelected ? "已项目全选" : "项目全选"}</span>
+      </div>
+      <div class="instance-sync-session-project-list">
+        ${visibleSessions.map(instanceSyncSessionRow).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function instanceSyncSessionRow(session: InstanceSyncSourceSession) {
   const title = session.title || session.id;
+  const selected = isInstanceSyncSessionSelected(session, currentInstanceSyncSessionSelection());
   return `
     <label class="instance-sync-session-row" data-instance-sync-session-preview="${escapeHtml(session.id)}">
-      <input type="checkbox" data-instance-sync-session="${escapeHtml(session.id)}" ${state.instanceSyncSessionIds.has(session.id) ? "checked" : ""} ${disabledWhenBusy()} />
+      <input type="checkbox" data-instance-sync-session="${escapeHtml(session.id)}" ${selected ? "checked" : ""} ${disabledWhenBusy()} />
       <span>
         <strong>${escapeHtml(title)}</strong>
-        <small>${escapeHtml(session.id)} · ${session.archived ? "已归档" : "活动"}${session.project ? ` · ${escapeHtml(session.project)}` : ""}</small>
+        <small>${escapeHtml(session.id)} · ${session.archived ? "已归档" : "活动"}${session.updated_at ? ` · ${escapeHtml(session.updated_at)}` : ""}</small>
       </span>
     </label>
   `;
@@ -1780,6 +1839,14 @@ function bindInstanceEvents() {
   document.querySelector("#refresh-managed-instances")?.addEventListener("click", () => {
     void loadManagedInstances(true);
   });
+  document.querySelectorAll<HTMLButtonElement>("[data-instance-sync-step]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const step = Number(button.dataset.instanceSyncStep);
+      if (step !== 1 && step !== 2 && step !== 3) return;
+      state.instanceSyncStep = step;
+      render({ preserveTableScroll: true });
+    });
+  });
   document.querySelector<HTMLSelectElement>("#instance-sync-plan")?.addEventListener("change", (event) => {
     const value = (event.target as HTMLSelectElement).value;
     void selectInstanceSyncPlan(value ? Number(value) : null);
@@ -1829,16 +1896,43 @@ function bindInstanceEvents() {
     }
   });
   document.querySelector("#select-visible-instance-sync-sessions")?.addEventListener("click", () => {
-    filteredInstanceSyncSessions().forEach((session) => state.instanceSyncSessionIds.add(session.id));
+    filteredInstanceSyncSessionGroups()
+      .flatMap(({ visibleSessions }) => visibleSessions)
+      .filter((session) => !isInstanceSyncSessionSelected(session, currentInstanceSyncSessionSelection()))
+      .forEach((session) => state.instanceSyncSessionIds.add(session.id));
     clearInstanceSyncOutcome();
     render({ preserveTableScroll: true });
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-instance-sync-project]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const key = checkbox.dataset.instanceSyncProject || "";
+      const project = instanceSyncProjectSelectionFromKey(key);
+      if (project === undefined) return;
+      applyInstanceSyncSessionSelection(
+        setInstanceSyncProjectSelection(
+          state.instanceSyncSessions,
+          currentInstanceSyncSessionSelection(),
+          project,
+          checkbox.checked,
+        ),
+      );
+      clearInstanceSyncOutcome();
+      render({ preserveTableScroll: true });
+    });
   });
   document.querySelectorAll<HTMLInputElement>("[data-instance-sync-session]").forEach((checkbox) => {
     checkbox.addEventListener("change", () => {
       const sessionId = checkbox.dataset.instanceSyncSession || "";
-      checkbox.checked
-        ? state.instanceSyncSessionIds.add(sessionId)
-        : state.instanceSyncSessionIds.delete(sessionId);
+      const session = state.instanceSyncSessions.find((candidate) => candidate.id === sessionId);
+      if (!session) return;
+      applyInstanceSyncSessionSelection(
+        setInstanceSyncSessionSelection(
+          state.instanceSyncSessions,
+          currentInstanceSyncSessionSelection(),
+          session,
+          checkbox.checked,
+        ),
+      );
       clearInstanceSyncOutcome();
       render({ preserveTableScroll: true });
     });
@@ -2407,6 +2501,7 @@ function reconcileInstanceSyncInstances() {
   ) {
     state.instanceSyncSourceId = null;
     state.instanceSyncSessions = [];
+    state.instanceSyncProjectSelections.clear();
     state.instanceSyncSessionIds.clear();
     state.instanceSyncConfigPaths = [];
     state.instanceSyncConfigPathKeys.clear();
@@ -2508,11 +2603,33 @@ function clearInstanceSyncOutcome() {
   state.instanceSyncResult = null;
 }
 
+function currentInstanceSyncSessionSelection() {
+  return {
+    projectSelections: state.instanceSyncProjectSelections,
+    sessionIds: state.instanceSyncSessionIds,
+  };
+}
+
+function applyInstanceSyncSessionSelection(selection: {
+  projectSelections: Set<InstanceSyncProjectSelection>;
+  sessionIds: Set<string>;
+}) {
+  state.instanceSyncProjectSelections = selection.projectSelections;
+  state.instanceSyncSessionIds = selection.sessionIds;
+}
+
+function currentInstanceSyncSessionIds() {
+  return selectedInstanceSyncSessionIds(
+    state.instanceSyncSessions,
+    currentInstanceSyncSessionSelection(),
+  );
+}
+
 function instanceSyncSelection() {
   return {
     sourceInstanceId: state.instanceSyncSourceId,
     targetInstanceIds: [...state.instanceSyncTargetIds],
-    sessionIds: [...state.instanceSyncSessionIds],
+    sessionIds: currentInstanceSyncSessionIds(),
     configPathKeys: [...state.instanceSyncConfigPathKeys],
   };
 }
@@ -2573,6 +2690,7 @@ async function selectInstanceSyncPlan(planId: number | null) {
   state.instanceSyncPlanName = plan.name;
   state.instanceSyncSourceId = selection.sourceInstanceId;
   state.instanceSyncTargetIds = new Set(selection.targetInstanceIds);
+  state.instanceSyncProjectSelections.clear();
   state.instanceSyncSessionIds.clear();
   state.instanceSyncConfigPathKeys = new Set(selection.configPathKeys);
   reconcileInstanceSyncInstances();
@@ -2590,6 +2708,7 @@ async function selectInstanceSyncSource(sourceInstanceId: number | null, clearCo
   if (sourceInstanceId != null) {
     state.instanceSyncTargetIds.delete(sourceInstanceId);
   }
+  state.instanceSyncProjectSelections.clear();
   state.instanceSyncSessionIds.clear();
   if (clearConfigSelections) {
     state.instanceSyncConfigPathKeys.clear();
@@ -2609,6 +2728,8 @@ async function loadInstanceSyncSourceData(
   state.instanceSyncSessions = [];
   state.instanceSyncConfigPaths = [];
   if (sourceInstanceId == null) {
+    state.instanceSyncProjectSelections.clear();
+    state.instanceSyncSessionIds.clear();
     if (clearOnMissing) state.instanceSyncConfigPathKeys.clear();
     render({ preserveTableScroll: true });
     return;
@@ -2622,6 +2743,12 @@ async function loadInstanceSyncSourceData(
     });
     if (state.instanceSyncSourceId !== sourceInstanceId) return;
     state.instanceSyncSessions = data.sessions;
+    applyInstanceSyncSessionSelection(
+      reconcileInstanceSyncSessionSelection(
+        data.sessions,
+        currentInstanceSyncSessionSelection(),
+      ),
+    );
     state.instanceSyncConfigPaths = data.config_paths;
     const selectableKeys = new Set(flattenInstanceSyncConfigPaths(data.config_paths));
     state.instanceSyncConfigPathKeys = new Set(
@@ -2746,16 +2873,24 @@ async function refreshAutomaticNonRootDiffConfigSelection() {
   }
 }
 
-function filteredInstanceSyncSessions() {
+function filteredInstanceSyncSessionGroups() {
   const query = state.instanceSyncSessionSearch.trim().toLocaleLowerCase();
-  if (!query) return state.instanceSyncSessions;
-  return state.instanceSyncSessions.filter((session) =>
-    [session.id, session.title, session.project]
-      .filter((value): value is string => Boolean(value))
-      .join("\n")
-      .toLocaleLowerCase()
-      .includes(query),
-  );
+  return buildInstanceSyncProjectGroups(state.instanceSyncSessions)
+    .map((group) => ({
+      group,
+      visibleSessions: query
+        ? group.sessions.filter((session) => instanceSyncSessionMatchesQuery(session, query))
+        : group.sessions,
+    }))
+    .filter(({ visibleSessions }) => visibleSessions.length > 0);
+}
+
+function instanceSyncSessionMatchesQuery(session: InstanceSyncSourceSession, query: string) {
+  return [session.id, session.title, session.project]
+    .filter((value): value is string => Boolean(value))
+    .join("\n")
+    .toLocaleLowerCase()
+    .includes(query);
 }
 
 async function loadInstanceSyncPlans() {
@@ -2792,6 +2927,17 @@ async function saveInstanceSyncPlan() {
     state.status = "源实例不能同时作为目标实例";
     render({ preserveTableScroll: true });
     return;
+  }
+  const selectedProjects = state.instanceSyncProjectSelections.size;
+  const selectedSingleSessions = state.instanceSyncSessionIds.size;
+  if (selectedProjects > 0 || selectedSingleSessions > 0) {
+    const projectSummary = selectedProjects
+      ? `项目全选 ${selectedProjects} 个会作为方案条件。`
+      : "当前没有项目全选。";
+    const sessionSummary = selectedSingleSessions
+      ? `单独勾选的 ${selectedSingleSessions} 个会话仅用于本次同步，不会保存。`
+      : "没有单独勾选的会话。";
+    if (!window.confirm(`保存方案说明：${projectSummary}${sessionSummary}`)) return;
   }
 
   await runWithProgress("正在保存同步方案", async () => {
