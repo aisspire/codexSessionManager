@@ -1,8 +1,23 @@
+export type InstanceRuntime =
+  | { kind: "native" }
+  | {
+      kind: "wsl";
+      distribution: string;
+      user: string;
+      codex_home: string;
+      host_path: string;
+      architecture: string;
+    };
+
+export type InstanceAvailability = "unknown" | "available" | "unavailable";
+
 export interface ManagedInstance {
   id: number;
   path: string;
   display_name?: string | null;
-  available: boolean;
+  availability: InstanceAvailability;
+  availability_error?: string | null;
+  runtime: InstanceRuntime;
   added_at_unix: number;
   last_seen_at_unix: number;
 }
@@ -13,6 +28,23 @@ export interface InstanceScanReport {
   ignored: number;
   already_managed: number;
   skipped: number;
+}
+
+export interface WslDiscoveryError {
+  distribution: string;
+  error: string;
+}
+
+export interface WslDiscoveryReport {
+  instances: ManagedInstance[];
+  errors: WslDiscoveryError[];
+}
+
+export interface WslStatus {
+  supported: boolean;
+  installed: boolean;
+  distributions: string[];
+  error?: string | null;
 }
 
 export interface InstanceSyncPlan {
@@ -46,13 +78,79 @@ export interface InstanceSyncTargetResultLike {
 }
 
 export function instanceDisplayName(instance: ManagedInstance) {
-  return instance.display_name?.trim() || instanceDefaultName(instance.path);
+  return (
+    instance.display_name?.trim() ||
+    (instance.runtime.kind === "wsl"
+      ? `${instance.runtime.distribution} · ${instance.runtime.user}`
+      : instanceDefaultName(instance.path))
+  );
 }
 
 export function instanceAvailability(instance: ManagedInstance) {
-  return instance.available
-    ? { label: "可用", detail: "已检测到 config.toml" }
-    : { label: "已失效", detail: "配置文件或实例目录已缺失" };
+  if (instance.availability === "available") {
+    return {
+      label: "可用",
+      detail: instance.runtime.kind === "wsl" ? "发行版内已检测到 config.toml" : "已检测到 config.toml",
+    };
+  }
+  if (instance.availability === "unknown") {
+    return {
+      label: "未检测",
+      detail: "尚未实时检查 WSL 发行版、用户和 config.toml",
+    };
+  }
+  return {
+    label: "不可用",
+    detail: instance.availability_error || "配置文件、实例目录或 WSL 发行版不可用",
+  };
+}
+
+export function instanceRuntimeLabel(instance: ManagedInstance) {
+  return instance.runtime.kind === "wsl"
+    ? `WSL · ${instance.runtime.distribution}`
+    : "Windows 原生";
+}
+
+export function isUnsupportedManualCodexHome(path: string) {
+  const normalized = path.trim().replace(/\\/g, "/").toLocaleLowerCase();
+  return (
+    normalized === "/mnt" ||
+    normalized.startsWith("/mnt/") ||
+    normalized === "//wsl.localhost" ||
+    normalized.startsWith("//wsl.localhost/") ||
+    normalized === "//wsl$" ||
+    normalized.startsWith("//wsl$/") ||
+    normalized === "//?/unc/wsl.localhost" ||
+    normalized.startsWith("//?/unc/wsl.localhost/") ||
+    normalized === "//?/unc/wsl$" ||
+    normalized.startsWith("//?/unc/wsl$/")
+  );
+}
+
+export const unsupportedManualCodexHomeMessage =
+  "Windows 原生 Codex 主目录不支持 WSL UNC 或 /mnt 路径，请先登记 WSL 实例";
+
+export interface ManualCodexHomeUpdate {
+  accepted: boolean;
+  value: string;
+  message: string | null;
+}
+
+export function manualCodexHomeUpdate(value: string, currentValue: string): ManualCodexHomeUpdate {
+  if (isUnsupportedManualCodexHome(value)) {
+    return {
+      accepted: false,
+      value: currentValue,
+      message: unsupportedManualCodexHomeMessage,
+    };
+  }
+  return { accepted: true, value, message: null };
+}
+
+export function nativeSyncInstances(instances: ManagedInstance[]) {
+  return instances.filter(
+    (instance) => instance.runtime.kind === "native" && instance.availability === "available",
+  );
 }
 
 export function instanceScanSummary(report: InstanceScanReport | null) {
@@ -73,7 +171,7 @@ export function managedInstanceIgnoreConfirmation(instance: ManagedInstance) {
 }
 
 export function availableInstanceSyncTargets(instances: ManagedInstance[], sourceInstanceId: number | null) {
-  return instances.filter((instance) => instance.available && instance.id !== sourceInstanceId);
+  return nativeSyncInstances(instances).filter((instance) => instance.id !== sourceInstanceId);
 }
 
 export function configPathKey(path: string[]) {

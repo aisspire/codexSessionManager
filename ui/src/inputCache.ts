@@ -7,6 +7,8 @@ export interface InputCacheStorage {
 
 export interface CachedInputState {
   codexHome?: string;
+  lastManualCodexHome?: string;
+  managedInstanceId?: number;
   filter?: {
     project?: string;
     provider?: string;
@@ -58,9 +60,15 @@ function parseCachedInputState(value: unknown): CachedInputState | null {
 
   return {
     codexHome: optionalString(value.codexHome),
+    lastManualCodexHome: optionalString(value.lastManualCodexHome),
+    managedInstanceId: optionalSafeInteger(value.managedInstanceId),
     filter: filter ?? undefined,
     selectedEdit: selectedEdit ?? undefined,
   };
+}
+
+function optionalSafeInteger(value: unknown) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function optionalString(value: unknown) {

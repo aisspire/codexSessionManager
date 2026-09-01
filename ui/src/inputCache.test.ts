@@ -26,6 +26,8 @@ class MemoryStorage implements InputCacheStorage {
 
 const cached: CachedInputState = {
   codexHome: "D:\\codex-home",
+  lastManualCodexHome: "C:\\Users\\me\\.codex",
+  managedInstanceId: 42,
   filter: {
     project: "E:\\code\\demo",
     provider: "cm",
@@ -53,3 +55,17 @@ expectEqual(loadInputCache(storage), cached, "loadInputCache should restore the 
 
 storage.setItem(INPUT_CACHE_KEY, "{bad json");
 expectEqual(loadInputCache(storage), null, "loadInputCache should ignore corrupt cached JSON");
+
+storage.setItem(INPUT_CACHE_KEY, JSON.stringify({ codexHome: "\\\\wsl.localhost\\Ubuntu\\home\\dev\\.codex" }));
+expectEqual(
+  loadInputCache(storage),
+  { codexHome: "\\\\wsl.localhost\\Ubuntu\\home\\dev\\.codex" },
+  "loadInputCache should keep legacy cache data without requiring lastManualCodexHome",
+);
+
+storage.setItem(INPUT_CACHE_KEY, JSON.stringify({ codexHome: "C:\\Users\\me\\.codex" }));
+expectEqual(
+  loadInputCache(storage),
+  { codexHome: "C:\\Users\\me\\.codex" },
+  "loadInputCache should preserve a legacy manual Windows path for migration",
+);

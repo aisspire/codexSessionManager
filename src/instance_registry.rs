@@ -9,17 +9,61 @@ use time::OffsetDateTime;
 use walkdir::WalkDir;
 
 use crate::path_map::normalize_path_text;
+use crate::wsl::{
+    is_wsl_mounted_path, is_wsl_unc_path, normalize_architecture, validate_distribution,
+    validate_linux_absolute_path, validate_user,
+};
 
 const CONFIG_FILE_NAME: &str = "config.toml";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InstanceRuntime {
+    Native,
+    Wsl {
+        distribution: String,
+        user: String,
+        codex_home: String,
+        host_path: String,
+        architecture: String,
+    },
+}
+
+impl Default for InstanceRuntime {
+    fn default() -> Self {
+        Self::Native
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstanceAvailability {
+    Unknown,
+    Available,
+    Unavailable,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedInstance {
     pub id: i64,
     pub path: String,
     pub display_name: Option<String>,
-    pub available: bool,
+    pub availability: InstanceAvailability,
+    #[serde(default)]
+    pub availability_error: Option<String>,
+    #[serde(default)]
+    pub runtime: InstanceRuntime,
     pub added_at_unix: i64,
     pub last_seen_at_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WslInstanceRegistration {
+    pub distribution: String,
+    pub user: String,
+    pub codex_home: String,
+    pub host_path: String,
+    pub architecture: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -68,6 +112,12 @@ struct StoredManagedInstance {
     display_name: Option<String>,
     added_at_unix: i64,
     last_seen_at_unix: i64,
+    runtime_kind: String,
+    distribution: Option<String>,
+    linux_user: Option<String>,
+    codex_home: Option<String>,
+    host_path: Option<String>,
+    architecture: Option<String>,
 }
 
 pub fn scan_and_register(database_path: &Path, parent_path: &Path) -> Result<InstanceScanReport> {
@@ -173,11 +223,148 @@ pub fn scan_and_register(database_path: &Path, parent_path: &Path) -> Result<Ins
     Ok(report)
 }
 
+pub fn register_wsl_instance(
+    database_path: &Path,
+    registration: &WslInstanceRegistration,
+) -> Result<ManagedInstance> {
+    let registration = normalized_wsl_registration(registration)?;
+    let mut connection = open_registry(database_path)?;
+    let transaction = connection
+        .transaction()
+        .context("failed to start WSL instance registry transaction")?;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let canonical_host_path =
+        canonical_wsl_host_path(&registration.distribution, &registration.codex_home);
+
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT
+            id, path, runtime_kind, distribution, linux_user, codex_home,
+            ignored_at_unix
+        FROM managed_instances
+        "#,
+    )?;
+    let records = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    let mut matching_records = records
+        .into_iter()
+        .filter(|record| {
+            let (_, path, runtime_kind, distribution, linux_user, codex_home, _) = record;
+            let runtime_matches = runtime_kind == "wsl"
+                && distribution
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(&registration.distribution))
+                && linux_user.as_deref() == Some(registration.user.as_str())
+                && codex_home.as_deref() == Some(registration.codex_home.as_str());
+            runtime_matches
+                || legacy_wsl_path(path).is_some_and(|(distribution, codex_home)| {
+                    distribution.eq_ignore_ascii_case(&registration.distribution)
+                        && codex_home == registration.codex_home
+                })
+        })
+        .collect::<Vec<_>>();
+    if matching_records.iter().any(|record| record.6.is_some()) {
+        bail!("this WSL Codex instance is permanently ignored");
+    }
+    matching_records.sort_by_key(|record| {
+        if same_wsl_host_path(&record.1, &canonical_host_path) {
+            0
+        } else if record.2 == "wsl" {
+            1
+        } else {
+            2
+        }
+    });
+    let existing = matching_records.first().cloned();
+
+    let instance_id = if let Some((id, _, _, _, _, _, _)) = existing {
+        for duplicate in matching_records.iter().skip(1) {
+            transaction.execute(
+                "UPDATE managed_instances SET deleted_at_unix = ?1 WHERE id = ?2",
+                params![now, duplicate.0],
+            )?;
+        }
+        transaction.execute(
+            r#"
+            UPDATE managed_instances
+            SET
+                path = ?1,
+                runtime_kind = 'wsl',
+                distribution = ?2,
+                linux_user = ?3,
+                codex_home = ?4,
+                host_path = ?5,
+                architecture = ?6,
+                deleted_at_unix = NULL,
+                last_seen_at_unix = ?7
+            WHERE id = ?8
+            "#,
+            params![
+                canonical_host_path,
+                registration.distribution,
+                registration.user,
+                registration.codex_home,
+                registration.host_path,
+                registration.architecture,
+                now,
+                id,
+            ],
+        )?;
+        id
+    } else {
+        transaction.execute(
+            r#"
+            INSERT INTO managed_instances (
+                path, display_name, added_at_unix, last_seen_at_unix,
+                runtime_kind, distribution, linux_user, codex_home, host_path, architecture
+            )
+            VALUES (?1, NULL, ?2, ?2, 'wsl', ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                canonical_host_path,
+                now,
+                registration.distribution,
+                registration.user,
+                registration.codex_home,
+                registration.host_path,
+                registration.architecture,
+            ],
+        )?;
+        transaction.last_insert_rowid()
+    };
+
+    transaction
+        .commit()
+        .context("failed to register WSL Codex instance")?;
+    let connection = open_registry(database_path)?;
+    read_instance(&connection, instance_id)
+}
+
+pub fn managed_instance(database_path: &Path, instance_id: i64) -> Result<ManagedInstance> {
+    let connection = open_registry(database_path)?;
+    read_instance(&connection, instance_id)
+}
+
 pub fn list_managed_instances(database_path: &Path) -> Result<Vec<ManagedInstance>> {
     let connection = open_registry(database_path)?;
     let mut statement = connection.prepare(
         r#"
-        SELECT id, path, display_name, added_at_unix, last_seen_at_unix
+        SELECT
+            id, path, display_name, added_at_unix, last_seen_at_unix,
+            runtime_kind, distribution, linux_user, codex_home, host_path, architecture
         FROM managed_instances
         WHERE deleted_at_unix IS NULL AND ignored_at_unix IS NULL
         ORDER BY
@@ -192,6 +379,12 @@ pub fn list_managed_instances(database_path: &Path) -> Result<Vec<ManagedInstanc
             display_name: row.get(2)?,
             added_at_unix: row.get(3)?,
             last_seen_at_unix: row.get(4)?,
+            runtime_kind: row.get(5)?,
+            distribution: row.get(6)?,
+            linux_user: row.get(7)?,
+            codex_home: row.get(8)?,
+            host_path: row.get(9)?,
+            architecture: row.get(10)?,
         })
     })?;
     let instances = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -263,18 +456,16 @@ pub fn permanently_ignore_managed_instance(database_path: &Path, instance_id: i6
 
 pub fn managed_instance_path(database_path: &Path, instance_id: i64) -> Result<PathBuf> {
     let connection = open_registry(database_path)?;
-    let path = connection
-        .query_row(
-            r#"
-            SELECT path FROM managed_instances
-            WHERE id = ?1 AND deleted_at_unix IS NULL AND ignored_at_unix IS NULL
-            "#,
-            [instance_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .ok_or_else(|| anyhow::anyhow!("managed instance {instance_id} does not exist"))?;
-    let path = PathBuf::from(path);
+    let instance = read_instance(&connection, instance_id)?;
+    if let InstanceRuntime::Wsl { host_path, .. } = instance.runtime {
+        return Ok(PathBuf::from(host_path));
+    }
+    if unresolved_wsl_path(&instance.path) {
+        bail!(
+            "managed instance {instance_id} is a WSL path without runtime metadata; discover or register it again"
+        );
+    }
+    let path = PathBuf::from(instance.path);
     if !path.is_dir() {
         bail!(
             "managed instance path is no longer available: {}",
@@ -425,7 +616,13 @@ fn open_registry(database_path: &Path) -> Result<Connection> {
             added_at_unix INTEGER NOT NULL,
             last_seen_at_unix INTEGER NOT NULL,
             deleted_at_unix INTEGER,
-            ignored_at_unix INTEGER
+            ignored_at_unix INTEGER,
+            runtime_kind TEXT NOT NULL DEFAULT 'native',
+            distribution TEXT,
+            linux_user TEXT,
+            codex_home TEXT,
+            host_path TEXT,
+            architecture TEXT
         );
         CREATE TABLE IF NOT EXISTS instance_sync_plans (
             id INTEGER PRIMARY KEY,
@@ -450,6 +647,42 @@ fn open_registry(database_path: &Path) -> Result<Connection> {
         "managed_instances",
         "ignored_at_unix",
         "ALTER TABLE managed_instances ADD COLUMN ignored_at_unix INTEGER",
+    )?;
+    ensure_registry_column(
+        &connection,
+        "managed_instances",
+        "runtime_kind",
+        "ALTER TABLE managed_instances ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'native'",
+    )?;
+    ensure_registry_column(
+        &connection,
+        "managed_instances",
+        "distribution",
+        "ALTER TABLE managed_instances ADD COLUMN distribution TEXT",
+    )?;
+    ensure_registry_column(
+        &connection,
+        "managed_instances",
+        "linux_user",
+        "ALTER TABLE managed_instances ADD COLUMN linux_user TEXT",
+    )?;
+    ensure_registry_column(
+        &connection,
+        "managed_instances",
+        "codex_home",
+        "ALTER TABLE managed_instances ADD COLUMN codex_home TEXT",
+    )?;
+    ensure_registry_column(
+        &connection,
+        "managed_instances",
+        "host_path",
+        "ALTER TABLE managed_instances ADD COLUMN host_path TEXT",
+    )?;
+    ensure_registry_column(
+        &connection,
+        "managed_instances",
+        "architecture",
+        "ALTER TABLE managed_instances ADD COLUMN architecture TEXT",
     )?;
     ensure_registry_column(
         &connection,
@@ -579,18 +812,21 @@ fn ensure_sync_plan_instances_available(
     for instance_id in
         std::iter::once(source_instance_id).chain(target_instance_ids.iter().copied())
     {
-        let path = connection
+        let (path, runtime_kind) = connection
             .query_row(
                 r#"
-                SELECT path
+                SELECT path, runtime_kind
                 FROM managed_instances
                 WHERE id = ?1 AND deleted_at_unix IS NULL AND ignored_at_unix IS NULL
                 "#,
                 [instance_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?
             .ok_or_else(|| anyhow::anyhow!("managed instance {instance_id} does not exist"))?;
+        if runtime_kind != "native" || unresolved_wsl_path(&path) {
+            bail!("WSL instances cannot be used in multi-instance synchronization");
+        }
         if !instance_is_available(Path::new(&path)) {
             bail!("managed instance {instance_id} is not available");
         }
@@ -629,7 +865,9 @@ fn read_instance(connection: &Connection, instance_id: i64) -> Result<ManagedIns
     let instance = connection
         .query_row(
             r#"
-            SELECT id, path, display_name, added_at_unix, last_seen_at_unix
+            SELECT
+                id, path, display_name, added_at_unix, last_seen_at_unix,
+                runtime_kind, distribution, linux_user, codex_home, host_path, architecture
             FROM managed_instances
             WHERE id = ?1 AND deleted_at_unix IS NULL AND ignored_at_unix IS NULL
             "#,
@@ -641,6 +879,12 @@ fn read_instance(connection: &Connection, instance_id: i64) -> Result<ManagedIns
                     display_name: row.get(2)?,
                     added_at_unix: row.get(3)?,
                     last_seen_at_unix: row.get(4)?,
+                    runtime_kind: row.get(5)?,
+                    distribution: row.get(6)?,
+                    linux_user: row.get(7)?,
+                    codex_home: row.get(8)?,
+                    host_path: row.get(9)?,
+                    architecture: row.get(10)?,
                 })
             },
         )
@@ -654,14 +898,123 @@ fn instance_is_available(path: &Path) -> bool {
 }
 
 fn managed_instance_from_stored(instance: StoredManagedInstance) -> ManagedInstance {
+    let runtime = if instance.runtime_kind == "wsl" {
+        match (
+            instance.distribution,
+            instance.linux_user,
+            instance.codex_home,
+            instance.host_path,
+            instance.architecture,
+        ) {
+            (
+                Some(distribution),
+                Some(user),
+                Some(codex_home),
+                Some(host_path),
+                Some(architecture),
+            ) => InstanceRuntime::Wsl {
+                distribution,
+                user,
+                codex_home,
+                host_path,
+                architecture,
+            },
+            _ => InstanceRuntime::Native,
+        }
+    } else {
+        InstanceRuntime::Native
+    };
+    let unresolved_wsl =
+        matches!(&runtime, InstanceRuntime::Native) && unresolved_wsl_path(&instance.path);
+    let availability = match &runtime {
+        InstanceRuntime::Native => {
+            if !unresolved_wsl && instance_is_available(Path::new(&instance.path)) {
+                InstanceAvailability::Available
+            } else {
+                InstanceAvailability::Unavailable
+            }
+        }
+        InstanceRuntime::Wsl { .. } => InstanceAvailability::Unknown,
+    };
+    let path = match &runtime {
+        InstanceRuntime::Native => display_path_text(Path::new(&instance.path)),
+        InstanceRuntime::Wsl { host_path, .. } => host_path.clone(),
+    };
     ManagedInstance {
         id: instance.id,
-        path: display_path_text(Path::new(&instance.path)),
+        path,
         display_name: instance.display_name,
-        available: instance_is_available(Path::new(&instance.path)),
+        availability,
+        availability_error: unresolved_wsl.then(|| {
+            "WSL path is not bound to a distribution; discover or register it again".to_string()
+        }),
+        runtime,
         added_at_unix: instance.added_at_unix,
         last_seen_at_unix: instance.last_seen_at_unix,
     }
+}
+
+fn validate_wsl_registration(registration: &WslInstanceRegistration) -> Result<()> {
+    validate_distribution(&registration.distribution)?;
+    validate_user(&registration.user)?;
+    validate_linux_absolute_path("Codex home", &registration.codex_home)?;
+    normalize_architecture(&registration.architecture)?;
+    let expected_host_path =
+        canonical_wsl_host_path(&registration.distribution, &registration.codex_home);
+    if !same_wsl_host_path(&registration.host_path, &expected_host_path) {
+        bail!("WSL host path does not match the distribution and Codex home");
+    }
+    Ok(())
+}
+
+fn normalized_wsl_registration(
+    registration: &WslInstanceRegistration,
+) -> Result<WslInstanceRegistration> {
+    validate_wsl_registration(registration)?;
+    let mut normalized = registration.clone();
+    normalized.architecture = normalize_architecture(&registration.architecture)?;
+    Ok(normalized)
+}
+
+pub fn canonical_wsl_host_path(distribution: &str, codex_home: &str) -> String {
+    let suffix = codex_home.trim_start_matches('/').replace('/', "\\");
+    if suffix.is_empty() {
+        format!(r"\\wsl.localhost\{distribution}")
+    } else {
+        format!(r"\\wsl.localhost\{distribution}\{suffix}")
+    }
+}
+
+pub fn legacy_wsl_path(path: &str) -> Option<(String, String)> {
+    let normalized = path.trim().replace('/', "\\");
+    let normalized = normalized
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .unwrap_or(normalized);
+    let rest = normalized
+        .strip_prefix(r"\\wsl.localhost\")
+        .or_else(|| normalized.strip_prefix(r"\\wsl$\"))?;
+    let (distribution, suffix) = rest.split_once('\\').unwrap_or((rest, ""));
+    if distribution.is_empty() {
+        return None;
+    }
+    let codex_home = format!("/{}", suffix.replace('\\', "/").trim_start_matches('/'));
+    Some((distribution.to_string(), codex_home))
+}
+
+fn same_wsl_host_path(left: &str, right: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .trim()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    normalize(left) == normalize(right)
+}
+
+fn unresolved_wsl_path(path: &str) -> bool {
+    legacy_wsl_path(path).is_some() || is_wsl_mounted_path(path) || is_wsl_unc_path(path)
 }
 
 fn display_path_text(path: &Path) -> String {

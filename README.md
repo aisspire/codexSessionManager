@@ -20,7 +20,7 @@
 - 收藏重点会话，并用收藏范围快速过滤。
 - 管理会话级备份，按最新快照排序，支持按快照预览、恢复、删除单个快照或批量删除所选会话的全部备份。
 - 预览并保守修复 SQLite 与 JSONL 之间的不一致。
-- 按本地 JSONL 和 `session_index.jsonl` 手动同步 SQLite，也可配置为 Codex 停止后自动同步一次。
+- 按本地 JSONL 和 `session_index.jsonl` 手动同步 SQLite，也可配置为 Codex 停止后自动同步一次；启用后桌面端每 30 秒后台检测 Codex 状态。
 - 在“实例管理”中把一个已登记本机实例的手选会话分发到多个已登记目标，并按路径选择性同步 `config.toml`。
 - 可配置显式 Codex CLI 命令路径；Windows 默认会优先通过 `where.exe codex` 找到用户入口 `codex.cmd`。
 - 自动保存输入框内容、筛选条件和项目分组展开状态。
@@ -78,11 +78,13 @@ npm --prefix ui run tauri -- build
 
 ```text
 Windows: C:\Users\<用户名>\.codex
-WSL:     /mnt/c/Users/<用户名>/.codex
+WSL:     /home/<用户名>/.codex（通过“实例管理 → 发现 WSL”登记）
 Linux:   ~/.codex
 ```
 
-如果桌面应用无法找到 `codex`，可以打开设置抽屉，在“Codex CLI 命令”中填写完整命令路径，例如 Windows 上的 `C:\Users\<用户名>\AppData\Roaming\npm\codex.cmd`。留空时应用会自动查找。
+Windows Codex 不支持通过 `CODEX_HOME=\\wsl.localhost\...` 或 `CODEX_HOME=\\wsl$\...` 使用 WSL 原生 home，也不支持把 `/mnt/...` 当作 Windows 侧手动 Codex 主目录。不要在 Windows 主目录输入框中直接填写这些路径。WSL 的 SQLite 与 WAL 必须在对应发行版内部访问：点击“发现 WSL”探测默认用户的 `~/.codex`，或用手动表单指定发行版、Linux 用户和绝对 Linux Codex 主目录。选中 WSL 实例后，主目录只读，切换“手动输入目录”才恢复 Windows 原生路径编辑。
+
+如果桌面应用无法找到 `codex`，可以打开设置抽屉填写完整命令路径。Windows 原生实例可填写 `C:\Users\<用户名>\AppData\Roaming\npm\codex.cmd`；WSL 实例留空时会从目标用户的登录 shell 自动发现 `codex`，也支持选择 Windows 文件后自动用目标发行版的 `wslpath` 转换。
 
 更详细的日常操作说明见 [使用说明.md](使用说明.md)。
 
@@ -114,6 +116,7 @@ Codex Session Manager 会把 SQLite 中的 threads、`sessions/` 和 `archived_s
 - 归档和取消归档会移动会话文件并更新索引，但不会自动创建会话级备份。
 - 数据库修复写入前会备份 `state_5.sqlite`、`session_index.jsonl`，并尽量包含 SQLite 的 WAL/SHM 文件。
 - 多实例同步仅处理同一台机器上已登记且可用的 Codex 目录；执行前会再次预检，并在每个目标写入前创建现有元数据备份。源实例不会被写入。
+- WSL 实例不参与多实例同步；界面只列出 Windows 原生实例，后端也会拒绝包含 WSL 源或目标的请求。
 - 多实例同步只新增本次选中的会话 JSONL：同 ID 且内容相同的会话会跳过，内容不同、SQLite 已有同 ID 或目标路径被占用时会保留目标并报告冲突，绝不覆盖或删除目标会话。
 - 选中的 `config.toml` 路径会用源值覆盖目标值，未选路径和仅存在于目标的路径保持不变。配置可能包含密钥等敏感值；同步方案只保存路径，不保存配置值，但执行本身会把所选值写入目标目录。
 - 恢复备份如果会覆盖已有本地 JSONL，会先创建 `restore-preflight` 预检备份。
@@ -139,6 +142,12 @@ Codex Session Manager 会把 SQLite 中的 threads、`sessions/` 和 `archived_s
 执行前可先查看按目标汇总的预览。会话保持源端的活动或归档状态，并只在目标不存在时新增 JSONL；同内容会跳过，冲突会保留目标文件。工具只合并本次新增会话的 `session_index.jsonl` 条目，并只更新这些导入 ID 的 SQLite `threads` 记录，不会复制源数据库或修改目标的其他会话。项目路径按原样保留；如果当前环境中找不到该路径，结果会提示但不会阻止同步。
 
 配置同步没有删除语义：已选叶子路径由源覆盖目标，其他目标配置保持不变。请先确认所选项不包含不应分发的密钥或环境专属设置。执行同步时必须关闭所有 Codex 进程；前端和后端都会拒绝在检测到 Codex 正在运行时写入。一个目标失败不会阻断后续目标，结果会分别显示备份、冲突、跳过和失败信息。
+
+### Windows 管理 WSL Codex
+
+“实例管理”页的“发现 WSL”只在用户点击后运行。它解析 `wsl.exe --list --quiet`，跳过 Docker/Rancher/Podman 等系统发行版，并逐个检查普通发行版默认用户的 `$HOME/.codex/config.toml`；非默认用户或自定义 `CODEX_HOME` 使用同页手动表单。WSL 实例状态分为“未检测”“可用”“不可用”：未启用自动同步时，启动不会唤醒 WSL，未检测实例仍可选择，点击刷新或执行实际操作时才实时 probe；启用“Codex 停止后自动同步”后是明确的后台例外，桌面端每 30 秒检测状态，可能启动或唤醒选中的 WSL 发行版。
+
+Windows 进程不会通过 UNC 直接打开 WSL 的 `state_5.sqlite`。首次使用某个 WSL 用户时，安装包内匹配架构的静态 helper 会原子部署到 `$HOME/.cache/codex-session-manager/<版本>/<架构>/`，权限设为 `0700`；每次操作启动一次，不常驻。helper 由目标用户的登录 shell 启动，路径通过环境变量传入，因此兼容 fish，并可继承 `mise`、`nvm` 和 provider 环境变量。会话、收藏、设置、备份恢复、数据库修复/同步和 compact 均在发行版内部完成。每次 profile 操作前还会实时确认发行版、用户、`config.toml` 和架构仍可用。bridge 对执行前的协议/部署拒绝允许重新部署重试；缺失响应标记只对只读、预览和 `apply: false` 重试，可能写入的操作只执行一次并提示执行结果未知，超时和响应解码失败不重试。
 
 ### 备份恢复
 
@@ -216,6 +225,7 @@ src-tauri/   Tauri 2 桌面壳和前后端桥接
 src/         Rust 核心逻辑与 CLI
 tests/       Rust 集成测试和 PowerShell 发布脚本测试
 assets/      README 和项目展示截图
+docs/        当前功能、架构与验收文档
 ```
 
 桌面端前端负责列表、筛选、选择、详情面板和操作按钮。Tauri 桥接层把这些操作交给 Rust 核心执行。Rust 侧负责读取 Codex 本地状态、解析 rollout JSONL、移动归档文件、更新 SQLite 状态、更新索引、管理备份和执行安全检查。
@@ -240,6 +250,12 @@ npm --prefix ui run build
 cargo test
 ```
 
+在 Windows 本地调试 WSL 功能前，需要先在具备 Rust、`musl-tools` 和目标工具链的 WSL 发行版中准备静态 helper。脚本会校验当前 WSL 架构可执行的 helper；另一架构仍会完成 ELF/静态链接校验并复制，发布 workflow 会在匹配架构容器中补做两份协议校验：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build-wsl-helper.ps1 -Distribution Ubuntu
+```
+
 运行版本脚本测试：
 
 ```powershell
@@ -256,6 +272,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\set-version.test
 - Linux: `ubuntu-22.04`
 - macOS Apple Silicon: `aarch64-apple-darwin`
 - macOS Intel: `x86_64-apple-darwin`
+
+发布 workflow 还会分别构建 `x86_64-unknown-linux-musl` 与 `aarch64-unknown-linux-musl` 静态 helper，校验协议版本、identity、架构和静态链接属性。Windows 任务下载两份产物后打包；macOS 和 Linux 包不携带它。
 
 发布前用版本脚本同步版本号，参数不带 `v`：
 
@@ -279,8 +297,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\set-version.ps1 <版�
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\set-version.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\tauri-config.tests.ps1
 cargo test
+cargo test --manifest-path src-tauri/Cargo.toml
 npm --prefix ui run test:instance-management
 npm --prefix ui run test:path-picker
+npm --prefix ui run test:input-cache
+npm --prefix ui run test:auto-sync
 npm --prefix ui run build
 ```
 
@@ -289,6 +310,14 @@ npm --prefix ui run build
 ```powershell
 npm --prefix ui run tauri -- build
 ```
+
+Windows 安装包必须先准备静态 WSL helper。可在已安装 Rust、`musl-tools` 和目标工具链的 WSL 发行版中运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build-wsl-helper.ps1 -Distribution Ubuntu
+```
+
+产物会写入被 Git 忽略的 `src-tauri/resources/wsl/codex-session-manager-wsl-bridge-x86_64` 和 `src-tauri/resources/wsl/codex-session-manager-wsl-bridge-aarch64`，并由 `tauri.windows.conf.json` 只打进 Windows 包。
 
 确认版本文件、测试、签名产物和 `git diff --check` 均无误后，创建发布提交并推送 tag：
 

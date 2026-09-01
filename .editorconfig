@@ -1,0 +1,21 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+
+[*.{bmp,gif,ico,icns,jpeg,jpg,pdf,png,webp,wasm,woff,woff2,zip}]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+
+[src-tauri/resources/wsl/*]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+
+[src-tauri/resources/wsl/.gitkeep]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true

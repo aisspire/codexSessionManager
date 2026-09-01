@@ -1,18 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod wsl;
+
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use codex_session_manager::backup_store::{
-    self, BackupDeleteReport, BackupGroupDeleteReport, SessionBackupSummary,
+    BackupDeleteReport, BackupGroupDeleteReport, SessionBackupSummary,
 };
-use codex_session_manager::compact::{self, CompactOptions, CompactReport};
+use codex_session_manager::compact::CompactReport;
 use codex_session_manager::db_repair::{
-    self, DatabaseRepairApplyReport, DatabaseRepairOptions, DatabaseRepairPreview,
+    DatabaseRepairApplyReport, DatabaseRepairOptions, DatabaseRepairPreview,
 };
-use codex_session_manager::favorites::{self, FavoritesFile};
+use codex_session_manager::favorites::FavoritesFile;
 use codex_session_manager::instance_registry::{
-    self, InstanceScanReport, InstanceSyncPlan, InstanceSyncPlanDraft, ManagedInstance,
+    self, InstanceAvailability, InstanceRuntime, InstanceScanReport, InstanceSyncPlan,
+    InstanceSyncPlanDraft, ManagedInstance, WslInstanceRegistration,
 };
 use codex_session_manager::instance_sync::{
     self, InstanceSyncConfigDiff, InstanceSyncConfigDiffRequest,
@@ -21,16 +25,20 @@ use codex_session_manager::instance_sync::{
     InstanceSyncNonRootConfigDifferenceSelection, InstanceSyncPreview, InstanceSyncRequest,
     InstanceSyncSourceData,
 };
-use codex_session_manager::migrate::{self, ApplyOptions, SessionEdit};
-use codex_session_manager::path_map::PathMap;
-use codex_session_manager::profile::CodexProfile;
-use codex_session_manager::restore::{self, RestorePreview, RestoreReport, RestoreSessionOptions};
+use codex_session_manager::migrate::{self, SessionEdit};
+use codex_session_manager::profile_operation::{
+    decode_operation_result, execute_profile_operation, BridgeRequest, ProfileOperation,
+    ProfileSpec,
+};
+use codex_session_manager::restore::{RestorePreview, RestoreReport, RestoreSessionOptions};
 use codex_session_manager::safety;
-use codex_session_manager::session_list::{self, SessionListFilter, SessionSummary};
-use codex_session_manager::session_ops::{self, SessionApplyOptions, SessionMutationReport};
-use codex_session_manager::settings::{self, AppSettings};
-use serde::Deserialize;
+use codex_session_manager::session_list::{SessionListFilter, SessionSummary};
+use codex_session_manager::session_ops::SessionMutationReport;
+use codex_session_manager::settings::AppSettings;
+use codex_session_manager::wsl::{is_wsl_mounted_path, is_wsl_unc_path};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tauri::Manager;
+use wsl::{WslBridgeManager, WslDiscoveryError, WslRegistrationInput, WslStatus};
 
 const PROJECT_GITHUB_URL: &str = "https://github.com/aisspire/codexSessionManager";
 const APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/128x128.png");
@@ -38,6 +46,8 @@ const APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/128x128.p
 #[derive(Debug, Clone, Deserialize)]
 struct ProfileInput {
     codex_home: String,
+    #[serde(default)]
+    managed_instance_id: Option<i64>,
     profile: Option<String>,
     provider: Option<String>,
     model: Option<String>,
@@ -45,229 +55,399 @@ struct ProfileInput {
 }
 
 #[tauri::command]
-fn list_sessions(
+async fn list_sessions(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     filter: SessionListFilter,
 ) -> Result<Vec<SessionSummary>, String> {
-    let profile = build_profile(profile)?;
-    session_list::list_sessions(&profile, &filter).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::ListSessions { filter },
+    )
+    .await
 }
 
 #[tauri::command]
-fn load_settings(profile: ProfileInput) -> Result<AppSettings, String> {
-    let profile = build_profile(profile)?;
-    settings::load_settings(&profile).map_err(format_error)
+async fn load_settings(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
+    profile: ProfileInput,
+) -> Result<AppSettings, String> {
+    run_profile_operation(&app, &bridge, profile, ProfileOperation::LoadSettings).await
 }
 
 #[tauri::command]
-fn save_settings(profile: ProfileInput, settings: AppSettings) -> Result<AppSettings, String> {
-    let profile = build_profile(profile)?;
-    settings::save_settings(&profile, &settings).map_err(format_error)?;
-    Ok(settings)
+async fn save_settings(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
+    profile: ProfileInput,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::SaveSettings { settings },
+    )
+    .await
 }
 
 #[tauri::command]
-fn list_session_backups(profile: ProfileInput) -> Result<Vec<SessionBackupSummary>, String> {
-    let profile = build_profile(profile)?;
-    backup_store::list_session_backups(&profile).map_err(format_error)
+async fn list_session_backups(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
+    profile: ProfileInput,
+) -> Result<Vec<SessionBackupSummary>, String> {
+    run_profile_operation(&app, &bridge, profile, ProfileOperation::ListSessionBackups).await
 }
 
 #[tauri::command]
-fn preview_restore_session_backup(
+async fn preview_restore_session_backup(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     backup_id: String,
 ) -> Result<RestorePreview, String> {
-    let profile = build_profile(profile)?;
-    restore::preview_restore_session_backup(&profile, &backup_id).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::PreviewRestoreSessionBackup { backup_id },
+    )
+    .await
 }
 
 #[tauri::command]
-fn restore_session_backup(
+async fn restore_session_backup(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     backup_id: String,
     options: RestoreSessionOptions,
 ) -> Result<RestoreReport, String> {
-    let profile = build_profile(profile)?;
-    restore::restore_session_backup(&profile, &backup_id, &options).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::RestoreSessionBackup { backup_id, options },
+    )
+    .await
 }
 
 #[tauri::command]
-fn delete_session_backup(
+async fn delete_session_backup(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     backup_id: String,
     confirmed_last_archive: bool,
 ) -> Result<BackupDeleteReport, String> {
-    let profile = build_profile(profile)?;
-    backup_store::delete_backup_snapshot_with_confirmation(
-        &profile,
-        &backup_id,
-        confirmed_last_archive,
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::DeleteSessionBackup {
+            backup_id,
+            confirmed_last_archive,
+        },
     )
-    .map_err(format_error)
+    .await
 }
 
 #[tauri::command]
-fn delete_session_backup_groups(
+async fn delete_session_backup_groups(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     session_ids: Vec<String>,
     confirmed_last_archives: bool,
 ) -> Result<BackupGroupDeleteReport, String> {
-    let profile = build_profile(profile)?;
-    backup_store::delete_backup_groups(&profile, &session_ids, confirmed_last_archives)
-        .map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::DeleteSessionBackupGroups {
+            session_ids,
+            confirmed_last_archives,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
-fn toggle_favorite(profile: ProfileInput, session_id: String) -> Result<FavoritesFile, String> {
-    let profile = build_profile(profile)?;
-    favorites::toggle_favorite(&profile, &session_id).map_err(format_error)
+async fn toggle_favorite(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
+    profile: ProfileInput,
+    session_id: String,
+) -> Result<FavoritesFile, String> {
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::ToggleFavorite { session_id },
+    )
+    .await
 }
 
 #[tauri::command]
-fn set_favorite(
+async fn set_favorite(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     session_id: String,
     favorite: bool,
 ) -> Result<FavoritesFile, String> {
-    let profile = build_profile(profile)?;
-    favorites::set_favorite(&profile, &session_id, favorite).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::SetFavorite {
+            session_id,
+            favorite,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
-fn archive_sessions(
+async fn archive_sessions(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     ids: Vec<String>,
     apply: bool,
 ) -> Result<SessionMutationReport, String> {
-    let profile = build_profile(profile)?;
-    session_ops::archive_sessions(&profile, &ids, &apply_options(apply)).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::ArchiveSessions { ids, apply },
+    )
+    .await
 }
 
 #[tauri::command]
-fn active_sessions(
+async fn active_sessions(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     ids: Vec<String>,
     apply: bool,
 ) -> Result<SessionMutationReport, String> {
-    let profile = build_profile(profile)?;
-    session_ops::active_sessions(&profile, &ids, &apply_options(apply)).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::ActiveSessions { ids, apply },
+    )
+    .await
 }
 
 #[tauri::command]
-fn delete_sessions(
+async fn delete_sessions(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     ids: Vec<String>,
     apply: bool,
 ) -> Result<SessionMutationReport, String> {
-    let profile = build_profile(profile)?;
-    session_ops::delete_sessions(&profile, &ids, &apply_options(apply)).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::DeleteSessions { ids, apply },
+    )
+    .await
 }
 
 #[tauri::command]
-fn refresh_session_updated_at(
+async fn refresh_session_updated_at(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     ids: Vec<String>,
     apply: bool,
 ) -> Result<SessionMutationReport, String> {
-    let profile = build_profile(profile)?;
-    session_ops::refresh_session_updated_at(&profile, &ids, &apply_options(apply))
-        .map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::RefreshSessionUpdatedAt { ids, apply },
+    )
+    .await
 }
 
 #[tauri::command]
-fn compact_session(
+async fn compact_session(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     id: String,
     apply: bool,
 ) -> Result<CompactReport, String> {
-    let profile = build_profile(profile)?;
-    compact::compact_session(&profile, &id, &CompactOptions { apply }).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::CompactSession { id, apply },
+    )
+    .await
 }
 
 #[tauri::command]
-fn compact_session_with_local_provider_fallback(
+async fn compact_session_with_local_provider_fallback(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     id: String,
     apply: bool,
 ) -> Result<CompactReport, String> {
-    let profile = build_profile(profile)?;
-    compact::compact_session_with_local_provider_fallback(&profile, &id, &CompactOptions { apply })
-        .map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::CompactSessionWithLocalProviderFallback { id, apply },
+    )
+    .await
 }
 
 #[tauri::command]
-fn edit_selected_sessions(
+async fn edit_selected_sessions(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     ids: Vec<String>,
     edit: SessionEdit,
     apply: bool,
 ) -> Result<migrate::MutationReport, String> {
-    if ids.is_empty() {
-        return Err("please select at least one session".to_string());
-    }
-    if edit
-        .project
-        .as_deref()
-        .map_or(true, |value| value.trim().is_empty())
-        && edit
-            .provider
-            .as_deref()
-            .map_or(true, |value| value.trim().is_empty())
-        && edit
-            .title
-            .as_deref()
-            .map_or(true, |value| value.trim().is_empty())
-        && edit
-            .title_prefix
-            .as_deref()
-            .map_or(true, |value| value.trim().is_empty())
-    {
-        return Err("please enter a provider, project, title, or title prefix to edit".to_string());
-    }
-
-    let profile = build_profile(profile)?;
-    migrate::edit_selected_sessions(&profile, &ids, &edit, &ApplyOptions { apply })
-        .map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::EditSelectedSessions { ids, edit, apply },
+    )
+    .await
 }
 
 #[tauri::command]
-fn preview_database_repairs(profile: ProfileInput) -> Result<DatabaseRepairPreview, String> {
-    let profile = build_profile(profile)?;
-    db_repair::preview_database_repairs(&profile).map_err(format_error)
+async fn preview_database_repairs(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
+    profile: ProfileInput,
+) -> Result<DatabaseRepairPreview, String> {
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::PreviewDatabaseRepairs,
+    )
+    .await
 }
 
 #[tauri::command]
-fn apply_database_repairs(
+async fn apply_database_repairs(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
     options: DatabaseRepairOptions,
 ) -> Result<DatabaseRepairApplyReport, String> {
-    let profile = build_profile(profile)?;
-    db_repair::apply_database_repairs(&profile, &options).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::ApplyDatabaseRepairs { options },
+    )
+    .await
 }
 
 #[tauri::command]
-fn detect_codex_running() -> bool {
-    safety::detect_codex_processes()
-        .map(|processes| !processes.is_empty())
-        .unwrap_or(false)
+async fn detect_codex_running(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
+    profile: ProfileInput,
+) -> Result<bool, String> {
+    detect_codex_running_with(
+        || resolve_profile_target(&app, &profile),
+        |target| {
+            run_resolved_profile_operation::<bool>(
+                &app,
+                &bridge,
+                target,
+                ProfileOperation::DetectCodexRunning,
+            )
+        },
+        || async {
+            tauri::async_runtime::spawn_blocking(|| {
+                safety::detect_codex_processes().map(|processes| !processes.is_empty())
+            })
+            .await
+            .map_err(|error| format!("Codex process detection task failed: {error}"))?
+            .map_err(|error| {
+                format!("Windows Codex process detection failed for shared WSL home: {error:?}")
+            })
+        },
+    )
+    .await
 }
 
 #[tauri::command]
-fn apply_database_sync_from_local(
+async fn apply_database_sync_from_local(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     profile: ProfileInput,
 ) -> Result<DatabaseRepairApplyReport, String> {
-    let profile = build_profile(profile)?;
-    db_repair::apply_database_sync_from_local(&profile).map_err(format_error)
+    run_profile_operation(
+        &app,
+        &bridge,
+        profile,
+        ProfileOperation::ApplyDatabaseSyncFromLocal,
+    )
+    .await
 }
 
 #[tauri::command]
-async fn list_managed_instances(app: tauri::AppHandle) -> Result<Vec<ManagedInstance>, String> {
+async fn list_managed_instances(
+    app: tauri::AppHandle,
+    refresh_wsl: Option<bool>,
+) -> Result<Vec<ManagedInstance>, String> {
     let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let mut instances = tauri::async_runtime::spawn_blocking(move || {
         instance_registry::list_managed_instances(&database_path).map_err(format_error)
     })
     .await
-    .map_err(|error| format!("managed instance list task failed: {error}"))?
+    .map_err(|error| format!("managed instance list task failed: {error}"))??;
+    if refresh_wsl.unwrap_or(false) {
+        for instance in &mut instances {
+            let InstanceRuntime::Wsl {
+                distribution,
+                user,
+                codex_home,
+                ..
+            } = &instance.runtime
+            else {
+                continue;
+            };
+            match wsl::probe(distribution, Some(user), Some(codex_home)).await {
+                Ok(probe) => {
+                    instance.availability = if probe.available {
+                        InstanceAvailability::Available
+                    } else {
+                        InstanceAvailability::Unavailable
+                    };
+                    instance.availability_error = probe.error;
+                }
+                Err(error) => {
+                    instance.availability = InstanceAvailability::Unavailable;
+                    instance.availability_error = Some(format!("{error:?}"));
+                }
+            }
+        }
+    }
+    Ok(instances)
 }
 
 #[tauri::command]
@@ -285,34 +465,136 @@ async fn scan_managed_instances(
 }
 
 #[tauri::command]
-fn rename_managed_instance(
+async fn rename_managed_instance(
     app: tauri::AppHandle,
     instance_id: i64,
     display_name: String,
 ) -> Result<ManagedInstance, String> {
     let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    instance_registry::rename_managed_instance(&database_path, instance_id, &display_name)
-        .map_err(format_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        instance_registry::rename_managed_instance(&database_path, instance_id, &display_name)
+            .map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("managed instance rename task failed: {error}"))?
 }
 
 #[tauri::command]
-fn delete_managed_instance(app: tauri::AppHandle, instance_id: i64) -> Result<(), String> {
+async fn delete_managed_instance(app: tauri::AppHandle, instance_id: i64) -> Result<(), String> {
     let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    delete_managed_instance_from_registry(&database_path, instance_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_managed_instance_from_registry(&database_path, instance_id)
+    })
+    .await
+    .map_err(|error| format!("managed instance delete task failed: {error}"))?
 }
 
 #[tauri::command]
-fn ignore_managed_instance(app: tauri::AppHandle, instance_id: i64) -> Result<(), String> {
+async fn ignore_managed_instance(app: tauri::AppHandle, instance_id: i64) -> Result<(), String> {
     let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    ignore_managed_instance_from_registry(&database_path, instance_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        ignore_managed_instance_from_registry(&database_path, instance_id)
+    })
+    .await
+    .map_err(|error| format!("managed instance ignore task failed: {error}"))?
 }
 
 #[tauri::command]
-fn open_managed_instance_path(app: tauri::AppHandle, instance_id: i64) -> Result<(), String> {
+async fn open_managed_instance_path(app: tauri::AppHandle, instance_id: i64) -> Result<(), String> {
     let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    let path = instance_registry::managed_instance_path(&database_path, instance_id)
-        .map_err(format_error)?;
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        instance_registry::managed_instance_path(&database_path, instance_id)
+    })
+    .await
+    .map_err(|error| format!("managed instance path task failed: {error}"))?
+    .map_err(format_error)?;
     open_path_in_default_file_manager(&path)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RegisteredWslDiscoveryReport {
+    instances: Vec<ManagedInstance>,
+    errors: Vec<WslDiscoveryError>,
+}
+
+#[tauri::command]
+async fn get_wsl_status() -> Result<WslStatus, String> {
+    wsl::get_status().await.map_err(format_error)
+}
+
+#[tauri::command]
+async fn discover_wsl_instances(
+    app: tauri::AppHandle,
+) -> Result<RegisteredWslDiscoveryReport, String> {
+    let discovery = wsl::discover().await.map_err(format_error)?;
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    let mut instances = Vec::new();
+    let mut errors = discovery.errors;
+    for probe in discovery.instances {
+        let registration = registration_from_probe(&probe);
+        let database_path = database_path.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            instance_registry::register_wsl_instance(&database_path, &registration)
+        })
+        .await
+        {
+            Ok(Ok(instance)) => instances.push(instance),
+            Ok(Err(error)) => errors.push(WslDiscoveryError {
+                distribution: probe.distribution,
+                error: format!("{error:?}"),
+            }),
+            Err(error) => errors.push(WslDiscoveryError {
+                distribution: probe.distribution,
+                error: format!("WSL registration task failed: {error}"),
+            }),
+        }
+    }
+    Ok(RegisteredWslDiscoveryReport { instances, errors })
+}
+
+#[tauri::command]
+async fn register_wsl_instance(
+    app: tauri::AppHandle,
+    input: WslRegistrationInput,
+) -> Result<ManagedInstance, String> {
+    let probe = wsl::probe(
+        &input.distribution,
+        input.user.as_deref(),
+        Some(&input.codex_home),
+    )
+    .await
+    .map_err(format_error)?;
+    if !probe.available {
+        return Err(probe
+            .error
+            .unwrap_or_else(|| "WSL Codex instance is not available".to_string()));
+    }
+    let registration = registration_from_probe(&probe);
+    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
+    let mut instance = tauri::async_runtime::spawn_blocking(move || {
+        instance_registry::register_wsl_instance(&database_path, &registration)
+            .map_err(format_error)
+    })
+    .await
+    .map_err(|error| format!("WSL registration task failed: {error}"))??;
+    instance.availability = InstanceAvailability::Available;
+    Ok(instance)
+}
+
+#[tauri::command]
+async fn translate_path_for_profile(
+    app: tauri::AppHandle,
+    profile: ProfileInput,
+    path: String,
+) -> Result<String, String> {
+    match resolve_profile_target(&app, &profile).await? {
+        ResolvedProfileTarget::Native { .. } => Ok(path),
+        ResolvedProfileTarget::Wsl {
+            distribution, user, ..
+        } => wsl::translate_windows_path(&distribution, &user, &path)
+            .await
+            .map_err(format_error),
+    }
 }
 
 #[tauri::command]
@@ -438,24 +720,241 @@ fn open_external_url(url: String) -> Result<(), String> {
     open_url_in_default_browser(&url)
 }
 
-fn build_profile(input: ProfileInput) -> Result<CodexProfile, String> {
-    let path_maps = input
-        .path_maps
-        .iter()
-        .map(|spec| PathMap::parse(spec).map_err(format_error))
-        .collect::<Result<Vec<_>, _>>()?;
-    CodexProfile::new(
-        input.profile.unwrap_or_else(|| "desktop".to_string()),
-        input.codex_home,
-        input.provider,
-        input.model,
-        path_maps,
-    )
-    .map_err(format_error)
+enum ResolvedProfileTarget {
+    Native {
+        profile: ProfileSpec,
+    },
+    Wsl {
+        profile: ProfileSpec,
+        distribution: String,
+        user: String,
+        architecture: String,
+    },
 }
 
-fn apply_options(apply: bool) -> SessionApplyOptions {
-    SessionApplyOptions { apply }
+async fn detect_codex_running_with<
+    Resolve,
+    ResolveFuture,
+    Execute,
+    ExecuteFuture,
+    Windows,
+    WindowsFuture,
+>(
+    resolve: Resolve,
+    execute: Execute,
+    detect_windows: Windows,
+) -> Result<bool, String>
+where
+    Resolve: FnOnce() -> ResolveFuture,
+    ResolveFuture: Future<Output = Result<ResolvedProfileTarget, String>>,
+    Execute: FnOnce(ResolvedProfileTarget) -> ExecuteFuture,
+    ExecuteFuture: Future<Output = Result<bool, String>>,
+    Windows: FnOnce() -> WindowsFuture,
+    WindowsFuture: Future<Output = Result<bool, String>>,
+{
+    let target = resolve().await?;
+    let shared_wsl_home = matches!(
+        &target,
+        ResolvedProfileTarget::Wsl { profile, .. }
+            if is_wsl_mounted_path(&profile.codex_home)
+    );
+    let running = execute(target).await?;
+    if !shared_wsl_home {
+        return Ok(running);
+    }
+    Ok(running || detect_windows().await?)
+}
+
+async fn run_profile_operation<T: DeserializeOwned>(
+    app: &tauri::AppHandle,
+    bridge: &WslBridgeManager,
+    input: ProfileInput,
+    operation: ProfileOperation,
+) -> Result<T, String> {
+    let target = resolve_profile_target(app, &input).await?;
+    run_resolved_profile_operation(app, bridge, target, operation).await
+}
+
+async fn run_resolved_profile_operation<T: DeserializeOwned>(
+    app: &tauri::AppHandle,
+    bridge: &WslBridgeManager,
+    target: ResolvedProfileTarget,
+    operation: ProfileOperation,
+) -> Result<T, String> {
+    let requires_codex_stopped = operation.requires_codex_stopped();
+    let value = match target {
+        ResolvedProfileTarget::Native { profile } => {
+            if requires_codex_stopped {
+                ensure_codex_stopped_for_native_profile().await?;
+            }
+            let request = BridgeRequest::new(profile, operation);
+            tauri::async_runtime::spawn_blocking(move || execute_profile_operation(&request))
+                .await
+                .map_err(|error| format!("native profile operation task failed: {error}"))?
+                .map_err(format_error)?
+        }
+        ResolvedProfileTarget::Wsl {
+            profile,
+            distribution,
+            user,
+            architecture,
+        } => {
+            if requires_codex_stopped && is_wsl_mounted_path(&profile.codex_home) {
+                ensure_windows_codex_stopped_for_shared_wsl_home().await?;
+            }
+            let request = BridgeRequest::new(profile, operation);
+            bridge
+                .invoke(app, &distribution, &user, &architecture, &request)
+                .await
+                .map_err(format_error)?
+        }
+    };
+    decode_operation_result(value).map_err(format_error)
+}
+
+async fn ensure_codex_stopped_for_native_profile() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(safety::ensure_codex_not_running)
+        .await
+        .map_err(|error| format!("Codex process detection task failed: {error}"))?
+        .map_err(format_error)
+}
+
+async fn ensure_windows_codex_stopped_for_shared_wsl_home() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let processes = tauri::async_runtime::spawn_blocking(safety::detect_codex_processes)
+            .await
+            .map_err(|error| format!("Codex process detection task failed: {error}"))?
+            .map_err(|error| {
+                format!(
+                    "cannot safely write the shared WSL Codex home because Windows process detection failed: {error:?}"
+                )
+            })?;
+        if !processes.is_empty() {
+            return Err(
+                "Codex appears to be running on Windows; close it before writing the shared WSL Codex home"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_profile_target(
+    app: &tauri::AppHandle,
+    input: &ProfileInput,
+) -> Result<ResolvedProfileTarget, String> {
+    let Some(instance_id) = input.managed_instance_id else {
+        #[cfg(target_os = "windows")]
+        if instance_registry::legacy_wsl_path(&input.codex_home).is_some()
+            || is_wsl_unc_path(&input.codex_home)
+            || is_wsl_mounted_path(&input.codex_home)
+        {
+            return Err(
+                "WSL/UNC Codex 主目录必须先通过“发现 WSL”或手动 WSL 表单登记，不能直接跨文件系统访问 SQLite"
+                    .to_string(),
+            );
+        }
+        return Ok(ResolvedProfileTarget::Native {
+            profile: profile_spec(input, input.codex_home.clone()),
+        });
+    };
+
+    let database_path = managed_instance_registry_database(app).map_err(format_error)?;
+    let instance = tauri::async_runtime::spawn_blocking(move || {
+        instance_registry::managed_instance(&database_path, instance_id)
+    })
+    .await
+    .map_err(|error| format!("managed instance lookup task failed: {error}"))?
+    .map_err(format_error)?;
+    match instance.runtime {
+        InstanceRuntime::Native => {
+            if instance.availability == InstanceAvailability::Unavailable {
+                return Err(instance.availability_error.unwrap_or_else(|| {
+                    format!("managed instance {instance_id} is not available")
+                }));
+            }
+            if instance_registry::legacy_wsl_path(&instance.path).is_some()
+                || is_wsl_unc_path(&instance.path)
+                || is_wsl_mounted_path(&instance.path)
+            {
+                return Err("该记录尚未绑定 WSL 运行时，请重新发现或手动登记后再访问".to_string());
+            }
+            Ok(ResolvedProfileTarget::Native {
+                profile: profile_spec(input, instance.path),
+            })
+        }
+        InstanceRuntime::Wsl {
+            distribution,
+            user,
+            codex_home,
+            architecture,
+            ..
+        } => {
+            let probe = wsl::probe(&distribution, Some(&user), Some(&codex_home))
+                .await
+                .map_err(|error| {
+                    format!(
+                        "WSL profile target is unavailable for {distribution}/{user}: {error:?}"
+                    )
+                })?;
+            if !probe.available {
+                return Err(probe.error.unwrap_or_else(|| {
+                    format!("WSL profile target is unavailable for {distribution}/{user}")
+                }));
+            }
+            if probe.user != user {
+                return Err(format!(
+                    "WSL probe resolved user {}, but the managed instance requires {}",
+                    probe.user, user
+                ));
+            }
+            if probe.codex_home != codex_home {
+                return Err(format!(
+                    "WSL probe resolved Codex home {}, but the managed instance requires {}",
+                    probe.codex_home, codex_home
+                ));
+            }
+            let registered_architecture =
+                codex_session_manager::wsl::normalize_architecture(&architecture)
+                    .map_err(format_error)?;
+            if probe.architecture != registered_architecture {
+                return Err(format!(
+                    "WSL architecture changed for {distribution}/{user}: registered {}, detected {}",
+                    registered_architecture, probe.architecture
+                ));
+            }
+            Ok(ResolvedProfileTarget::Wsl {
+                profile: profile_spec(input, probe.codex_home),
+                distribution,
+                user,
+                architecture: probe.architecture,
+            })
+        }
+    }
+}
+
+fn profile_spec(input: &ProfileInput, codex_home: String) -> ProfileSpec {
+    ProfileSpec {
+        name: input
+            .profile
+            .clone()
+            .unwrap_or_else(|| "desktop".to_string()),
+        codex_home,
+        provider: input.provider.clone(),
+        model: input.model.clone(),
+        path_maps: input.path_maps.clone(),
+    }
+}
+
+fn registration_from_probe(probe: &wsl::WslProbe) -> WslInstanceRegistration {
+    WslInstanceRegistration {
+        distribution: probe.distribution.clone(),
+        user: probe.user.clone(),
+        codex_home: probe.codex_home.clone(),
+        host_path: probe.host_path.clone(),
+        architecture: probe.architecture.clone(),
+    }
 }
 
 fn format_error(error: anyhow::Error) -> String {
@@ -570,6 +1069,7 @@ fn hide_child_console(command: &mut Command) {
 
 fn main() {
     tauri::Builder::default()
+        .manage(WslBridgeManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -607,6 +1107,10 @@ fn main() {
             delete_managed_instance,
             ignore_managed_instance,
             open_managed_instance_path,
+            get_wsl_status,
+            discover_wsl_instances,
+            register_wsl_instance,
+            translate_path_for_profile,
             list_instance_sync_plans,
             save_instance_sync_plan,
             delete_instance_sync_plan,
@@ -624,6 +1128,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     #[test]
@@ -645,6 +1151,43 @@ mod tests {
             managed_instance_registry_path(std::path::Path::new("app-data")),
             std::path::PathBuf::from("app-data").join("managed-instances.sqlite")
         );
+    }
+
+    #[test]
+    fn detects_shared_wsl_home_with_one_resolution_and_windows_process_check() {
+        let resolve_calls = Cell::new(0);
+        let windows_check_calls = Cell::new(0);
+        let result = tauri::async_runtime::block_on(detect_codex_running_with(
+            || {
+                resolve_calls.set(resolve_calls.get() + 1);
+                async {
+                    Ok::<_, String>(ResolvedProfileTarget::Wsl {
+                        profile: ProfileSpec {
+                            name: "test".to_string(),
+                            codex_home: "/mnt/c/Users/dev/.codex".to_string(),
+                            provider: None,
+                            model: None,
+                            path_maps: Vec::new(),
+                        },
+                        distribution: "Ubuntu".to_string(),
+                        user: "dev".to_string(),
+                        architecture: "x86_64".to_string(),
+                    })
+                }
+            },
+            |target| async move {
+                assert!(matches!(target, ResolvedProfileTarget::Wsl { .. }));
+                Ok::<_, String>(false)
+            },
+            || {
+                windows_check_calls.set(windows_check_calls.get() + 1);
+                async { Ok::<_, String>(true) }
+            },
+        ));
+
+        assert_eq!(result.unwrap(), true);
+        assert_eq!(resolve_calls.get(), 1);
+        assert_eq!(windows_check_calls.get(), 1);
     }
 
     #[test]

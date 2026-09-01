@@ -69,4 +69,4 @@ if (!runningMarkup.includes("data-close-dialog")) {
 expectEqual(commandRequiresCodexExit("archive_sessions"), true, "archive should be preflighted");
 expectEqual(commandRequiresCodexExit("active_sessions"), true, "unarchive should be preflighted");
 expectEqual(commandRequiresCodexExit("delete_sessions"), true, "delete should be preflighted");
-expectEqual(commandRequiresCodexExit("refresh_session_updated_at"), false, "refresh timestamp should not be preflighted");
+expectEqual(commandRequiresCodexExit("refresh_session_updated_at"), true, "refresh timestamp should be preflighted");

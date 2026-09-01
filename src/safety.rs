@@ -5,6 +5,9 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexProcess {
     pub kind: String,
@@ -42,6 +45,7 @@ pub fn detect_codex_processes() -> Result<Vec<CodexProcess>> {
 }
 
 fn detect_codex_processes_from_proc(proc_dir: &Path) -> Result<Vec<CodexProcess>> {
+    let current_uid = read_proc_uid(&proc_dir.join("self").join("status"))?;
     let mut lines = Vec::new();
     for entry in fs::read_dir(proc_dir).context("failed to read /proc")? {
         let entry = entry?;
@@ -53,9 +57,36 @@ fn detect_codex_processes_from_proc(proc_dir: &Path) -> Result<Vec<CodexProcess>
         {
             continue;
         }
-        let cmdline = entry.path().join("cmdline");
-        let Ok(bytes) = fs::read(cmdline) else {
+        let process_dir = entry.path();
+        if !proc_entry_may_belong_to_uid(&process_dir, current_uid)? {
             continue;
+        }
+
+        let status_path = process_dir.join("status");
+        let process_uid = match fs::read_to_string(&status_path) {
+            Ok(status) => parse_proc_uid(&status).with_context(|| {
+                format!("process status has no real UID {}", status_path.display())
+            })?,
+            Err(error) if should_skip_proc_read_error(&error, true) => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read process status {}", status_path.display())
+                })
+            }
+        };
+        if process_uid != current_uid {
+            continue;
+        }
+
+        let cmdline = process_dir.join("cmdline");
+        let bytes = match fs::read(&cmdline) {
+            Ok(bytes) => bytes,
+            Err(error) if should_skip_proc_read_error(&error, true) => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read process command line {}", cmdline.display())
+                })
+            }
         };
         if bytes.is_empty() {
             continue;
@@ -70,6 +101,49 @@ fn detect_codex_processes_from_proc(proc_dir: &Path) -> Result<Vec<CodexProcess>
     }
 
     Ok(detect_codex_processes_from_lines(&lines))
+}
+
+fn read_proc_uid(path: &Path) -> Result<u32> {
+    let status = fs::read_to_string(path)
+        .with_context(|| format!("failed to read current process status {}", path.display()))?;
+    parse_proc_uid(&status)
+        .with_context(|| format!("current process status has no real UID: {}", path.display()))
+}
+
+fn parse_proc_uid(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:")?.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+}
+
+fn proc_entry_may_belong_to_uid(process_dir: &Path, current_uid: u32) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        match fs::metadata(process_dir) {
+            Ok(metadata) => return Ok(metadata.uid() == current_uid),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect process ownership {}",
+                        process_dir.display()
+                    )
+                })
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (process_dir, current_uid);
+        Ok(true)
+    }
+}
+
+fn should_skip_proc_read_error(error: &std::io::Error, same_uid: bool) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || (!same_uid && error.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
 fn detect_codex_processes_from_command() -> Result<Vec<CodexProcess>> {
@@ -156,4 +230,68 @@ fn is_codex_cli(lower: &str) -> bool {
         || lower.contains(" codex ")
         || lower.contains("/.npm/bin/codex")
         || lower.contains("\\npm\\codex.cmd")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn write_process(proc_dir: &Path, pid: &str, uid: u32, command: &str) {
+        let process_dir = proc_dir.join(pid);
+        fs::create_dir_all(&process_dir).unwrap();
+        fs::write(
+            process_dir.join("status"),
+            format!("Name:\ttest\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
+        )
+        .unwrap();
+        fs::write(process_dir.join("cmdline"), command.replace(' ', "\0")).unwrap();
+    }
+
+    #[test]
+    fn proc_detection_reads_same_uid_processes_and_skips_other_uids() {
+        let directory = tempdir().unwrap();
+        let proc_dir = directory.path();
+        fs::create_dir_all(proc_dir.join("self")).unwrap();
+        fs::write(
+            proc_dir.join("self/status"),
+            "Name:\thelper\nUid:\t1000\t1000\t1000\t1000\n",
+        )
+        .unwrap();
+        write_process(proc_dir, "101", 1000, "codex app-server");
+        write_process(proc_dir, "102", 2000, "codex app-server");
+
+        let processes = detect_codex_processes_from_proc(proc_dir).unwrap();
+
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].kind, "app-server");
+    }
+
+    #[test]
+    fn proc_detection_ignores_processes_that_disappear_before_reading() {
+        let directory = tempdir().unwrap();
+        let proc_dir = directory.path();
+        fs::create_dir_all(proc_dir.join("self")).unwrap();
+        fs::write(
+            proc_dir.join("self/status"),
+            "Uid:\t1000\t1000\t1000\t1000\n",
+        )
+        .unwrap();
+        fs::create_dir(proc_dir.join("101")).unwrap();
+
+        assert!(detect_codex_processes_from_proc(proc_dir)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn proc_permission_errors_are_fail_closed_for_the_current_uid() {
+        let permission_denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+
+        assert!(!should_skip_proc_read_error(&permission_denied, true));
+        assert!(should_skip_proc_read_error(&permission_denied, false));
+    }
 }

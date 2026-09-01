@@ -3,7 +3,12 @@ target/
 /.vscode/
 *.tmp
 .agents/
-docs/
+/docs/*
+!/docs/index.md
+!/docs/codex-session-manager-项目简介.md
+!/docs/features/
+!/docs/architecture/
+!/docs/tests/
 /*.md
 test/
 node_modules/
@@ -12,3 +17,7 @@ node_modules/
 !使用说明.md
 */dist
 AGENTS.md
+/src-tauri/resources/wsl/codex-session-manager-wsl-bridge
+/src-tauri/resources/wsl/codex-session-manager-wsl-bridge-x86_64
+/src-tauri/resources/wsl/codex-session-manager-wsl-bridge-aarch64
+!/src-tauri/resources/wsl/.gitkeep

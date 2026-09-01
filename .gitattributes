@@ -1,0 +1,22 @@
+# Keep repository text deterministic across Windows, WSL and CI.
+* text=auto eol=lf
+
+# Images, icons and packaged/built artifacts are binary and must not be
+# normalized or diffed as text.
+*.bmp binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.jpeg binary
+*.jpg binary
+*.pdf binary
+*.png binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.wasm binary
+
+# WSL helpers have no file extension and are static ELF binaries.
+/src-tauri/resources/wsl/* -text -diff
+/src-tauri/resources/wsl/.gitkeep text eol=lf

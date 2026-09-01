@@ -6,6 +6,63 @@ on:
       - "v*"
 
 jobs:
+  wsl-helper:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            target: x86_64-unknown-linux-musl
+            docker_platform: linux/amd64
+            image: messense/rust-musl-cross:x86_64-musl@sha256:ce75e9174325d4fbb3de85c309e2d7ca29f7500169bc4b5d2c611ff7e86d549a
+            elf_machine: 'Advanced Micro Devices X86-64'
+            file_architecture: 'x86-64'
+          - architecture: aarch64
+            target: aarch64-unknown-linux-musl
+            docker_platform: linux/arm64
+            image: messense/rust-musl-cross:aarch64-musl@sha256:ecae5dd62d1c938c14f8071d36c16fa699860aace03bfb5284fb1216474d2643
+            elf_machine: AArch64
+            file_architecture: 'ARM aarch64'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable cross-architecture execution
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build static WSL bridge with pinned musl toolchain image
+        env:
+          CARGO_TERM_COLOR: always
+        run: |
+          docker run --rm --platform "${{ matrix.docker_platform }}" \
+            -v "$PWD":/work -w /work \
+            "${{ matrix.image }}" \
+            cargo build --locked --release --target "${{ matrix.target }}" --bin codex-session-manager-wsl-bridge
+
+      - name: Validate WSL bridge architecture, linkage, and protocol
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils file jq
+          helper="target/${{ matrix.target }}/release/codex-session-manager-wsl-bridge"
+          file "$helper" | grep -E "${{ matrix.file_architecture }}.*(statically linked|static-pie linked)"
+          readelf -h "$helper" | grep -F "Machine:                           ${{ matrix.elf_machine }}"
+          identity=$(docker run --rm --platform "${{ matrix.docker_platform }}" -v "$PWD":/work alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc /work/$helper --identity)
+          test "$(printf '%s' "$identity" | jq -r .protocol_version)" = "1"
+          test "$(printf '%s' "$identity" | jq -r .target_architecture)" = "${{ matrix.architecture }}"
+          expected_version=$(awk '$0 == "[package]" { package=1; next } package && substr($0, 1, 1) == "[" { exit } package && $1 == "version" { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)
+          test "$(printf '%s' "$identity" | jq -r .app_version)" = "$expected_version"
+          test "$(docker run --rm --platform "${{ matrix.docker_platform }}" -v "$PWD":/work alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc /work/$helper --protocol-version)" = "1"
+
+      - name: Upload WSL bridge
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-session-manager-wsl-bridge-${{ matrix.architecture }}
+          path: target/${{ matrix.target }}/release/codex-session-manager-wsl-bridge
+          if-no-files-found: error
+
   build:
     permissions:
       contents: write
@@ -19,8 +76,6 @@ jobs:
           - platform: macos-latest
             args: --target x86_64-apple-darwin
           - platform: ubuntu-22.04
-            args: ""
-          - platform: windows-latest
             args: ""
 
     runs-on: ${{ matrix.platform }}
@@ -69,3 +124,73 @@ jobs:
           prerelease: false
           tauriScript: node ui/node_modules/@tauri-apps/cli/tauri.js
           args: ${{ matrix.args }}
+
+  build-windows:
+    needs: wsl-helper
+    permissions:
+      contents: write
+
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Download x86_64 WSL bridge for Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-session-manager-wsl-bridge-x86_64
+          path: .wsl-helper-artifacts/x86_64
+
+      - name: Download aarch64 WSL bridge for Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-session-manager-wsl-bridge-aarch64
+          path: .wsl-helper-artifacts/aarch64
+
+      - name: Install both WSL bridge resources
+        shell: pwsh
+        run: |
+          $resourceDirectory = Join-Path $PWD "src-tauri/resources/wsl"
+          New-Item -ItemType Directory -Force -Path $resourceDirectory | Out-Null
+          Copy-Item -LiteralPath (Join-Path $PWD ".wsl-helper-artifacts/x86_64/codex-session-manager-wsl-bridge") -Destination (Join-Path $resourceDirectory "codex-session-manager-wsl-bridge-x86_64") -Force
+          Copy-Item -LiteralPath (Join-Path $PWD ".wsl-helper-artifacts/aarch64/codex-session-manager-wsl-bridge") -Destination (Join-Path $resourceDirectory "codex-session-manager-wsl-bridge-aarch64") -Force
+
+      - name: Verify Windows bundle resources
+        shell: pwsh
+        run: |
+          $resourceDirectory = Join-Path $PWD "src-tauri/resources/wsl"
+          foreach ($architecture in @("x86_64", "aarch64")) {
+            $path = Join-Path $resourceDirectory "codex-session-manager-wsl-bridge-$architecture"
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing bundled WSL helper resource: $path"
+            }
+          }
+
+      - name: Build and upload Tauri release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Codex Session Manager ${{ github.ref_name }}"
+          releaseBody: "See the assets below to download and install this version."
+          releaseDraft: true
+          prerelease: false
+          tauriScript: node ui/node_modules/@tauri-apps/cli/tauri.js
+          args: ""

@@ -4,7 +4,8 @@ use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 use codex_session_manager::instance_registry::{
-    list_managed_instances, save_instance_sync_plan, scan_and_register, InstanceSyncPlanDraft,
+    list_managed_instances, register_wsl_instance, save_instance_sync_plan, scan_and_register,
+    InstanceSyncPlanDraft, WslInstanceRegistration,
 };
 use codex_session_manager::instance_sync::{
     execute_instance_sync_with_guard, list_instance_sync_source_data, preview_instance_sync,
@@ -16,6 +17,44 @@ use codex_session_manager::instance_sync::{
 use codex_session_manager::state_db::StateDb;
 use rusqlite::{params, Connection};
 use tempfile::tempdir;
+
+#[test]
+fn rejects_wsl_sync_instance_before_unknown_availability_error() {
+    let dir = tempdir().unwrap();
+    let native_directory = dir.path().join("native");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&native_directory, "model = \"native\"\n");
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let native = list_managed_instances(&registry_path)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let wsl = register_wsl_instance(
+        &registry_path,
+        &WslInstanceRegistration {
+            distribution: "Ubuntu".to_string(),
+            user: "dev".to_string(),
+            codex_home: "/home/dev/.codex".to_string(),
+            host_path: r"\\wsl.localhost\Ubuntu\home\dev\.codex".to_string(),
+            architecture: "x86_64".to_string(),
+        },
+    )
+    .unwrap();
+
+    let error = preview_instance_sync(
+        &registry_path,
+        &InstanceSyncRequest {
+            source_instance_id: native.id,
+            target_instance_ids: vec![wsl.id],
+            session_ids: vec!["not-used".to_string()],
+            project_selections: Vec::new(),
+            config_paths: Vec::new(),
+        },
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:?}").contains("WSL instances cannot be used"));
+}
 
 #[test]
 fn imports_a_selected_archived_session_without_changing_its_state() {

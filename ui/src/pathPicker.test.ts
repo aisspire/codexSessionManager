@@ -64,8 +64,9 @@ const registeredPickerMarkup = registeredCodexHomePickerMarkup({
   escapeHtml: (value) => value,
   selectedInstanceId: 1,
   instances: [
-    { id: 1, label: "办公室", path: "E:\\Codex\\office", available: true },
-    { id: 2, label: "已失效", path: "E:\\Codex\\missing", available: false },
+    { id: 1, label: "办公室", path: "E:\\Codex\\office", availability: "available" },
+    { id: 2, label: "已失效", path: "E:\\Codex\\missing", availability: "unavailable" },
+    { id: 4, label: "尚未检测", path: "\\\\wsl.localhost\\Ubuntu\\home\\dev\\.codex", availability: "unknown" },
   ],
 });
 if (!registeredPickerMarkup.includes('id="registered-codex-home"')) {
@@ -76,4 +77,41 @@ if (!registeredPickerMarkup.includes('value="1" selected')) {
 }
 if (registeredPickerMarkup.includes("已失效")) {
   throw new Error("registered Codex home picker should omit unavailable instances");
+}
+if (!registeredPickerMarkup.includes("尚未检测")) {
+  throw new Error("registered Codex home picker should keep unknown instances selectable");
+}
+
+const selectedUnavailableMarkup = registeredCodexHomePickerMarkup({
+  target: "codex-home",
+  label: "Codex 主目录",
+  value: "E:\\Codex\\missing",
+  escapeHtml: (value) => value,
+  selectedInstanceId: 2,
+  instances: [{ id: 2, label: "已失效", path: "E:\\Codex\\missing", availability: "unavailable" }],
+});
+if (!selectedUnavailableMarkup.includes('value="2" selected disabled')) {
+  throw new Error("the selected unavailable instance should stay visible and disabled until switching manually");
+}
+
+const wslPickerMarkup = registeredCodexHomePickerMarkup({
+  target: "codex-home",
+  label: "Codex 主目录",
+  value: "\\\\wsl.localhost\\Ubuntu\\home\\dev\\.codex",
+  escapeHtml: (value) => value,
+  selectedInstanceId: 3,
+  readonly: true,
+  hidePicker: true,
+  instances: [
+    {
+      id: 3,
+      label: "Ubuntu · dev",
+      runtimeLabel: "WSL · Ubuntu",
+      path: "\\\\wsl.localhost\\Ubuntu\\home\\dev\\.codex",
+      availability: "available",
+    },
+  ],
+});
+if (!wslPickerMarkup.includes("readonly") || wslPickerMarkup.includes("选择文件夹")) {
+  throw new Error("selected WSL Codex home should be read-only until manual input is selected");
 }

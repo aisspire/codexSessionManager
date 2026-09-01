@@ -928,6 +928,66 @@ select {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.instance-discovery-toolbar {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.8fr) minmax(500px, 1.2fr);
+  align-items: stretch;
+  gap: 12px;
+}
+
+.instance-native-discovery,
+.wsl-discovery-panel {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid #d7e1e7;
+  border-radius: 7px;
+  padding: 10px;
+  background: #fbfcfd;
+}
+
+.instance-native-discovery {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.wsl-discovery-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.wsl-discovery-heading div {
+  display: grid;
+  gap: 2px;
+}
+
+.wsl-discovery-heading small {
+  color: #617482;
+  font-size: 11px;
+}
+
+.wsl-registration-form {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.65fr) minmax(150px, 0.75fr) minmax(210px, 1.2fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.wsl-discovery-errors {
+  display: grid;
+  gap: 4px;
+  max-height: 88px;
+  overflow: auto;
+  border-left: 3px solid #bd6a37;
+  padding: 6px 8px;
+  color: #765038;
+  background: #fff8f0;
+  font-size: 11px;
+}
+
 .instance-table-shell {
   background: #f3f6f8;
 }
@@ -1606,6 +1666,23 @@ select {
   overflow-wrap: anywhere;
 }
 
+.instance-runtime-badge {
+  justify-self: start;
+  border: 1px solid #cbd7df;
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #526878;
+  background: #f3f7f9;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.instance-runtime-badge.wsl {
+  border-color: #acd0cb;
+  color: #176166;
+  background: #eaf7f5;
+}
+
 .instance-rename-label {
   max-width: 100%;
 }
@@ -1629,10 +1706,16 @@ select {
   font-weight: 800;
 }
 
-.instance-status.missing {
+.instance-status.unavailable {
   border-color: #c6cfd8;
   color: #687786;
   background: #e4e9ee;
+}
+
+.instance-status.unknown {
+  border-color: #e3c889;
+  color: #795c17;
+  background: #fff8e5;
 }
 
 .instance-controls {
@@ -1644,6 +1727,8 @@ select {
 
 .instance-controls button:focus-visible,
 #instance-scan-path:focus-visible,
+.wsl-discovery-panel input:focus-visible,
+.wsl-discovery-panel button:focus-visible,
 .instance-sync-workspace input:focus-visible,
 .instance-sync-workspace select:focus-visible,
 .instance-sync-workspace button:focus-visible {
@@ -1962,6 +2047,13 @@ select {
   gap: 14px;
 }
 
+.setting-hint {
+  margin: -6px 0 0;
+  color: #607083;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .check-row {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -2092,6 +2184,10 @@ dd {
     min-width: 0;
   }
 
+  .instance-discovery-toolbar {
+    grid-template-columns: 1fr;
+  }
+
   .instance-sync-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2132,7 +2228,13 @@ dd {
   .filter-toolbar,
   .action-toolbar,
   .repair-filter-toolbar,
-  .repair-action-toolbar {
+  .repair-action-toolbar,
+  .instance-discovery-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .instance-native-discovery,
+  .wsl-registration-form {
     grid-template-columns: 1fr;
   }
 

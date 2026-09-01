@@ -20,6 +20,7 @@ const commandsRequiringCodexExit = new Set([
   "archive_sessions",
   "active_sessions",
   "delete_sessions",
+  "refresh_session_updated_at",
 ]);
 
 export function codexExitConfirmationMessage(options: CodexExitConfirmationOptions) {

@@ -3,9 +3,10 @@ use std::path::Path;
 
 use codex_session_manager::instance_registry::{
     delete_instance_sync_plan, list_instance_sync_plans, list_managed_instances,
-    managed_instance_path, permanently_ignore_managed_instance, rename_managed_instance,
-    save_instance_sync_plan, scan_and_register, soft_delete_managed_instance,
-    InstanceSyncPlanDraft,
+    managed_instance_path, permanently_ignore_managed_instance, register_wsl_instance,
+    rename_managed_instance, save_instance_sync_plan, scan_and_register,
+    soft_delete_managed_instance, InstanceAvailability, InstanceRuntime, InstanceSyncPlanDraft,
+    WslInstanceRegistration,
 };
 use rusqlite::{params, Connection};
 use tempfile::tempdir;
@@ -51,7 +52,9 @@ fn scan_registers_config_parent_directories_without_duplicates() {
     assert_eq!(second_scan.added, 0);
     assert_eq!(second_scan.already_managed, 2);
     assert_eq!(instances.len(), 2);
-    assert!(instances.iter().all(|instance| instance.available));
+    assert!(instances
+        .iter()
+        .all(|instance| instance.availability == InstanceAvailability::Available));
     assert!(instances
         .iter()
         .any(|instance| instance.path == registered_path(&first_instance)));
@@ -290,7 +293,7 @@ fn registry_persists_alias_and_marks_missing_config_as_unavailable() {
 
     assert_eq!(renamed.display_name.as_deref(), Some("办公账号"));
     assert_eq!(persisted.display_name.as_deref(), Some("办公账号"));
-    assert!(!persisted.available);
+    assert_eq!(persisted.availability, InstanceAvailability::Unavailable);
 }
 
 #[test]
@@ -517,4 +520,178 @@ fn scan_stores_windows_paths_without_extended_length_prefix() {
     assert!(managed_instance_path(&database_path, instance.id)
         .unwrap()
         .is_dir());
+}
+
+fn wsl_registration(distribution: &str, host_prefix: &str) -> WslInstanceRegistration {
+    WslInstanceRegistration {
+        distribution: distribution.to_string(),
+        user: "dev".to_string(),
+        codex_home: "/home/dev/.codex".to_string(),
+        host_path: format!(r"{host_prefix}\{distribution}\home\dev\.codex"),
+        architecture: "x86_64".to_string(),
+    }
+}
+
+#[test]
+fn existing_registry_rows_migrate_to_native_runtime() {
+    let dir = tempdir().unwrap();
+    let instance_directory = dir.path().join("instance");
+    let database_path = dir.path().join("instances.sqlite");
+    write_config(&instance_directory);
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE managed_instances (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                display_name TEXT,
+                added_at_unix INTEGER NOT NULL,
+                last_seen_at_unix INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO managed_instances (path, added_at_unix, last_seen_at_unix) VALUES (?1, 1, 2)",
+            [registered_path(&instance_directory)],
+        )
+        .unwrap();
+    drop(connection);
+
+    let instance = list_managed_instances(&database_path)
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    assert_eq!(instance.runtime, InstanceRuntime::Native);
+    assert_eq!(instance.availability, InstanceAvailability::Available);
+}
+
+#[test]
+fn registers_and_deduplicates_wsl_runtime_metadata() {
+    let dir = tempdir().unwrap();
+    let database_path = dir.path().join("instances.sqlite");
+    let first = register_wsl_instance(
+        &database_path,
+        &wsl_registration("Ubuntu", r"\\wsl.localhost"),
+    )
+    .unwrap();
+    let second = register_wsl_instance(
+        &database_path,
+        &wsl_registration("ubuntu", r"\\wsl.localhost"),
+    )
+    .unwrap();
+
+    assert_eq!(first.id, second.id);
+    assert_eq!(list_managed_instances(&database_path).unwrap().len(), 1);
+    assert_eq!(
+        list_managed_instances(&database_path)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .availability,
+        InstanceAvailability::Unknown
+    );
+    assert!(matches!(
+        second.runtime,
+        InstanceRuntime::Wsl {
+            ref distribution,
+            ref user,
+            ref codex_home,
+            ref architecture,
+            ..
+        } if distribution == "ubuntu"
+            && user == "dev"
+            && codex_home == "/home/dev/.codex"
+            && architecture == "x86_64"
+    ));
+}
+
+#[test]
+fn successful_wsl_probe_upgrades_legacy_unc_record_and_keeps_alias() {
+    let dir = tempdir().unwrap();
+    let database_path = dir.path().join("instances.sqlite");
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE managed_instances (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                display_name TEXT,
+                added_at_unix INTEGER NOT NULL,
+                last_seen_at_unix INTEGER NOT NULL
+            );
+            INSERT INTO managed_instances (
+                id, path, display_name, added_at_unix, last_seen_at_unix
+            ) VALUES (
+                7, '\\wsl$\Ubuntu\home\dev\.codex', '旧 WSL 实例', 1, 2
+            );
+            "#,
+        )
+        .unwrap();
+    drop(connection);
+
+    let before = list_managed_instances(&database_path)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(before.availability, InstanceAvailability::Unavailable);
+    assert!(before.availability_error.is_some());
+
+    let upgraded = register_wsl_instance(
+        &database_path,
+        &wsl_registration("Ubuntu", r"\\wsl.localhost"),
+    )
+    .unwrap();
+
+    assert_eq!(upgraded.id, 7);
+    assert_eq!(upgraded.display_name.as_deref(), Some("旧 WSL 实例"));
+    assert!(matches!(upgraded.runtime, InstanceRuntime::Wsl { .. }));
+}
+
+#[test]
+fn treats_extended_wsl_unc_as_a_legacy_wsl_path() {
+    assert_eq!(
+        codex_session_manager::instance_registry::legacy_wsl_path(
+            r"\\?\UNC\wsl.localhost\Ubuntu\home\dev\.codex",
+        ),
+        Some(("Ubuntu".to_string(), "/home/dev/.codex".to_string()))
+    );
+    assert!(codex_session_manager::wsl::is_wsl_mounted_path("/mnt"));
+}
+
+#[test]
+fn rejects_wsl_instances_in_sync_plans() {
+    let dir = tempdir().unwrap();
+    let native_directory = dir.path().join("native");
+    let database_path = dir.path().join("instances.sqlite");
+    write_config(&native_directory);
+    scan_and_register(&database_path, dir.path()).unwrap();
+    let native = list_managed_instances(&database_path)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let wsl = register_wsl_instance(
+        &database_path,
+        &wsl_registration("Ubuntu", r"\\wsl.localhost"),
+    )
+    .unwrap();
+
+    let error = save_instance_sync_plan(
+        &database_path,
+        &InstanceSyncPlanDraft {
+            id: None,
+            name: "不支持的 WSL 同步".to_string(),
+            source_instance_id: native.id,
+            target_instance_ids: vec![wsl.id],
+            config_paths: vec![vec!["model".to_string()]],
+            project_selections: Vec::new(),
+        },
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:?}").contains("WSL instances cannot be used"));
 }

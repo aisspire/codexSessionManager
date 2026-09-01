@@ -11,6 +11,7 @@ import {
   type CodexRunningDialogState,
 } from "./codexExitConfirm";
 import { loadInputCache, saveInputCache } from "./inputCache";
+import { pollAutoSync } from "./autoSync";
 import {
   pathFieldMarkup,
   pathPickerDirectory,
@@ -31,14 +32,20 @@ import {
   isCurrentAutomaticNonRootDiffContext,
   instanceAvailability,
   instanceDisplayName,
+  instanceRuntimeLabel,
   instanceScanSummary,
   instanceSyncTargetSummary,
+  manualCodexHomeUpdate,
+  isUnsupportedManualCodexHome,
   managedInstanceDeleteConfirmation,
   managedInstanceIgnoreConfirmation,
+  nativeSyncInstances,
   validateInstanceSyncSelection,
   type InstanceScanReport,
   type ManagedInstance,
   type InstanceSyncPlan,
+  type WslDiscoveryReport,
+  type WslStatus,
 } from "./instanceManagement";
 import {
   DelayedInstanceSyncPreview,
@@ -97,6 +104,7 @@ type SessionCommand =
 
 interface ProfileInput {
   codex_home: string;
+  managed_instance_id?: number;
   profile?: string;
   provider?: string;
   model?: string;
@@ -427,14 +435,27 @@ const idleBusyState = (): BusyState => ({
 
 const cachedInput = loadInputCache();
 const cachedExpandedProjects = loadProjectExpansionCache();
+const cachedManualCodexHome = [
+  cachedInput?.lastManualCodexHome,
+  cachedInput?.managedInstanceId == null ? cachedInput?.codexHome : undefined,
+].find(
+  (path): path is string =>
+    typeof path === "string" && path.trim().length > 0 && !isUnsupportedManualCodexHome(path),
+);
+const cachedCodexHome =
+  cachedInput?.managedInstanceId != null
+    ? cachedInput.codexHome || "~/.codex"
+    : cachedManualCodexHome || "~/.codex";
 
 const state = {
   // 页面只改变“可用操作”，列表、筛选和选择状态在两个页面之间共享。
   activePage: "batch-edit" as AppPage,
   profile: {
-    codex_home: cachedInput?.codexHome || "~/.codex",
+    codex_home: cachedCodexHome,
+    managed_instance_id: cachedInput?.managedInstanceId,
     path_maps: [],
   } satisfies ProfileInput,
+  lastManualCodexHome: cachedManualCodexHome,
   filter: {
     archived: "all",
     project: emptyToUndefined(cachedInput?.filter?.project ?? ""),
@@ -466,6 +487,11 @@ const state = {
   instanceScanReport: null as InstanceScanReport | null,
   instanceRenameId: null as number | null,
   instanceRenameDraft: "",
+  wslStatus: null as WslStatus | null,
+  wslDiscoveryErrors: [] as WslDiscoveryReport["errors"],
+  wslDistribution: "",
+  wslUser: "",
+  wslCodexHome: "",
   instanceSyncPlans: [] as InstanceSyncPlan[],
   instanceSyncPlanId: null as number | null,
   instanceSyncPlanName: "",
@@ -668,7 +694,7 @@ function pageHeader() {
         : state.sessions.length;
   const secondaryCount =
     state.activePage === "instance-management"
-      ? state.managedInstances.filter((instance) => !instance.available).length
+      ? state.managedInstances.filter((instance) => instance.availability === "unavailable").length
       : state.activePage === "database-repair"
       ? state.selectedRepairIds.size
       : state.activePage === "restore-backups"
@@ -680,7 +706,7 @@ function pageHeader() {
       : state.activePage === "database-repair"
         ? "项目"
         : "会话";
-  const secondaryLabel = state.activePage === "instance-management" ? "已失效" : "已选";
+  const secondaryLabel = state.activePage === "instance-management" ? "不可用" : "已选";
   return `
     <header class="page-header">
       <div>
@@ -730,6 +756,7 @@ function settingsDrawer() {
             <option value="auto-when-codex-stops" ${draft.database_sync.mode === "auto-when-codex-stops" ? "selected" : ""}>Codex 停止后自动同步</option>
           </select>
         </label>
+        <p class="setting-hint">启用后每 30 秒检测 Codex 状态；如果当前选择的是 WSL 实例，检测可能启动或唤醒对应发行版。</p>
         ${pathFieldMarkup({
           target: "setting-codex-cli",
           label: "Codex CLI 命令",
@@ -788,28 +815,45 @@ function filterBar() {
 
 function codexHomePickerMarkup() {
   const selectedInstanceId = currentCodexHomeManagedInstanceId();
+  const selectedInstance = state.managedInstances.find(
+    (instance) => instance.id === selectedInstanceId,
+  );
+  const selectedWsl = selectedInstance?.runtime.kind === "wsl";
   return registeredCodexHomePickerMarkup({
     target: "codex-home",
     label: "Codex 主目录",
     value: state.profile.codex_home,
     escapeHtml,
     disabled: state.busy.active,
+    readonly: selectedWsl,
+    hidePicker: selectedWsl,
     selectedInstanceId,
     instances: state.managedInstances.map((instance) => ({
       id: instance.id,
       label: instanceDisplayName(instance),
       path: instance.path,
-      available: instance.available,
+      availability: instance.availability,
+      runtimeLabel: instanceRuntimeLabel(instance),
     })),
   });
 }
 
 function currentCodexHomeManagedInstanceId() {
+  if (
+    state.profile.managed_instance_id != null &&
+    state.managedInstances.some(
+      (instance) => instance.id === state.profile.managed_instance_id,
+    )
+  ) {
+    return state.profile.managed_instance_id;
+  }
   const currentPath = comparableDirectoryPath(state.profile.codex_home);
   return (
     state.managedInstances.find(
       (instance) =>
-        instance.available && comparableDirectoryPath(instance.path) === currentPath,
+        instance.availability !== "unavailable" &&
+        instance.runtime.kind === "native" &&
+        comparableDirectoryPath(instance.path) === currentPath,
     )?.id ?? null
   );
 }
@@ -819,17 +863,46 @@ function comparableDirectoryPath(path: string) {
 }
 
 function instanceFilterBar() {
+  const wslStatus = state.wslStatus
+    ? state.wslStatus.installed
+      ? `已安装 · ${state.wslStatus.distributions.length} 个普通发行版`
+      : state.wslStatus.error || "WSL 不可用"
+    : "仅在点击发现时唤醒发行版";
   return `
-    <section class="toolbar repair-filter-toolbar" aria-label="实例扫描">
-      ${pathFieldMarkup({
-        target: "instance-scan-path",
-        label: "父路径",
-        value: state.instanceScanPath,
-        escapeHtml,
-        placeholder: "例如 E:\\CodexInstances",
-        disabled: state.busy.active,
-      })}
-      <button id="scan-managed-instances" class="primary" ${disabledWhenBusy()}>扫描并添加</button>
+    <section class="toolbar instance-discovery-toolbar" aria-label="实例发现与登记">
+      <div class="instance-native-discovery">
+        ${pathFieldMarkup({
+          target: "instance-scan-path",
+          label: "Windows 父路径",
+          value: state.instanceScanPath,
+          escapeHtml,
+          placeholder: "例如 E:\\CodexInstances",
+          disabled: state.busy.active,
+        })}
+        <button id="scan-managed-instances" class="primary" ${disabledWhenBusy()}>扫描 Windows</button>
+      </div>
+      <div class="wsl-discovery-panel">
+        <div class="wsl-discovery-heading">
+          <div><strong>WSL Codex</strong><small>${escapeHtml(wslStatus)}</small></div>
+          <button id="discover-wsl-instances" class="primary" ${disabledWhenBusy()}>发现 WSL</button>
+        </div>
+        <div class="wsl-registration-form" aria-label="手动登记 WSL 实例">
+          <label>发行版<input id="wsl-distribution" value="${escapeHtml(state.wslDistribution)}" placeholder="Ubuntu" ${disabledWhenBusy()} /></label>
+          <label>Linux 用户（可留空）<input id="wsl-user" value="${escapeHtml(state.wslUser)}" placeholder="默认用户" ${disabledWhenBusy()} /></label>
+          <label>Linux Codex 主目录<input id="wsl-codex-home" value="${escapeHtml(state.wslCodexHome)}" placeholder="/home/user/.codex" ${disabledWhenBusy()} /></label>
+          <button id="register-wsl-instance" ${disabledWhenBusy()}>手动登记</button>
+        </div>
+        ${
+          state.wslDiscoveryErrors.length
+            ? `<div class="wsl-discovery-errors" role="status">${state.wslDiscoveryErrors
+                .map(
+                  (item) =>
+                    `<span><strong>${escapeHtml(item.distribution)}</strong>：${escapeHtml(item.error)}</span>`,
+                )
+                .join("")}</div>`
+            : ""
+        }
+      </div>
     </section>
   `;
 }
@@ -1037,7 +1110,7 @@ function instanceTable() {
 }
 
 function instanceSyncWorkspace() {
-  const availableInstances = state.managedInstances.filter((instance) => instance.available);
+  const availableInstances = nativeSyncInstances(state.managedInstances);
   const targetInstances = availableInstanceSyncTargets(
     state.managedInstances,
     state.instanceSyncSourceId,
@@ -1065,7 +1138,7 @@ function instanceSyncWorkspace() {
       <div class="instance-sync-heading">
         <div>
           <h2>本机同步工作区</h2>
-          <p>项目全选会保存为方案条件，并在预览和执行时按当前源会话动态展开；单独会话仅用于本次同步。配置方案不保存配置值，内置自动方案不会保存。</p>
+          <p>项目全选会保存为方案条件，并在预览和执行时按当前源会话动态展开；WSL 实例不参与多实例同步。配置方案不保存配置值。</p>
         </div>
         <span class="instance-sync-selection" aria-live="polite">会话 ${selectedSessions} · 项目 ${selectedProjects} · ${configSelectionStatus}</span>
       </div>
@@ -1729,8 +1802,15 @@ function instanceRow(instance: ManagedInstance) {
   const renaming = state.instanceRenameId === instance.id;
   const displayName = instanceDisplayName(instance);
   const availability = instanceAvailability(instance);
+  const runtimeLabel = instanceRuntimeLabel(instance);
+  const wslDetails =
+    instance.runtime.kind === "wsl"
+      ? `<span>用户 ${escapeHtml(instance.runtime.user)}</span>
+         <code title="${escapeHtml(instance.runtime.codex_home)}">${escapeHtml(instance.runtime.codex_home)}</code>
+         <span>架构 ${escapeHtml(instance.runtime.architecture)}</span>`
+      : "";
   return `
-    <article class="instance-row ${instance.available ? "" : "missing"}">
+    <article class="instance-row ${instance.availability === "unavailable" ? "missing" : ""}">
       <div class="instance-main">
         ${
           renaming
@@ -1739,11 +1819,13 @@ function instanceRow(instance: ManagedInstance) {
               </label>`
             : `<strong title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</strong>`
         }
+        <span class="instance-runtime-badge ${instance.runtime.kind}">${escapeHtml(runtimeLabel)}</span>
+        ${wslDetails}
         <code title="${escapeHtml(instance.path)}">${escapeHtml(instance.path)}</code>
       </div>
       <div class="instance-facts">
-        <span class="instance-status ${instance.available ? "available" : "missing"}">${availability.label}</span>
-        <span>${availability.detail}</span>
+        <span class="instance-status ${instance.availability}">${availability.label}</span>
+        <span>${escapeHtml(availability.detail)}</span>
       </div>
       <div class="instance-controls">
         ${
@@ -2001,6 +2083,21 @@ function bindInstanceEvents() {
   });
   document.querySelector("#refresh-managed-instances")?.addEventListener("click", () => {
     void loadManagedInstances(true);
+  });
+  document.querySelector<HTMLInputElement>("#wsl-distribution")?.addEventListener("input", (event) => {
+    state.wslDistribution = (event.target as HTMLInputElement).value;
+  });
+  document.querySelector<HTMLInputElement>("#wsl-user")?.addEventListener("input", (event) => {
+    state.wslUser = (event.target as HTMLInputElement).value;
+  });
+  document.querySelector<HTMLInputElement>("#wsl-codex-home")?.addEventListener("input", (event) => {
+    state.wslCodexHome = (event.target as HTMLInputElement).value;
+  });
+  document.querySelector("#discover-wsl-instances")?.addEventListener("click", () => {
+    void discoverWslInstances();
+  });
+  document.querySelector("#register-wsl-instance")?.addEventListener("click", () => {
+    void registerWslInstance();
   });
   document.querySelectorAll<HTMLButtonElement>("[data-instance-sync-step]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2288,7 +2385,12 @@ function bindPageSwitching() {
 function bindFilters() {
   bindInput("codex-home", updateCodexHome);
   document.querySelector<HTMLSelectElement>("#registered-codex-home")?.addEventListener("change", (event) => {
-    const instanceId = Number((event.target as HTMLSelectElement).value);
+    const value = (event.target as HTMLSelectElement).value;
+    if (!value) {
+      switchToManualCodexHome();
+      return;
+    }
+    const instanceId = Number(value);
     if (!Number.isSafeInteger(instanceId)) return;
     void selectRegisteredCodexHome(instanceId);
   });
@@ -2470,6 +2572,8 @@ function bindInput(id: string, update: (value: string) => void) {
 function saveCurrentInputCache() {
   saveInputCache({
     codexHome: state.profile.codex_home,
+    lastManualCodexHome: state.lastManualCodexHome,
+    managedInstanceId: state.profile.managed_instance_id,
     filter: {
       project: state.filter.project,
       provider: state.filter.provider,
@@ -2527,17 +2631,30 @@ async function selectPathForTarget(target: PathPickerTarget) {
     if (!selectedPath) return;
 
     if (target === "codex-home") {
+      if (isUnsupportedManualCodexHome(selectedPath)) {
+        state.status = "Windows 原生 Codex 主目录不支持 WSL UNC 或 /mnt 路径，请先登记 WSL 实例";
+        render({ preserveTableScroll: true });
+        return;
+      }
       switchCodexHomeDirectory(selectedPath, "已切换手工选择的 Codex 主目录");
       return;
     }
 
     if (target === "instance-scan-path") {
       state.instanceScanPath = selectedPath;
-    } else if (target === "edit-project") {
-      state.selectedEdit.project = selectedPath;
-      saveCurrentInputCache();
-    } else if (state.settingsDraft) {
-      state.settingsDraft.codex_cli.command_path = selectedPath;
+    } else {
+      const managedInstanceId = state.profile.managed_instance_id;
+      const translatedPath = await invoke<string>("translate_path_for_profile", {
+        profile: profileSnapshot(),
+        path: selectedPath,
+      });
+      if (state.profile.managed_instance_id !== managedInstanceId) return;
+      if (target === "edit-project") {
+        state.selectedEdit.project = translatedPath;
+        saveCurrentInputCache();
+      } else if (state.settingsDraft) {
+        state.settingsDraft.codex_cli.command_path = translatedPath;
+      }
     }
     render({ preserveTableScroll: true });
   } catch (error) {
@@ -2546,7 +2663,15 @@ async function selectPathForTarget(target: PathPickerTarget) {
   }
 }
 
-function updateCodexHome(value: string) {
+function updateCodexHome(value: string, rememberAsManual = true, allowManagedPath = false) {
+  if (!allowManagedPath) {
+    const update = manualCodexHomeUpdate(value, state.profile.codex_home);
+    if (!update.accepted) {
+      state.status = update.message || "无法使用该 Codex 主目录";
+      render({ preserveTableScroll: true });
+      return;
+    }
+  }
   if (state.profile.codex_home !== value) {
     invalidateProfileDataRequests();
     state.settings = null;
@@ -2554,6 +2679,10 @@ function updateCodexHome(value: string) {
     state.backupSummary = null;
   }
   state.profile.codex_home = value;
+  state.profile.managed_instance_id = undefined;
+  if (rememberAsManual && value.trim()) {
+    state.lastManualCodexHome = value;
+  }
 }
 
 function profileSnapshot(): ProfileInput {
@@ -2574,20 +2703,53 @@ function isCurrentProfileDataRequest(requestId: number) {
 
 async function selectRegisteredCodexHome(instanceId: number) {
   const instance = state.managedInstances.find(
-    (candidate) => candidate.id === instanceId && candidate.available,
+    (candidate) => candidate.id === instanceId && candidate.availability !== "unavailable",
   );
   if (!instance) return;
-  switchCodexHomeDirectory(instance.path, `正在切换到“${instanceDisplayName(instance)}”`);
+  rememberManualCodexHome();
+  switchCodexHomeDirectory(
+    instance.path,
+    `正在切换到“${instanceDisplayName(instance)}”`,
+    instance.id,
+  );
 }
 
-function switchCodexHomeDirectory(path: string, initialStatus: string) {
-  updateCodexHome(path);
+function switchCodexHomeDirectory(path: string, initialStatus: string, managedInstanceId?: number) {
+  updateCodexHome(path, managedInstanceId == null, managedInstanceId != null);
+  state.profile.managed_instance_id = managedInstanceId;
   const requestId = invalidateProfileDataRequests();
   clearProfileScopedState();
   saveCurrentInputCache();
   state.status = initialStatus;
   render({ preserveTableScroll: true });
   void refreshCurrentPageForCodexHome(requestId);
+}
+
+function switchToManualCodexHome() {
+  if (state.profile.managed_instance_id == null) return;
+  const manualCodexHome =
+    state.lastManualCodexHome && !isUnsupportedManualCodexHome(state.lastManualCodexHome)
+      ? state.lastManualCodexHome
+      : "~/.codex";
+  state.profile.managed_instance_id = undefined;
+  state.profile.codex_home = manualCodexHome;
+  invalidateProfileDataRequests();
+  clearProfileScopedState();
+  saveCurrentInputCache();
+  const requestId = profileDataRequestId;
+  state.status = "已切换为手动输入；已恢复上次 Windows 原生 Codex 主目录";
+  render({ preserveTableScroll: true });
+  void refreshCurrentPageForCodexHome(requestId);
+}
+
+function rememberManualCodexHome() {
+  if (
+    state.profile.managed_instance_id == null &&
+    state.profile.codex_home.trim() &&
+    !isUnsupportedManualCodexHome(state.profile.codex_home)
+  ) {
+    state.lastManualCodexHome = state.profile.codex_home;
+  }
 }
 
 function clearProfileScopedState() {
@@ -2636,22 +2798,81 @@ async function refreshCurrentPageForCodexHome(requestId: number) {
 
 async function loadManagedInstances(showStatus: boolean) {
   try {
-    const [instances] = await Promise.all([
-      invoke<ManagedInstance[]>("list_managed_instances"),
+    const [instances, , wslStatus] = await Promise.all([
+      invoke<ManagedInstance[]>("list_managed_instances", { refreshWsl: showStatus }),
       loadInstanceSyncPlans(),
+      showStatus ? invoke<WslStatus>("get_wsl_status") : Promise.resolve(null),
     ]);
+    if (showStatus && wslStatus) state.wslStatus = wslStatus;
     state.managedInstances = instances;
+    const selectedInstance = state.managedInstances.find(
+      (instance) => instance.id === state.profile.managed_instance_id,
+    );
+    if (state.profile.managed_instance_id != null && !selectedInstance) {
+      state.profile.managed_instance_id = undefined;
+      state.profile.codex_home =
+        state.lastManualCodexHome && !isUnsupportedManualCodexHome(state.lastManualCodexHome)
+          ? state.lastManualCodexHome
+          : "~/.codex";
+      saveCurrentInputCache();
+    } else if (selectedInstance) {
+      state.profile.codex_home = selectedInstance.path;
+    }
     reconcileInstanceSyncInstances();
     if (showStatus) {
-      const unavailable = state.managedInstances.filter((instance) => !instance.available).length;
-      state.status = unavailable
-        ? `已检查 ${state.managedInstances.length} 个实例，其中 ${unavailable} 个已失效`
-        : `已检查 ${state.managedInstances.length} 个实例`;
+      const unavailable = state.managedInstances.filter(
+        (instance) => instance.availability === "unavailable",
+      ).length;
+      const unknown = state.managedInstances.filter(
+        (instance) => instance.availability === "unknown",
+      ).length;
+      state.status = unknown
+        ? `已检查 ${state.managedInstances.length} 个实例，其中 ${unknown} 个待检测`
+        : unavailable
+          ? `已检查 ${state.managedInstances.length} 个实例，其中 ${unavailable} 个不可用`
+          : `已检查 ${state.managedInstances.length} 个实例`;
     }
   } catch (error) {
     state.status = `无法加载多实例列表：${String(error)}`;
   }
   render({ preserveTableScroll: true });
+}
+
+async function discoverWslInstances() {
+  await runWithProgress("正在发现 WSL Codex", async () => {
+    state.wslStatus = await invoke<WslStatus>("get_wsl_status");
+    if (!state.wslStatus.installed) {
+      throw new Error(state.wslStatus.error || "WSL 不可用");
+    }
+    const report = await invoke<WslDiscoveryReport>("discover_wsl_instances");
+    state.wslDiscoveryErrors = report.errors;
+    await loadManagedInstances(true);
+    state.status = report.errors.length
+      ? `发现并登记 ${report.instances.length} 个 WSL 实例，${report.errors.length} 个发行版未登记`
+      : `发现并登记 ${report.instances.length} 个 WSL 实例`;
+  });
+}
+
+async function registerWslInstance() {
+  const distribution = state.wslDistribution.trim();
+  const codexHome = state.wslCodexHome.trim();
+  if (!distribution || !codexHome) {
+    state.status = "手动登记需要发行版和绝对 Linux Codex 主目录";
+    render({ preserveTableScroll: true });
+    return;
+  }
+  await runWithProgress("正在登记 WSL Codex", async () => {
+    const instance = await invoke<ManagedInstance>("register_wsl_instance", {
+      input: {
+        distribution,
+        user: state.wslUser.trim() || null,
+        codex_home: codexHome,
+      },
+    });
+    state.wslDiscoveryErrors = [];
+    await loadManagedInstances(true);
+    state.status = `已登记 ${instanceDisplayName(instance)}`;
+  });
 }
 
 async function scanManagedInstances() {
@@ -2678,7 +2899,7 @@ function reconcileInstanceSyncInstances(refreshConfigDifferenceSummary = true) {
   clearInstanceSyncConfigDiffCache();
   invalidateInstanceSyncConfigDifferenceSummary();
   const availableIds = new Set(
-    state.managedInstances.filter((instance) => instance.available).map((instance) => instance.id),
+    nativeSyncInstances(state.managedInstances).map((instance) => instance.id),
   );
   if (
     state.instanceSyncSourceId != null &&
@@ -3472,6 +3693,7 @@ function sessionTitle(session: SessionSummary) {
 
 async function toggleFavorite(id: string) {
   if (!id) return;
+  if (!(await ensureCodexStoppedBefore("更新收藏"))) return;
   const activeId = state.activeId;
   const wasDetailOpen = state.detailOpen;
   await runWithProgress("正在更新收藏", async () => {
@@ -3716,6 +3938,7 @@ async function loadAppSettings(showStatus: boolean) {
 
 async function saveAppSettings() {
   if (!state.settingsDraft) return;
+  if (!(await ensureCodexStoppedBefore("保存设置"))) return;
   await runWithProgress("正在保存设置", async () => {
     const saved = await invoke<AppSettings>("save_settings", {
       profile: state.profile,
@@ -3834,6 +4057,7 @@ async function deleteSelectedBackup(sessionId: string) {
     );
     if (!confirmed) return;
   }
+  if (!(await ensureCodexStoppedBefore("删除备份"))) return;
   await runWithProgress("正在删除备份", async () => {
     await invoke("delete_session_backup", {
       profile: state.profile,
@@ -3864,6 +4088,7 @@ async function deleteSelectedBackupGroups() {
     `删除 ${sessionIds.length} 个备份条目？\n这会永久删除这些条目下的全部快照，不能从本工具恢复。${warning}`,
   );
   if (!confirmed) return;
+  if (!(await ensureCodexStoppedBefore("删除备份"))) return;
 
   await runTaskList("正在删除备份", taskItemsForBackupSessionIds(sessionIds), async (tasks) => {
     sessionIds.forEach((_, index) => tasks.start(index, "等待删除结果"));
@@ -3902,22 +4127,24 @@ async function applyDatabaseSyncFromLocal() {
 }
 
 async function pollCodexProcess() {
-  if (state.autoSyncInFlight || state.settings?.database_sync.mode !== "auto-when-codex-stops") {
-    return;
-  }
-  const requestId = profileDataRequestId;
-  const profile = profileSnapshot();
-  try {
-    const running = await invoke<boolean>("detect_codex_running");
-    if (!isCurrentProfileDataRequest(requestId)) return;
-    if (state.codexWasRunning === true && !running) {
-      state.autoSyncInFlight = true;
-      const report = await invoke<DatabaseRepairApplyReport>("apply_database_sync_from_local", {
-        profile,
-      });
-      if (!isCurrentProfileDataRequest(requestId)) return;
-      state.syncStatus = `Codex 已停止，已同步 SQLite：${report.applied_items} 项`;
-      state.status = state.syncStatus;
+  await pollAutoSync<ProfileInput, DatabaseRepairApplyReport>({
+    state,
+    enabled: () => state.settings?.database_sync.mode === "auto-when-codex-stops",
+    getProfile: profileSnapshot,
+    getRequestId: () => profileDataRequestId,
+    isCurrentRequest: isCurrentProfileDataRequest,
+    invoke: <T>(command: string, args: { profile: ProfileInput }) => invoke<T>(command, args),
+    wasRunning: () => state.codexWasRunning,
+    setWasRunning: (running) => {
+      state.codexWasRunning = running;
+    },
+    onStatus: (status) => {
+      state.syncStatus = status;
+      if (state.activePage === "database-repair") {
+        render({ preserveTableScroll: true });
+      }
+    },
+    onSync: async (report, profile, requestId) => {
       if (state.activePage === "database-repair") {
         const preview = await invoke<DatabaseRepairPreview>("preview_database_repairs", {
           profile,
@@ -3926,21 +4153,17 @@ async function pollCodexProcess() {
         state.repairItems = preview.items;
         state.repairBackupNote = preview.backup_note;
       }
+      if (!isCurrentProfileDataRequest(requestId)) return;
+      state.syncStatus = `Codex 已停止，已同步 SQLite：${report.applied_items} 项`;
+      state.status = state.syncStatus;
       render({ preserveTableScroll: true });
-    } else {
-      state.syncStatus = running ? "Codex 运行中，等待停止后同步" : "Codex 未运行";
-      if (state.activePage === "database-repair") {
-        render({ preserveTableScroll: true });
-      }
-    }
-    state.codexWasRunning = running;
-  } catch (error) {
-    if (isCurrentProfileDataRequest(requestId)) {
-      state.syncStatus = `自动同步跳过：${String(error)}`;
-    }
-  } finally {
-    state.autoSyncInFlight = false;
-  }
+    },
+    onError: (error) => {
+      state.syncStatus = `自动同步跳过：${formatErrorMessage(error)}`;
+      state.status = state.syncStatus;
+      render({ preserveTableScroll: true });
+    },
+  });
 }
 
 async function runWithProgress(label: string, task: () => Promise<void>) {
@@ -4129,7 +4352,9 @@ function commandLabel(command: SessionCommand) {
 
 async function ensureCodexStoppedBefore(action: string) {
   try {
-    const running = await invoke<boolean>("detect_codex_running");
+    const running = await invoke<boolean>("detect_codex_running", {
+      profile: profileSnapshot(),
+    });
     if (!running) return true;
     state.dialog = codexRunningDialogState(action);
     render({ preserveTableScroll: true });
@@ -4260,8 +4485,7 @@ function escapeHtml(value: string) {
 }
 
 render();
-void loadManagedInstances(false);
-void loadAppSettings(false);
+void initializeApp();
 void checkForUpdates(false);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.dialog && !dialogBlocksDismiss(state.dialog)) {
@@ -4272,3 +4496,17 @@ document.addEventListener("keydown", (event) => {
 window.setInterval(() => {
   void pollCodexProcess();
 }, 30_000);
+
+async function initializeApp() {
+  await loadManagedInstances(false);
+  const selectedInstance = state.managedInstances.find(
+    (instance) => instance.id === state.profile.managed_instance_id,
+  );
+  if (selectedInstance?.runtime.kind === "wsl" && selectedInstance.availability === "unknown") {
+    state.status = "WSL 实例未检测；可先选择它，点击“检查实例状态”或执行操作时会实时探测";
+    render({ preserveTableScroll: true });
+    return;
+  }
+  await loadAppSettings(false);
+  await refreshCurrentPageForCodexHome(profileDataRequestId);
+}

@@ -12,7 +12,10 @@ import {
   managedInstanceDeleteConfirmation,
   managedInstanceIgnoreConfirmation,
   instanceDisplayName,
+  instanceRuntimeLabel,
   instanceScanSummary,
+  isUnsupportedManualCodexHome,
+  manualCodexHomeUpdate,
   validateInstanceSyncSelection,
 } from "./instanceManagement.js";
 import {
@@ -49,7 +52,8 @@ const availableInstance = {
   id: 1,
   path: "E:\\codex\\office",
   display_name: "办公账号",
-  available: true,
+  availability: "available" as const,
+  runtime: { kind: "native" as const },
   added_at_unix: 1,
   last_seen_at_unix: 2,
 };
@@ -61,10 +65,62 @@ expectEqual(
   "uses the final path segment when an application-only name is absent",
 );
 expectEqual(
-  instanceAvailability({ ...availableInstance, available: false }),
-  { label: "已失效", detail: "配置文件或实例目录已缺失" },
+  instanceAvailability({ ...availableInstance, availability: "unavailable" }),
+  { label: "不可用", detail: "配置文件、实例目录或 WSL 发行版不可用" },
   "describes unavailable instances without relying on color alone",
 );
+expectEqual(
+  instanceAvailability({ ...availableInstance, availability: "unknown" }),
+  { label: "未检测", detail: "尚未实时检查 WSL 发行版、用户和 config.toml" },
+  "describes an unprobed WSL instance without treating it as unavailable",
+);
+expectEqual(
+  [
+    isUnsupportedManualCodexHome("\\\\wsl.localhost\\Ubuntu\\home\\dev\\.codex"),
+    isUnsupportedManualCodexHome("//wsl$/Ubuntu/home/dev/.codex"),
+    isUnsupportedManualCodexHome("\\\\wsl.localhost"),
+    isUnsupportedManualCodexHome("\\\\?\\UNC\\wsl$\\Ubuntu"),
+    isUnsupportedManualCodexHome("/mnt/c/Users/dev/.codex"),
+    isUnsupportedManualCodexHome("C:\\Users\\dev\\.codex"),
+  ],
+  [true, true, true, true, true, false],
+  "rejects direct WSL UNC and /mnt paths in the manual Windows profile field",
+);
+const previousManualCodexHome = "C:\\Users\\dev\\.codex";
+const rejectedManualCodexHome = manualCodexHomeUpdate(
+  "\\\\?\\UNC\\wsl.localhost\\Ubuntu\\home\\dev\\.codex",
+  previousManualCodexHome,
+);
+expectEqual(
+  rejectedManualCodexHome,
+  {
+    accepted: false,
+    value: previousManualCodexHome,
+    message: "Windows 原生 Codex 主目录不支持 WSL UNC 或 /mnt 路径，请先登记 WSL 实例",
+  },
+  "keeps the effective manual profile path so a rejected paste can be rendered back",
+);
+expectEqual(
+  manualCodexHomeUpdate("C:\\Users\\dev\\new-codex", previousManualCodexHome),
+  { accepted: true, value: "C:\\Users\\dev\\new-codex", message: null },
+  "accepts a native Windows path in the manual profile field",
+);
+const wslInstance = {
+  ...availableInstance,
+  id: 9,
+  path: "\\\\wsl.localhost\\Ubuntu\\home\\dev\\.codex",
+  display_name: null,
+  runtime: {
+    kind: "wsl" as const,
+    distribution: "Ubuntu",
+    user: "dev",
+    codex_home: "/home/dev/.codex",
+    host_path: "\\\\wsl.localhost\\Ubuntu\\home\\dev\\.codex",
+    architecture: "x86_64",
+  },
+};
+expectEqual(instanceDisplayName(wslInstance), "Ubuntu · dev", "uses WSL identity as the default name");
+expectEqual(instanceRuntimeLabel(wslInstance), "WSL · Ubuntu", "labels the WSL runtime explicitly");
 expectEqual(
   instanceScanSummary({ added: 2, reactivated: 0, ignored: 0, already_managed: 3, skipped: 1 }),
   "最近扫描：新增 2 个 · 已存在 3 个 · 跳过 1 个",
@@ -100,11 +156,18 @@ const secondAvailableInstance = {
 
 expectEqual(
   availableInstanceSyncTargets(
-    [availableInstance, secondAvailableInstance, { ...availableInstance, id: 3, available: false }],
+    [availableInstance, secondAvailableInstance, { ...availableInstance, id: 3, availability: "unavailable" }],
     availableInstance.id,
   ).map((instance) => instance.id),
   [secondAvailableInstance.id],
   "only available instances other than the source can be selected as sync targets",
+);
+expectEqual(
+  availableInstanceSyncTargets([availableInstance, secondAvailableInstance, wslInstance], availableInstance.id).map(
+    (instance) => instance.id,
+  ),
+  [secondAvailableInstance.id],
+  "excludes WSL instances from multi-instance synchronization",
 );
 expectEqual(
   applyInstanceSyncPlan({

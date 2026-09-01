@@ -231,14 +231,20 @@ fn switch_openai_provider_name_to_local(profile: &CodexProfile) -> Result<Provid
             config_path.display()
         )
     })?;
-    let provider = doc["model_provider"]
-        .as_str()
+    let provider = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
         .map(str::trim)
         .filter(|provider| !provider.is_empty())
         .context("config.toml is missing model_provider")?
         .to_string();
-    let provider_name = doc["model_providers"][&provider]["name"]
-        .as_str()
+    let provider_name = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table_like())
+        .and_then(|providers| providers.get(&provider))
+        .and_then(|item| item.as_table_like())
+        .and_then(|provider_table| provider_table.get("name"))
+        .and_then(|item| item.as_str())
         .map(str::trim)
         .context("config.toml is missing model_providers.<model_provider>.name")?;
     if !provider_name.eq_ignore_ascii_case("OpenAI") {

@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
+    "test": "npm run test:instance-management && npm run test:path-picker && npm run test:input-cache && npm run test:auto-sync",
     "test:instance-management": "tsc -p tsconfig.instance-test.json && node dist/instanceManagement.test.js",
     "test:path-picker": "tsc -p tsconfig.path-picker-test.json && node dist/pathPicker.test.js",
+    "test:input-cache": "tsc -p tsconfig.input-cache-test.json && node dist/inputCache.test.js",
+    "test:auto-sync": "tsc -p tsconfig.auto-sync-test.json && node dist/autoSync.test.js",
     "tauri": "cd .. && node ui/node_modules/@tauri-apps/cli/tauri.js"
   },
   "dependencies": {

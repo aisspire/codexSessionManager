@@ -132,8 +132,14 @@ fn read_config_summary(path: &Path) -> Result<ConfigSummary> {
     let text = fs::read_to_string(path)?;
     let doc = text.parse::<DocumentMut>()?;
     Ok(ConfigSummary {
-        model: doc["model"].as_str().map(ToOwned::to_owned),
-        provider: doc["model_provider"].as_str().map(ToOwned::to_owned),
+        model: doc
+            .get("model")
+            .and_then(|item| item.as_str())
+            .map(ToOwned::to_owned),
+        provider: doc
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            .map(ToOwned::to_owned),
     })
 }
 
@@ -204,4 +210,24 @@ fn missing_index_count(
         .filter(|thread| is_visible_user_thread(thread))
         .filter(|thread| !indexed.contains(thread.id.as_str()))
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_summary_treats_missing_model_provider_as_unknown_without_panicking() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "model = \"gpt-5\"\n").unwrap();
+
+        let result = std::panic::catch_unwind(|| read_config_summary(&path));
+        let summary = result
+            .expect("missing model_provider must not panic")
+            .unwrap();
+
+        assert_eq!(summary.model.as_deref(), Some("gpt-5"));
+        assert_eq!(summary.provider, None);
+    }
 }

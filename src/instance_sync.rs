@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table};
 
 use crate::backup;
-use crate::instance_registry::{list_managed_instances, ManagedInstance};
+use crate::instance_registry::{
+    list_managed_instances, InstanceAvailability, InstanceRuntime, ManagedInstance,
+};
 use crate::path_map::{normalize_path_text, path_buf_for_current_os};
 use crate::profile::CodexProfile;
 use crate::rollout::{read_all_rollout_meta, RolloutMeta};
@@ -622,7 +624,10 @@ fn resolve_available_instance(instances: &[ManagedInstance], id: i64) -> Result<
         .iter()
         .find(|instance| instance.id == id)
         .ok_or_else(|| anyhow::anyhow!("managed instance {id} does not exist"))?;
-    if !instance.available {
+    if !matches!(&instance.runtime, InstanceRuntime::Native) {
+        bail!("WSL instances cannot be used in multi-instance synchronization");
+    }
+    if instance.availability != InstanceAvailability::Available {
         bail!("managed instance {id} is not available");
     }
     let path = PathBuf::from(&instance.path);

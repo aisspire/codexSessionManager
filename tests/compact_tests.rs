@@ -293,6 +293,29 @@ name = "CSM"
 }
 
 #[test]
+fn local_provider_fallback_reports_missing_provider_table_without_panicking() {
+    let dir = tempdir().unwrap();
+    let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
+    write_rollout(&profile.sessions_dir().join("thread-1.jsonl"), "thread-1");
+    fs::write(profile.config_path(), "model_provider = \"openai\"\n").unwrap();
+
+    let result = std::panic::catch_unwind(|| {
+        compact_session_with_local_provider_fallback_with_guard_and_runner(
+            &profile,
+            "thread-1",
+            &CompactOptions { apply: true },
+            || Ok(()),
+            |_| panic!("runner should not be called without a provider table"),
+        )
+    });
+
+    let error = result
+        .expect("missing provider table must not panic")
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("model_providers.<model_provider>.name"));
+}
+
+#[test]
 fn compact_dry_run_does_not_backup_or_invoke_command() {
     let dir = tempdir().unwrap();
     let profile = CodexProfile::new("test", dir.path(), None, None, Vec::new()).unwrap();
