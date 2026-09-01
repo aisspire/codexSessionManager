@@ -39,6 +39,16 @@
 
 已发布版本会通过 GitHub Actions 构建桌面安装包，并上传到仓库的 [Releases](https://github.com/aisspire/codexSessionManager/releases) 页面。当前 release workflow 会生成草稿 Release，维护者检查附件后再手动发布。
 
+### macOS 首次打开
+
+当前 macOS 安装包使用 ad-hoc 签名（项目尚未加入 Apple Developer Program，无法公证）。首次打开时如果提示“无法验证开发者”，请打开「系统设置 → 隐私与安全性」，在页面下方找到关于 Codex Session Manager 的提示并点击「仍要打开」。
+
+如果提示“已损坏，无法打开”，说明安装的是 v0.6.1 之前未签名的包。可以在终端执行以下命令移除下载隔离标记后再打开，或直接下载 v0.6.1 及之后的版本：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Codex Session Manager.app"
+```
+
 从源码运行桌面端需要：
 
 - Rust stable 和 Cargo
@@ -290,6 +300,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\set-version.ps1 <版�
 - 如果私钥设置了密码，再添加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 
 不要把 updater 私钥提交到仓库。本地执行 Tauri 打包时也需要通过环境变量注入该私钥；缺少私钥时，MSI/NSIS 安装包可能已生成，但 updater 签名产物不会生成，不能作为正式发布附件。
+
+macOS 产物使用 `src-tauri/tauri.conf.json` 中 `bundle.macOS.signingIdentity: "-"` 声明的 ad-hoc 签名。它能让浏览器下载的安装包不再被 Gatekeeper 判定为“已损坏”，但不能替代 Developer ID 签名和公证，用户首次打开仍需在「系统设置 → 隐私与安全性」中手动放行。签名在打包过程中自动完成，不要在打包后修改 `.app` 内的文件，否则签名失效会重新出现“已损坏”。
 
 发布前按以下顺序执行：
 

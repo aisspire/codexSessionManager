@@ -35,6 +35,14 @@ if ($Config.bundle.createUpdaterArtifacts -ne $true) {
     throw "Expected bundle.createUpdaterArtifacts to be true"
 }
 
+if (-not ($Config.bundle.PSObject.Properties.Name -contains "macOS")) {
+    throw "Expected bundle.macOS to be configured for macOS signing"
+}
+
+if ($Config.bundle.macOS.signingIdentity -ne "-") {
+    throw "Expected bundle.macOS.signingIdentity to be '-' so macOS release builds stay ad-hoc signed"
+}
+
 if (-not ($Config.PSObject.Properties.Name -contains "plugins")) {
     throw "Expected src-tauri\tauri.conf.json to contain a top-level plugins section"
 }
