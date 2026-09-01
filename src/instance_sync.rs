@@ -28,6 +28,34 @@ pub struct InstanceSyncRequest {
     pub config_paths: Vec<Vec<String>>,
 }
 
+/// A synchronization member whose physical Codex home has already been
+/// resolved from the managed-instance registry by the caller.
+///
+/// Desktop IPC never accepts this path from the frontend. Native execution
+/// constructs it from the Windows registry, while the WSL bridge receives the
+/// Linux paths after the desktop has validated the instance group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedInstanceSyncProfile {
+    pub instance_id: i64,
+    pub codex_home: PathBuf,
+}
+
+impl ResolvedInstanceSyncProfile {
+    pub fn new(instance_id: i64, codex_home: impl Into<PathBuf>) -> Result<Self> {
+        if instance_id <= 0 {
+            bail!("instance sync member must be a registered instance");
+        }
+        let codex_home = codex_home.into();
+        if codex_home.as_os_str().is_empty() {
+            bail!("instance sync Codex home cannot be empty");
+        }
+        Ok(Self {
+            instance_id,
+            codex_home,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceSyncSourceData {
     pub source_instance_id: i64,
@@ -202,6 +230,22 @@ pub fn preview_instance_sync(
     request: &InstanceSyncRequest,
 ) -> Result<InstanceSyncPreview> {
     let prepared = prepare_request(registry_database_path, request)?;
+    preview_prepared_instance_sync(request.source_instance_id, prepared)
+}
+
+pub fn preview_instance_sync_from_profiles(
+    request: &InstanceSyncRequest,
+    source: &ResolvedInstanceSyncProfile,
+    targets: &[ResolvedInstanceSyncProfile],
+) -> Result<InstanceSyncPreview> {
+    let prepared = prepare_request_from_profiles(request, source, targets)?;
+    preview_prepared_instance_sync(request.source_instance_id, prepared)
+}
+
+fn preview_prepared_instance_sync(
+    source_instance_id: i64,
+    prepared: PreparedRequest,
+) -> Result<InstanceSyncPreview> {
     let mut targets = Vec::with_capacity(prepared.targets.len());
     for target in &prepared.targets {
         let target_id = target.id;
@@ -226,7 +270,7 @@ pub fn preview_instance_sync(
         }
     }
     Ok(InstanceSyncPreview {
-        source_instance_id: request.source_instance_id,
+        source_instance_id,
         session_count: prepared.sessions.len(),
         config_path_count: prepared.config_paths.len(),
         targets,
@@ -239,6 +283,20 @@ pub fn list_instance_sync_source_data(
 ) -> Result<InstanceSyncSourceData> {
     let instances = list_managed_instances(registry_database_path)?;
     let source = resolve_available_instance(&instances, source_instance_id)?;
+    list_instance_sync_source_data_for_instance(&source)
+}
+
+pub fn list_instance_sync_source_data_from_profile(
+    source: &ResolvedInstanceSyncProfile,
+) -> Result<InstanceSyncSourceData> {
+    let source = SyncInstance::from_resolved(source)?;
+    list_instance_sync_source_data_for_instance(&source)
+}
+
+fn list_instance_sync_source_data_for_instance(
+    source: &SyncInstance,
+) -> Result<InstanceSyncSourceData> {
+    validate_source_instance(source)?;
     let source_threads = source_threads_by_id(&source.profile)?;
     let source_index_entries =
         raw_session_index_entries_by_id(&source.profile.session_index_path())?;
@@ -297,7 +355,7 @@ pub fn list_instance_sync_source_data(
     let config_document = read_config_document(&source.profile.config_path())?;
 
     Ok(InstanceSyncSourceData {
-        source_instance_id,
+        source_instance_id: source.id,
         sessions,
         config_paths: config_path_tree(config_document.as_table(), &[]),
     })
@@ -327,6 +385,47 @@ pub fn preview_instance_sync_config_diff(
         .into_iter()
         .map(|target_id| resolve_available_instance(&instances, target_id))
         .collect::<Result<Vec<_>>>()?;
+    preview_instance_sync_config_diff_for_instances(
+        request.source_instance_id,
+        &source,
+        &targets,
+        config_path,
+    )
+}
+
+pub fn preview_instance_sync_config_diff_from_profiles(
+    request: &InstanceSyncConfigDiffRequest,
+    source: &ResolvedInstanceSyncProfile,
+    targets: &[ResolvedInstanceSyncProfile],
+) -> Result<InstanceSyncConfigDiff> {
+    let config_path =
+        normalized_config_paths(&[request.config_path.clone()]).and_then(|mut paths| {
+            paths
+                .pop()
+                .ok_or_else(|| anyhow::anyhow!("instance sync config path cannot be empty"))
+        })?;
+    validate_resolved_request_members(
+        request.source_instance_id,
+        &request.target_instance_ids,
+        source,
+        targets,
+    )?;
+    let (source, targets) = sync_instances_from_resolved(source, targets)?;
+    preview_instance_sync_config_diff_for_instances(
+        request.source_instance_id,
+        &source,
+        &targets,
+        config_path,
+    )
+}
+
+fn preview_instance_sync_config_diff_for_instances(
+    source_instance_id: i64,
+    source: &SyncInstance,
+    targets: &[SyncInstance],
+    config_path: Vec<String>,
+) -> Result<InstanceSyncConfigDiff> {
+    validate_source_instance(source)?;
     let source_document = read_config_document(&source.profile.config_path())?;
     let source_item = config_item_at_path(&source_document, &config_path).ok_or_else(|| {
         anyhow::anyhow!(
@@ -344,11 +443,11 @@ pub fn preview_instance_sync_config_diff(
     let source_value = formatted_config_item(source_item);
     let targets = targets
         .iter()
-        .map(|target| config_diff_target(target, &config_path, source_item))
+        .map(|target| config_diff_target(source, target, &config_path, source_item))
         .collect();
 
     Ok(InstanceSyncConfigDiff {
-        source_instance_id: request.source_instance_id,
+        source_instance_id,
         config_path,
         source_value,
         targets,
@@ -367,13 +466,47 @@ pub fn select_instance_sync_non_root_config_differences(
         .into_iter()
         .map(|target_id| resolve_available_instance(&instances, target_id))
         .collect::<Result<Vec<_>>>()?;
+    select_instance_sync_non_root_config_differences_for_instances(
+        request.source_instance_id,
+        &source,
+        &targets,
+    )
+}
+
+pub fn select_instance_sync_non_root_config_differences_from_profiles(
+    request: &InstanceSyncNonRootConfigDifferenceRequest,
+    source: &ResolvedInstanceSyncProfile,
+    targets: &[ResolvedInstanceSyncProfile],
+) -> Result<InstanceSyncNonRootConfigDifferenceSelection> {
+    validate_resolved_request_members(
+        request.source_instance_id,
+        &request.target_instance_ids,
+        source,
+        targets,
+    )?;
+    let (source, targets) = sync_instances_from_resolved(source, targets)?;
+    select_instance_sync_non_root_config_differences_for_instances(
+        request.source_instance_id,
+        &source,
+        &targets,
+    )
+}
+
+fn select_instance_sync_non_root_config_differences_for_instances(
+    source_instance_id: i64,
+    source: &SyncInstance,
+    targets: &[SyncInstance],
+) -> Result<InstanceSyncNonRootConfigDifferenceSelection> {
+    validate_source_instance(source)?;
     let source_document = read_config_document(&source.profile.config_path())?;
     let non_root_paths = non_root_config_paths(source_document.as_table(), &[]);
     let mut readable_target_documents = Vec::with_capacity(targets.len());
     let mut unreadable_target_instance_ids = Vec::new();
 
     for target in targets {
-        match read_config_document(&target.profile.config_path()) {
+        match validate_distinct_target_instance(source, target)
+            .and_then(|_| read_config_document(&target.profile.config_path()))
+        {
             Ok(document) => readable_target_documents.push(document),
             Err(_) => unreadable_target_instance_ids.push(target.id),
         }
@@ -393,7 +526,7 @@ pub fn select_instance_sync_non_root_config_differences(
         .collect();
 
     Ok(InstanceSyncNonRootConfigDifferenceSelection {
-        source_instance_id: request.source_instance_id,
+        source_instance_id,
         config_paths,
         unreadable_target_instance_ids,
     })
@@ -411,13 +544,47 @@ pub fn summarize_instance_sync_config_differences(
         .into_iter()
         .map(|target_id| resolve_available_instance(&instances, target_id))
         .collect::<Result<Vec<_>>>()?;
+    summarize_instance_sync_config_differences_for_instances(
+        request.source_instance_id,
+        &source,
+        &targets,
+    )
+}
+
+pub fn summarize_instance_sync_config_differences_from_profiles(
+    request: &InstanceSyncConfigDifferenceSummaryRequest,
+    source: &ResolvedInstanceSyncProfile,
+    targets: &[ResolvedInstanceSyncProfile],
+) -> Result<InstanceSyncConfigDifferenceSummary> {
+    validate_resolved_request_members(
+        request.source_instance_id,
+        &request.target_instance_ids,
+        source,
+        targets,
+    )?;
+    let (source, targets) = sync_instances_from_resolved(source, targets)?;
+    summarize_instance_sync_config_differences_for_instances(
+        request.source_instance_id,
+        &source,
+        &targets,
+    )
+}
+
+fn summarize_instance_sync_config_differences_for_instances(
+    source_instance_id: i64,
+    source: &SyncInstance,
+    targets: &[SyncInstance],
+) -> Result<InstanceSyncConfigDifferenceSummary> {
+    validate_source_instance(source)?;
     let source_document = read_config_document(&source.profile.config_path())?;
     let selectable_paths = selectable_config_paths(source_document.as_table(), &[]);
     let mut readable_target_documents = Vec::with_capacity(targets.len());
     let mut unreadable_target_count = 0;
 
     for target in targets {
-        match read_config_document(&target.profile.config_path()) {
+        match validate_distinct_target_instance(source, target)
+            .and_then(|_| read_config_document(&target.profile.config_path()))
+        {
             Ok(document) => readable_target_documents.push(document),
             Err(_) => unreadable_target_count += 1,
         }
@@ -443,19 +610,21 @@ pub fn summarize_instance_sync_config_differences(
         .collect();
 
     Ok(InstanceSyncConfigDifferenceSummary {
-        source_instance_id: request.source_instance_id,
+        source_instance_id,
         paths,
         unreadable_target_count,
     })
 }
 
 fn config_diff_target(
+    source: &SyncInstance,
     target: &SyncInstance,
     config_path: &[String],
     source_item: &Item,
 ) -> InstanceSyncConfigDiffTarget {
     let target_path = target.path.display().to_string();
     let result = (|| -> Result<InstanceSyncConfigDiffTarget> {
+        validate_distinct_target_instance(source, target)?;
         let document = read_config_document(&target.profile.config_path())?;
         let Some(target_item) = config_item_at_path(&document, config_path) else {
             return Ok(InstanceSyncConfigDiffTarget {
@@ -506,13 +675,49 @@ fn config_items_match(left: &Item, right: &Item) -> bool {
 pub fn execute_instance_sync_with_guard<F>(
     registry_database_path: &Path,
     request: &InstanceSyncRequest,
-    mut guard: F,
+    guard: F,
 ) -> Result<InstanceSyncExecutionReport>
 where
     F: FnMut() -> Result<()>,
 {
     let prepared = prepare_request(registry_database_path, request)?;
+    execute_prepared_instance_sync_with_guard(request.source_instance_id, prepared, guard)
+}
 
+pub fn execute_instance_sync_from_profiles(
+    request: &InstanceSyncRequest,
+    source: &ResolvedInstanceSyncProfile,
+    targets: &[ResolvedInstanceSyncProfile],
+) -> Result<InstanceSyncExecutionReport> {
+    execute_instance_sync_from_profiles_with_guard(
+        request,
+        source,
+        targets,
+        safety::ensure_codex_not_running,
+    )
+}
+
+pub fn execute_instance_sync_from_profiles_with_guard<F>(
+    request: &InstanceSyncRequest,
+    source: &ResolvedInstanceSyncProfile,
+    targets: &[ResolvedInstanceSyncProfile],
+    guard: F,
+) -> Result<InstanceSyncExecutionReport>
+where
+    F: FnMut() -> Result<()>,
+{
+    let prepared = prepare_request_from_profiles(request, source, targets)?;
+    execute_prepared_instance_sync_with_guard(request.source_instance_id, prepared, guard)
+}
+
+fn execute_prepared_instance_sync_with_guard<F>(
+    source_instance_id: i64,
+    prepared: PreparedRequest,
+    mut guard: F,
+) -> Result<InstanceSyncExecutionReport>
+where
+    F: FnMut() -> Result<()>,
+{
     let mut reports = Vec::with_capacity(prepared.targets.len());
     let mut targets = prepared.targets.into_iter();
     while let Some(target) = targets.next() {
@@ -529,6 +734,10 @@ where
                 }));
             break;
         }
+        // A target becoming unavailable is isolated to that target, but the
+        // source is authoritative for the whole operation. Re-check it outside
+        // the per-target error capture so source loss aborts immediately.
+        validate_source_instance(&prepared.source)?;
         reports.push(sync_target(
             &prepared.source,
             &target,
@@ -538,7 +747,7 @@ where
     }
 
     Ok(InstanceSyncExecutionReport {
-        source_instance_id: request.source_instance_id,
+        source_instance_id,
         targets: reports,
     })
 }
@@ -579,17 +788,83 @@ struct SyncInstance {
     profile: CodexProfile,
 }
 
+impl SyncInstance {
+    fn from_resolved(resolved: &ResolvedInstanceSyncProfile) -> Result<Self> {
+        let path = resolved.codex_home.clone();
+        let profile = CodexProfile::new(
+            format!("managed-instance-{}", resolved.instance_id),
+            path.clone(),
+            None,
+            None,
+            Vec::new(),
+        )?;
+        Ok(Self {
+            id: resolved.instance_id,
+            path,
+            profile,
+        })
+    }
+}
+
+fn sync_instances_from_resolved(
+    source: &ResolvedInstanceSyncProfile,
+    targets: &[ResolvedInstanceSyncProfile],
+) -> Result<(SyncInstance, Vec<SyncInstance>)> {
+    let source = SyncInstance::from_resolved(source)?;
+    let targets = targets
+        .iter()
+        .map(SyncInstance::from_resolved)
+        .collect::<Result<Vec<_>>>()?;
+    Ok((source, targets))
+}
+
+fn validate_source_instance(source: &SyncInstance) -> Result<PathBuf> {
+    if !source.path.is_dir() || !source.profile.config_path().is_file() {
+        bail!(
+            "managed source instance {} is no longer available",
+            source.id
+        );
+    }
+    fs::canonicalize(&source.path).with_context(|| {
+        format!(
+            "failed to resolve managed source instance {} at {}",
+            source.id,
+            source.path.display()
+        )
+    })
+}
+
+fn validate_distinct_target_instance(source: &SyncInstance, target: &SyncInstance) -> Result<()> {
+    let source_real_path = validate_source_instance(source)?;
+    if !target.path.is_dir() || !target.profile.config_path().is_file() {
+        bail!("managed instance {} is no longer available", target.id);
+    }
+    let target_real_path = fs::canonicalize(&target.path).with_context(|| {
+        format!(
+            "failed to resolve managed target instance {} at {}",
+            target.id,
+            target.path.display()
+        )
+    })?;
+    if source_real_path == target_real_path
+        || source_real_path.starts_with(&target_real_path)
+        || target_real_path.starts_with(&source_real_path)
+    {
+        bail!(
+            "instance sync source {} and target {} resolve to overlapping paths ({} and {})",
+            source.id,
+            target.id,
+            source_real_path.display(),
+            target_real_path.display()
+        );
+    }
+    Ok(())
+}
+
 fn prepare_request(
     registry_database_path: &Path,
     request: &InstanceSyncRequest,
 ) -> Result<PreparedRequest> {
-    let session_ids = normalized_session_ids(&request.session_ids)?;
-    let project_selections = normalized_project_selections(&request.project_selections);
-    let config_paths = normalized_config_paths(&request.config_paths)?;
-    if session_ids.is_empty() && project_selections.is_empty() && config_paths.is_empty() {
-        bail!("instance sync request must select at least one session or configuration path");
-    }
-
     let instances = list_managed_instances(registry_database_path)?;
     let source = resolve_available_instance(&instances, request.source_instance_id)?;
     let target_ids =
@@ -598,6 +873,36 @@ fn prepare_request(
         .into_iter()
         .map(|target_id| resolve_available_instance(&instances, target_id))
         .collect::<Result<Vec<_>>>()?;
+    prepare_request_for_instances(request, source, targets)
+}
+
+fn prepare_request_from_profiles(
+    request: &InstanceSyncRequest,
+    source: &ResolvedInstanceSyncProfile,
+    targets: &[ResolvedInstanceSyncProfile],
+) -> Result<PreparedRequest> {
+    validate_resolved_request_members(
+        request.source_instance_id,
+        &request.target_instance_ids,
+        source,
+        targets,
+    )?;
+    let (source, targets) = sync_instances_from_resolved(source, targets)?;
+    prepare_request_for_instances(request, source, targets)
+}
+
+fn prepare_request_for_instances(
+    request: &InstanceSyncRequest,
+    source: SyncInstance,
+    targets: Vec<SyncInstance>,
+) -> Result<PreparedRequest> {
+    validate_source_instance(&source)?;
+    let session_ids = normalized_session_ids(&request.session_ids)?;
+    let project_selections = normalized_project_selections(&request.project_selections);
+    let config_paths = normalized_config_paths(&request.config_paths)?;
+    if session_ids.is_empty() && project_selections.is_empty() && config_paths.is_empty() {
+        bail!("instance sync request must select at least one session or configuration path");
+    }
     let source_threads = if project_selections.is_empty() {
         HashMap::new()
     } else {
@@ -617,6 +922,30 @@ fn prepare_request(
         sessions,
         config_paths,
     })
+}
+
+fn validate_resolved_request_members(
+    source_instance_id: i64,
+    target_instance_ids: &[i64],
+    source: &ResolvedInstanceSyncProfile,
+    targets: &[ResolvedInstanceSyncProfile],
+) -> Result<()> {
+    if source.instance_id != source_instance_id {
+        bail!(
+            "resolved instance sync source {} does not match request source {}",
+            source.instance_id,
+            source_instance_id
+        );
+    }
+    let normalized_target_ids = normalized_target_ids(source_instance_id, target_instance_ids)?;
+    let resolved_target_ids = targets
+        .iter()
+        .map(|target| target.instance_id)
+        .collect::<Vec<_>>();
+    if resolved_target_ids != normalized_target_ids {
+        bail!("resolved instance sync targets do not match the requested target IDs");
+    }
+    Ok(())
 }
 
 fn resolve_available_instance(instances: &[ManagedInstance], id: i64) -> Result<SyncInstance> {
@@ -808,9 +1137,7 @@ fn preview_target(
     sessions: &[LocatedSession],
     config_paths: &[Vec<String>],
 ) -> Result<InstanceSyncTargetPreview> {
-    if !target.path.is_dir() || !target.profile.config_path().is_file() {
-        bail!("managed instance {} is no longer available", target.id);
-    }
+    validate_distinct_target_instance(source, target)?;
 
     let _prepared_target_config = prepare_target_config_sync(source, target, config_paths)?;
     let existing_by_id = target_sessions_by_id(&target.profile)?;
@@ -909,9 +1236,7 @@ fn sync_target(
     let result = (|| -> Result<()> {
         // Re-check the target immediately before writing so a stale UI selection
         // cannot cause a write after its config file or directory disappeared.
-        if !target.path.is_dir() || !target.profile.config_path().is_file() {
-            bail!("managed instance {} is no longer available", target.id);
-        }
+        validate_distinct_target_instance(source, target)?;
 
         let prepared_target_config = prepare_target_config_sync(source, target, config_paths)?;
         let existing_by_id = target_sessions_by_id(&target.profile)?;

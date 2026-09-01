@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ArtifactName = "codex-session-manager-wsl-bridge"
-$ProtocolVersion = "1"
+$ProtocolVersion = "2"
 $ResourceDirectory = Join-Path $ProjectRoot "src-tauri\resources\wsl"
 $Targets = @(
     [pscustomobject]@{

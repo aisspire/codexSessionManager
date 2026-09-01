@@ -1,12 +1,35 @@
 use codex_session_manager::db_repair::DatabaseRepairOptions;
+use codex_session_manager::instance_sync::InstanceSyncRequest;
 use codex_session_manager::migrate::SessionEdit;
 use codex_session_manager::profile_operation::{
-    BridgeRequest, BridgeResponse, ProfileOperation, ProfileSpec, WSL_BRIDGE_PROTOCOL_VERSION,
+    BridgeRequest, BridgeResponse, InstanceSyncBridgeAction, InstanceSyncBridgeTarget,
+    ProfileOperation, ProfileSpec, WSL_BRIDGE_PROTOCOL_VERSION,
 };
 use codex_session_manager::restore::RestoreSessionOptions;
 use codex_session_manager::session_list::SessionListFilter;
 use codex_session_manager::settings::AppSettings;
 use std::time::Duration;
+
+fn instance_sync_operation(action: InstanceSyncBridgeAction) -> ProfileOperation {
+    ProfileOperation::InstanceSync {
+        source_instance_id: 1,
+        targets: vec![InstanceSyncBridgeTarget {
+            instance_id: 2,
+            codex_home: "/home/dev/.codex-work".to_string(),
+        }],
+        action,
+    }
+}
+
+fn instance_sync_request() -> InstanceSyncRequest {
+    InstanceSyncRequest {
+        source_instance_id: 1,
+        target_instance_ids: vec![2],
+        session_ids: vec!["thread-1".to_string()],
+        project_selections: Vec::new(),
+        config_paths: Vec::new(),
+    }
+}
 
 #[test]
 fn every_profile_operation_round_trips_through_bridge_json() {
@@ -85,6 +108,9 @@ fn every_profile_operation_round_trips_through_bridge_json() {
         },
         ProfileOperation::DetectCodexRunning,
         ProfileOperation::ApplyDatabaseSyncFromLocal,
+        instance_sync_operation(InstanceSyncBridgeAction::Preview {
+            request: instance_sync_request(),
+        }),
     ];
 
     for operation in operations {
@@ -113,6 +139,33 @@ fn bridge_error_envelope_is_versioned_and_explicit() {
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"], "database is locked");
     assert!(value.get("result").is_none());
+}
+
+#[test]
+fn instance_sync_bridge_v2_serializes_registered_ids_and_linux_targets() {
+    let request = BridgeRequest::new(
+        ProfileSpec {
+            name: "managed-instance-1".to_string(),
+            codex_home: "/home/dev/.codex".to_string(),
+            provider: None,
+            model: None,
+            path_maps: Vec::new(),
+        },
+        instance_sync_operation(InstanceSyncBridgeAction::Preview {
+            request: instance_sync_request(),
+        }),
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["protocol_version"], 2);
+    assert_eq!(value["operation"]["operation"], "instance_sync");
+    assert_eq!(value["operation"]["source_instance_id"], 1);
+    assert_eq!(value["operation"]["targets"][0]["instance_id"], 2);
+    assert_eq!(
+        value["operation"]["targets"][0]["codex_home"],
+        "/home/dev/.codex-work"
+    );
+    assert_eq!(value["operation"]["action"]["action"], "preview");
 }
 
 #[test]
@@ -276,6 +329,22 @@ fn profile_operations_have_a_complete_stop_guard_matrix() {
     );
     operation(ProfileOperation::DetectCodexRunning, false);
     operation(ProfileOperation::ApplyDatabaseSyncFromLocal, true);
+    operation(
+        instance_sync_operation(InstanceSyncBridgeAction::Preview {
+            request: instance_sync_request(),
+        }),
+        false,
+    );
+    operation(
+        instance_sync_operation(InstanceSyncBridgeAction::Execute {
+            request: instance_sync_request(),
+        }),
+        true,
+    );
+    operation(
+        instance_sync_operation(InstanceSyncBridgeAction::DetectCodexRunning),
+        false,
+    );
 }
 
 #[test]
@@ -289,6 +358,7 @@ fn bridge_identity_round_trips_and_normalizes_architecture_aliases() {
 
     assert_eq!(decoded, identity);
     assert_eq!(decoded.protocol_version, WSL_BRIDGE_PROTOCOL_VERSION);
+    assert_eq!(WSL_BRIDGE_PROTOCOL_VERSION, 2);
     assert_eq!(decoded.target_architecture, "aarch64");
     assert!(!decoded.app_version.is_empty());
 }
@@ -340,6 +410,20 @@ fn profile_operations_use_the_declared_wsl_timeout_tiers() {
     );
     assert_eq!(
         ProfileOperation::ApplyDatabaseSyncFromLocal.wsl_timeout(),
+        Duration::from_secs(600)
+    );
+    assert_eq!(
+        instance_sync_operation(InstanceSyncBridgeAction::Preview {
+            request: instance_sync_request(),
+        })
+        .wsl_timeout(),
+        Duration::from_secs(150)
+    );
+    assert_eq!(
+        instance_sync_operation(InstanceSyncBridgeAction::Execute {
+            request: instance_sync_request(),
+        })
+        .wsl_timeout(),
         Duration::from_secs(600)
     );
 }
@@ -394,6 +478,9 @@ fn only_safe_profile_operations_retry_after_a_missing_bridge_marker() {
         },
         ProfileOperation::PreviewDatabaseRepairs,
         ProfileOperation::DetectCodexRunning,
+        instance_sync_operation(InstanceSyncBridgeAction::Preview {
+            request: instance_sync_request(),
+        }),
     ];
     for operation in retryable {
         assert!(
@@ -464,6 +551,9 @@ fn only_safe_profile_operations_retry_after_a_missing_bridge_marker() {
             },
         },
         ProfileOperation::ApplyDatabaseSyncFromLocal,
+        instance_sync_operation(InstanceSyncBridgeAction::Execute {
+            request: instance_sync_request(),
+        }),
     ];
     for operation in non_retryable {
         assert!(

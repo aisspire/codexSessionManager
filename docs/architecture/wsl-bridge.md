@@ -8,7 +8,9 @@
 
 ## Profile 操作
 
-桌面命令统一构造 `ProfileOperation`。原生运行时在 Tauri 的 blocking 线程池执行；WSL 运行时编码为 `BridgeRequest`，交给目标发行版内的 `codex-session-manager-wsl-bridge`。响应必须以固定标记开头并携带 `protocol_version`，因此登录 shell 的额外输出不会污染 JSON 解码。
+桌面命令统一构造 `ProfileOperation`。原生运行时在 Tauri 的 blocking 线程池执行；WSL 运行时编码为 `BridgeRequest`，交给目标发行版内的 `codex-session-manager-wsl-bridge`。bridge 协议 v2 增加 `InstanceSyncBridgeTarget { instance_id, codex_home }` 和 `ProfileOperation::InstanceSync`，内部 action 覆盖源数据、配置差异、自动配置选择、预览、执行与同步组进程检测。响应必须以固定标记开头并携带 `protocol_version`，因此登录 shell 的额外输出不会污染 JSON 解码。
+
+多实例同步先由 Tauri 的异步实例组解析器仅按注册表 ID 读取源和目标，校验 ID、运行时组合、WSL 发行版/用户身份与架构，不接受前端物理路径。同步核心分为注册表解析入口和已解析 profile 执行入口：Windows 同组在本进程复用后者；WSL 同组把 Linux 源路径与目标路径交给同一次 helper，在发行版内复用相同的冲突、备份、索引和 SQLite 更新逻辑。Windows↔WSL、跨发行版、跨 Linux 用户与跨机器同步不在支持范围内。
 
 ## helper 生命周期
 
@@ -19,6 +21,8 @@
 - 启动、stdin 写入、stdin 关闭、输出读取和等待共用同一阶段时限；超时会终止子进程，并在错误中标明阶段、时限和终止结果。
 - helper 通过从 passwd entry 取得的用户登录 shell 启动，以继承 `mise`、`nvm` 等初始化后的 `PATH` 和 provider 环境变量；helper 路径由外层脚本导出为环境变量，因此兼容 fish 的 `$argv` 规则，不把路径放进 `$1`；没有可执行登录 shell 时回退 `/bin/sh`。
 - helper 内部负责 WSL 进程的最终写入保护；若 Codex home 位于 `/mnt/*`，Tauri 统一路由在发出写请求前还会拒绝 Windows Codex 进程占用。
+- WSL 同组同步在 helper 入口及每个目标写入前检测当前 Linux 用户的 Codex 进程；执行动作使用长超时且遇到缺失响应标记、超时或解码失败时不重试，源数据、差异和预览等只读动作保持安全重试。
+- 同步写入前使用发行版内规范化真实路径检查源和目标不相同、不互相包含；源失效终止操作，单个目标失效或路径重合只生成该目标失败结果，后续目标继续。
 - bridge 对协议/部署拒绝、缺失响应标记、operation failure、响应解码失败和超时使用显式错误类型。执行前拒绝可重新部署并重试；缺失标记仅对只读、预览及 `apply: false` 重试，可能写入的操作只执行一次并报告结果未知；超时和响应解码失败不重试。
 
 ## 实时 probe

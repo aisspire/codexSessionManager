@@ -8,11 +8,12 @@ use codex_session_manager::instance_registry::{
     InstanceSyncPlanDraft, WslInstanceRegistration,
 };
 use codex_session_manager::instance_sync::{
-    execute_instance_sync_with_guard, list_instance_sync_source_data, preview_instance_sync,
-    preview_instance_sync_config_diff, select_instance_sync_non_root_config_differences,
+    execute_instance_sync_from_profiles_with_guard, execute_instance_sync_with_guard,
+    list_instance_sync_source_data, preview_instance_sync, preview_instance_sync_config_diff,
+    preview_instance_sync_from_profiles, select_instance_sync_non_root_config_differences,
     summarize_instance_sync_config_differences, ConfigPathNode, InstanceSyncConfigDiffRequest,
     InstanceSyncConfigDiffStatus, InstanceSyncConfigDifferenceSummaryRequest,
-    InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncRequest,
+    InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncRequest, ResolvedInstanceSyncProfile,
 };
 use codex_session_manager::state_db::StateDb;
 use rusqlite::{params, Connection};
@@ -54,6 +55,87 @@ fn rejects_wsl_sync_instance_before_unknown_availability_error() {
     .unwrap_err();
 
     assert!(format!("{error:?}").contains("WSL instances cannot be used"));
+}
+
+#[test]
+fn resolved_profile_sync_reuses_native_conflict_backup_and_index_logic() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let target_directory = dir.path().join("target");
+    write_config(&source_directory, "model = \"source\"\n");
+    write_config(&target_directory, "model = \"target\"\n");
+    let rollout = source_directory
+        .join("sessions")
+        .join("resolved-thread.jsonl");
+    write_rollout(&rollout, "resolved-thread");
+    fs::write(
+        source_directory.join("session_index.jsonl"),
+        r#"{"id":"resolved-thread","thread_name":"Resolved"}"#,
+    )
+    .unwrap();
+    create_state_db(&source_directory.join("state_5.sqlite"));
+    insert_thread(
+        &source_directory.join("state_5.sqlite"),
+        "resolved-thread",
+        rollout.to_str().unwrap(),
+        false,
+        "Resolved",
+    );
+
+    let source = ResolvedInstanceSyncProfile::new(1, &source_directory).unwrap();
+    let target = ResolvedInstanceSyncProfile::new(2, &target_directory).unwrap();
+    let request = InstanceSyncRequest {
+        source_instance_id: 1,
+        target_instance_ids: vec![2],
+        session_ids: vec!["resolved-thread".to_string()],
+        project_selections: Vec::new(),
+        config_paths: vec![vec!["model".to_string()]],
+    };
+
+    let report =
+        execute_instance_sync_from_profiles_with_guard(&request, &source, &[target], || Ok(()))
+            .unwrap();
+
+    assert_eq!(report.targets[0].sessions_added, vec!["resolved-thread"]);
+    assert_eq!(report.targets[0].config_paths_applied, 1);
+    assert!(report.targets[0].backup_dir.is_some());
+    assert!(target_directory
+        .join("sessions")
+        .join("resolved-thread.jsonl")
+        .is_file());
+    assert!(
+        fs::read_to_string(target_directory.join("session_index.jsonl"))
+            .unwrap()
+            .contains("resolved-thread")
+    );
+}
+
+#[test]
+fn resolved_profile_preview_reports_path_alias_overlap_per_target() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    write_config(&source_directory, "model = \"source\"\n");
+    let source = ResolvedInstanceSyncProfile::new(1, &source_directory).unwrap();
+    let alias = ResolvedInstanceSyncProfile::new(2, source_directory.join(".")).unwrap();
+
+    let preview = preview_instance_sync_from_profiles(
+        &InstanceSyncRequest {
+            source_instance_id: 1,
+            target_instance_ids: vec![2],
+            session_ids: Vec::new(),
+            project_selections: Vec::new(),
+            config_paths: vec![vec!["model".to_string()]],
+        },
+        &source,
+        &[alias],
+    )
+    .unwrap();
+
+    assert_eq!(preview.targets.len(), 1);
+    assert!(preview.targets[0]
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("overlapping paths")));
 }
 
 #[test]
@@ -1184,6 +1266,59 @@ fn stops_remaining_targets_when_codex_starts_between_target_preflights() {
             .join("thread-one.jsonl")
             .exists());
     }
+}
+
+#[test]
+fn aborts_the_operation_when_the_source_disappears_between_target_writes() {
+    let dir = tempdir().unwrap();
+    let source_directory = dir.path().join("source");
+    let first_target_directory = dir.path().join("first-target");
+    let second_target_directory = dir.path().join("second-target");
+    let registry_path = dir.path().join("app-data").join("instances.sqlite");
+    write_config(&source_directory, "model = \"source\"\n");
+    write_config(&first_target_directory, "model = \"first\"\n");
+    write_config(&second_target_directory, "model = \"second\"\n");
+    write_rollout(
+        &source_directory.join("sessions").join("thread-one.jsonl"),
+        "thread-one",
+    );
+    scan_and_register(&registry_path, dir.path()).unwrap();
+    let instances = list_managed_instances(&registry_path).unwrap();
+    let source = instance_id_at(&instances, &source_directory);
+    let first_target = instance_id_at(&instances, &first_target_directory);
+    let second_target = instance_id_at(&instances, &second_target_directory);
+    let guard_calls = Cell::new(0);
+
+    let error = execute_instance_sync_with_guard(
+        &registry_path,
+        &InstanceSyncRequest {
+            source_instance_id: source,
+            target_instance_ids: vec![first_target, second_target],
+            session_ids: vec!["thread-one".to_string()],
+            project_selections: Vec::new(),
+            config_paths: Vec::new(),
+        },
+        || {
+            let call = guard_calls.get() + 1;
+            guard_calls.set(call);
+            if call == 2 {
+                fs::remove_dir_all(&source_directory).unwrap();
+            }
+            Ok(())
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(guard_calls.get(), 2);
+    assert!(error.to_string().contains("source instance"));
+    assert!(first_target_directory
+        .join("sessions")
+        .join("thread-one.jsonl")
+        .is_file());
+    assert!(!second_target_directory
+        .join("sessions")
+        .join("thread-one.jsonl")
+        .exists());
 }
 
 #[test]

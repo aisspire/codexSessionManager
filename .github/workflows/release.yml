@@ -50,11 +50,11 @@ jobs:
           file "$helper" | grep -E "${{ matrix.file_architecture }}.*(statically linked|static-pie linked)"
           readelf -h "$helper" | grep -F "Machine:                           ${{ matrix.elf_machine }}"
           identity=$(docker run --rm --platform "${{ matrix.docker_platform }}" -v "$PWD":/work alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc /work/$helper --identity)
-          test "$(printf '%s' "$identity" | jq -r .protocol_version)" = "1"
+          test "$(printf '%s' "$identity" | jq -r .protocol_version)" = "2"
           test "$(printf '%s' "$identity" | jq -r .target_architecture)" = "${{ matrix.architecture }}"
           expected_version=$(awk '$0 == "[package]" { package=1; next } package && substr($0, 1, 1) == "[" { exit } package && $1 == "version" { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)
           test "$(printf '%s' "$identity" | jq -r .app_version)" = "$expected_version"
-          test "$(docker run --rm --platform "${{ matrix.docker_platform }}" -v "$PWD":/work alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc /work/$helper --protocol-version)" = "1"
+          test "$(docker run --rm --platform "${{ matrix.docker_platform }}" -v "$PWD":/work alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc /work/$helper --protocol-version)" = "2"
 
       - name: Upload WSL bridge
         uses: actions/upload-artifact@v4

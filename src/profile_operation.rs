@@ -7,6 +7,10 @@ use crate::backup_store;
 use crate::compact::{self, CompactOptions};
 use crate::db_repair::{self, DatabaseRepairOptions};
 use crate::favorites;
+use crate::instance_sync::{
+    self, InstanceSyncConfigDiffRequest, InstanceSyncConfigDifferenceSummaryRequest,
+    InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncRequest, ResolvedInstanceSyncProfile,
+};
 use crate::migrate::{self, ApplyOptions, SessionEdit};
 use crate::path_map::PathMap;
 use crate::profile::CodexProfile;
@@ -16,7 +20,7 @@ use crate::session_list::{self, SessionListFilter};
 use crate::session_ops::{self, SessionApplyOptions};
 use crate::settings::{self, AppSettings};
 
-pub const WSL_BRIDGE_PROTOCOL_VERSION: u32 = 1;
+pub const WSL_BRIDGE_PROTOCOL_VERSION: u32 = 2;
 pub const WSL_BRIDGE_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const WSL_BRIDGE_RESPONSE_MARKER: &str = "__CSM_WSL_BRIDGE_RESPONSE__";
 pub const WSL_BRIDGE_NORMAL_OPERATION_TIMEOUT: Duration = Duration::from_secs(150);
@@ -68,6 +72,34 @@ impl ProfileSpec {
             path_maps,
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceSyncBridgeTarget {
+    pub instance_id: i64,
+    pub codex_home: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum InstanceSyncBridgeAction {
+    SourceData,
+    ConfigDiff {
+        request: InstanceSyncConfigDiffRequest,
+    },
+    ConfigDifferenceSummary {
+        request: InstanceSyncConfigDifferenceSummaryRequest,
+    },
+    NonRootConfigDifferenceSelection {
+        request: InstanceSyncNonRootConfigDifferenceRequest,
+    },
+    Preview {
+        request: InstanceSyncRequest,
+    },
+    Execute {
+        request: InstanceSyncRequest,
+    },
+    DetectCodexRunning,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +170,11 @@ pub enum ProfileOperation {
     },
     DetectCodexRunning,
     ApplyDatabaseSyncFromLocal,
+    InstanceSync {
+        source_instance_id: i64,
+        targets: Vec<InstanceSyncBridgeTarget>,
+        action: InstanceSyncBridgeAction,
+    },
 }
 
 impl ProfileOperation {
@@ -163,6 +200,9 @@ impl ProfileOperation {
             | Self::EditSelectedSessions { apply, .. } => *apply,
             Self::RestoreSessionBackup { options, .. } => options.apply,
             Self::ApplyDatabaseRepairs { .. } | Self::ApplyDatabaseSyncFromLocal => true,
+            Self::InstanceSync { action, .. } => {
+                matches!(action, InstanceSyncBridgeAction::Execute { .. })
+            }
         }
     }
 
@@ -181,6 +221,11 @@ impl ProfileOperation {
             | Self::ApplyDatabaseRepairs { .. }
             | Self::ApplyDatabaseSyncFromLocal
             | Self::DeleteSessionBackupGroups { .. } => WSL_BRIDGE_LONG_OPERATION_TIMEOUT,
+            Self::InstanceSync { action, .. }
+                if matches!(action, InstanceSyncBridgeAction::Execute { .. }) =>
+            {
+                WSL_BRIDGE_LONG_OPERATION_TIMEOUT
+            }
             Self::ArchiveSessions { apply, .. }
             | Self::ActiveSessions { apply, .. }
             | Self::DeleteSessions { apply, .. }
@@ -213,6 +258,9 @@ impl ProfileOperation {
             | Self::CompactSession { apply, .. }
             | Self::CompactSessionWithLocalProviderFallback { apply, .. }
             | Self::EditSelectedSessions { apply, .. } => !*apply,
+            Self::InstanceSync { action, .. } => {
+                !matches!(action, InstanceSyncBridgeAction::Execute { .. })
+            }
             _ => false,
         }
     }
@@ -365,6 +413,57 @@ pub fn execute_profile_operation(request: &BridgeRequest) -> Result<Value> {
         }
         ProfileOperation::ApplyDatabaseSyncFromLocal => {
             serde_json::to_value(db_repair::apply_database_sync_from_local(&profile)?)?
+        }
+        ProfileOperation::InstanceSync {
+            source_instance_id,
+            targets,
+            action,
+        } => {
+            let source =
+                ResolvedInstanceSyncProfile::new(*source_instance_id, profile.codex_home.clone())?;
+            let targets = targets
+                .iter()
+                .map(|target| {
+                    ResolvedInstanceSyncProfile::new(target.instance_id, target.codex_home.clone())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            match action {
+                InstanceSyncBridgeAction::SourceData => serde_json::to_value(
+                    instance_sync::list_instance_sync_source_data_from_profile(&source)?,
+                )?,
+                InstanceSyncBridgeAction::ConfigDiff { request } => serde_json::to_value(
+                    instance_sync::preview_instance_sync_config_diff_from_profiles(
+                        request, &source, &targets,
+                    )?,
+                )?,
+                InstanceSyncBridgeAction::ConfigDifferenceSummary { request } => {
+                    serde_json::to_value(
+                        instance_sync::summarize_instance_sync_config_differences_from_profiles(
+                            request, &source, &targets,
+                        )?,
+                    )?
+                }
+                InstanceSyncBridgeAction::NonRootConfigDifferenceSelection { request } => {
+                    serde_json::to_value(
+                        instance_sync::select_instance_sync_non_root_config_differences_from_profiles(
+                            request, &source, &targets,
+                        )?,
+                    )?
+                }
+                InstanceSyncBridgeAction::Preview { request } => serde_json::to_value(
+                    instance_sync::preview_instance_sync_from_profiles(
+                        request, &source, &targets,
+                    )?,
+                )?,
+                InstanceSyncBridgeAction::Execute { request } => serde_json::to_value(
+                    instance_sync::execute_instance_sync_from_profiles(
+                        request, &source, &targets,
+                    )?,
+                )?,
+                InstanceSyncBridgeAction::DetectCodexRunning => {
+                    serde_json::to_value(!safety::detect_codex_processes()?.is_empty())?
+                }
+            }
         }
     };
     Ok(value)

@@ -25,6 +25,7 @@ Codex Session Manager 是一个面向 OpenAI Codex 桌面端本地会话的管�
 - **数据库修复与同步**：可以预览并保守修复 SQLite 与 JSONL 之间的不一致，例如补齐 JSONL-only 会话、修正无效 `rollout_path`、同步归档状态等，让 Codex 本地索引和实际文件重新对齐。
 - **本地优先与安全边界**：工具直接处理本机 Codex 数据，不上传会话内容；写入操作会检测 Codex 是否正在运行，并在可能发生并发写入时阻断操作，更适合处理私人或敏感开发会话。
 - **Windows 管理 WSL Codex**：可显式发现或手动登记 WSL 实例，并把全部 profile 操作交给发行版内的静态 helper，避免跨 UNC 直接打开 SQLite/WAL。
+- **受约束的本机多实例同步**：Windows 实例可互相同步；同发行版、同 Linux 用户的多个 WSL Codex 主目录可在发行版内通过一次 helper 同步，跨运行时、跨发行版、跨用户和跨机器组合始终拒绝。
 
 ## 技术栈
 

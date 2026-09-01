@@ -5,8 +5,8 @@ use codex_session_manager::instance_registry::{
     delete_instance_sync_plan, list_instance_sync_plans, list_managed_instances,
     managed_instance_path, permanently_ignore_managed_instance, register_wsl_instance,
     rename_managed_instance, save_instance_sync_plan, scan_and_register,
-    soft_delete_managed_instance, InstanceAvailability, InstanceRuntime, InstanceSyncPlanDraft,
-    WslInstanceRegistration,
+    soft_delete_managed_instance, validate_instance_sync_compatibility, InstanceAvailability,
+    InstanceRuntime, InstanceSyncPlanDraft, ManagedInstance, WslInstanceRegistration,
 };
 use rusqlite::{params, Connection};
 use tempfile::tempdir;
@@ -31,6 +31,19 @@ fn registered_path(directory: &Path) -> String {
         }
     }
     path
+}
+
+fn native_sync_instance(id: i64, path: &str) -> ManagedInstance {
+    ManagedInstance {
+        id,
+        path: path.to_string(),
+        display_name: None,
+        availability: InstanceAvailability::Available,
+        availability_error: None,
+        runtime: InstanceRuntime::Native,
+        added_at_unix: 1,
+        last_seen_at_unix: 2,
+    }
 }
 
 #[test]
@@ -664,7 +677,44 @@ fn treats_extended_wsl_unc_as_a_legacy_wsl_path() {
 }
 
 #[test]
-fn rejects_wsl_instances_in_sync_plans() {
+fn rejects_unbound_wsl_paths_in_native_sync_pairs() {
+    let source = native_sync_instance(1, r"C:\Users\dev\.codex");
+    for path in [
+        r"\\wsl.localhost\Ubuntu\home\dev\.codex",
+        r"\\wsl$\Ubuntu\home\dev\.codex",
+        r"\\?\UNC\wsl.localhost\Ubuntu\home\dev\.codex",
+        "/mnt/c/Users/dev/.codex",
+    ] {
+        let target = native_sync_instance(7, path);
+        let error = validate_instance_sync_compatibility(&source, &target).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("managed instance 7 is a WSL path without runtime metadata"),
+            "target {path} must be rejected, got: {error}"
+        );
+
+        let source_with_wsl_path = native_sync_instance(1, path);
+        let error =
+            validate_instance_sync_compatibility(&source_with_wsl_path, &target).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("managed instance 1 is a WSL path without runtime metadata"),
+            "source {path} must be rejected, got: {error}"
+        );
+    }
+}
+
+#[test]
+fn allows_plain_native_instance_sync_compatibility() {
+    let source = native_sync_instance(1, r"C:\Users\dev\.codex");
+    let target = native_sync_instance(2, r"D:\codex\work");
+    assert!(validate_instance_sync_compatibility(&source, &target).is_ok());
+}
+
+#[test]
+fn rejects_cross_runtime_instances_in_sync_plans() {
     let dir = tempdir().unwrap();
     let native_directory = dir.path().join("native");
     let database_path = dir.path().join("instances.sqlite");
@@ -693,5 +743,106 @@ fn rejects_wsl_instances_in_sync_plans() {
     )
     .unwrap_err();
 
-    assert!(format!("{error:?}").contains("WSL instances cannot be used"));
+    assert!(format!("{error:?}").contains("Windows and WSL instances cannot be synchronized"));
+}
+
+#[test]
+fn allows_same_distribution_case_insensitive_same_user_wsl_sync_plans() {
+    let dir = tempdir().unwrap();
+    let database_path = dir.path().join("instances.sqlite");
+    let source = register_wsl_instance(
+        &database_path,
+        &WslInstanceRegistration {
+            distribution: "Ubuntu".to_string(),
+            user: "dev".to_string(),
+            codex_home: "/home/dev/.codex".to_string(),
+            host_path: r"\\wsl.localhost\Ubuntu\home\dev\.codex".to_string(),
+            architecture: "amd64".to_string(),
+        },
+    )
+    .unwrap();
+    let target = register_wsl_instance(
+        &database_path,
+        &WslInstanceRegistration {
+            distribution: "ubuntu".to_string(),
+            user: "dev".to_string(),
+            codex_home: "/home/dev/.codex-work".to_string(),
+            host_path: r"\\wsl.localhost\ubuntu\home\dev\.codex-work".to_string(),
+            architecture: "x86_64".to_string(),
+        },
+    )
+    .unwrap();
+
+    let saved = save_instance_sync_plan(
+        &database_path,
+        &InstanceSyncPlanDraft {
+            id: None,
+            name: "WSL 同组".to_string(),
+            source_instance_id: source.id,
+            target_instance_ids: vec![target.id],
+            config_paths: vec![vec!["model".to_string()]],
+            project_selections: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(saved.source_instance_id, source.id);
+    assert_eq!(saved.target_instance_ids, vec![target.id]);
+}
+
+#[test]
+fn rejects_cross_distribution_or_user_wsl_sync_plans() {
+    let dir = tempdir().unwrap();
+    let database_path = dir.path().join("instances.sqlite");
+    let register = |distribution: &str, user: &str, codex_home: &str| {
+        register_wsl_instance(
+            &database_path,
+            &WslInstanceRegistration {
+                distribution: distribution.to_string(),
+                user: user.to_string(),
+                codex_home: codex_home.to_string(),
+                host_path: format!(
+                    r"\\wsl.localhost\{}{}",
+                    distribution,
+                    codex_home.replace('/', r"\")
+                ),
+                architecture: "x86_64".to_string(),
+            },
+        )
+        .unwrap()
+    };
+    let source = register("Ubuntu", "dev", "/home/dev/.codex");
+    let other_distribution = register("Debian", "dev", "/home/dev/.codex-work");
+    let other_user = register("ubuntu", "ops", "/home/ops/.codex");
+    let other_architecture = register_wsl_instance(
+        &database_path,
+        &WslInstanceRegistration {
+            distribution: "ubuntu".to_string(),
+            user: "dev".to_string(),
+            codex_home: "/home/dev/.codex-arm".to_string(),
+            host_path: r"\\wsl.localhost\ubuntu\home\dev\.codex-arm".to_string(),
+            architecture: "aarch64".to_string(),
+        },
+    )
+    .unwrap();
+
+    for (target_id, expected) in [
+        (other_distribution.id, "same distribution"),
+        (other_user.id, "same Linux user"),
+        (other_architecture.id, "same helper architecture"),
+    ] {
+        let error = save_instance_sync_plan(
+            &database_path,
+            &InstanceSyncPlanDraft {
+                id: None,
+                name: "不兼容 WSL 同步".to_string(),
+                source_instance_id: source.id,
+                target_instance_ids: vec![target_id],
+                config_paths: Vec::new(),
+                project_selections: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains(expected));
+    }
 }

@@ -147,10 +147,36 @@ export function manualCodexHomeUpdate(value: string, currentValue: string): Manu
   return { accepted: true, value, message: null };
 }
 
-export function nativeSyncInstances(instances: ManagedInstance[]) {
-  return instances.filter(
-    (instance) => instance.runtime.kind === "native" && instance.availability === "available",
+export function instanceSyncSourceCandidates(instances: ManagedInstance[]) {
+  return instances.filter((instance) => instance.availability === "available");
+}
+
+export function instanceSyncInstanceLabel(instance: ManagedInstance) {
+  const name = instanceDisplayName(instance);
+  if (instance.runtime.kind === "wsl") {
+    return `${name} · WSL · ${instance.runtime.distribution} · ${instance.runtime.user} · ${instance.runtime.codex_home}`;
+  }
+  return `${name} · Windows 原生 · ${instance.path}`;
+}
+
+export function instanceSyncInstancesCompatible(source: ManagedInstance, target: ManagedInstance) {
+  if (source.runtime.kind === "native" || target.runtime.kind === "native") {
+    return source.runtime.kind === "native" && target.runtime.kind === "native";
+  }
+  return (
+    source.runtime.distribution.toLowerCase() === target.runtime.distribution.toLowerCase() &&
+    source.runtime.user === target.runtime.user &&
+    normalizeWslArchitecture(source.runtime.architecture) ===
+      normalizeWslArchitecture(target.runtime.architecture) &&
+    normalizeLinuxCodexHome(source.runtime.codex_home) !==
+      normalizeLinuxCodexHome(target.runtime.codex_home)
   );
+}
+
+export function instanceSyncTargetFilterDescription(source: ManagedInstance | null) {
+  if (!source) return "选择源实例后显示兼容目标";
+  if (source.runtime.kind === "native") return "仅显示其他可用的 Windows 原生实例";
+  return `仅显示 ${source.runtime.distribution} / ${source.runtime.user} 的其他 WSL 实例`;
 }
 
 export function instanceScanSummary(report: InstanceScanReport | null) {
@@ -171,7 +197,64 @@ export function managedInstanceIgnoreConfirmation(instance: ManagedInstance) {
 }
 
 export function availableInstanceSyncTargets(instances: ManagedInstance[], sourceInstanceId: number | null) {
-  return nativeSyncInstances(instances).filter((instance) => instance.id !== sourceInstanceId);
+  const source = instances.find((instance) => instance.id === sourceInstanceId) || null;
+  if (!source) return [];
+  return instanceSyncSourceCandidates(instances).filter(
+    (instance) =>
+      instance.id !== source.id && instanceSyncInstancesCompatible(source, instance),
+  );
+}
+
+export interface ReconciledInstanceSyncAvailability {
+  selection: InstanceSyncSelection;
+  sourceAvailable: boolean;
+  sourceRemoved: boolean;
+  removedTargetCount: number;
+}
+
+export function reconcileInstanceSyncAvailability(
+  instances: ManagedInstance[],
+  selection: InstanceSyncSelection,
+): ReconciledInstanceSyncAvailability {
+  const source =
+    selection.sourceInstanceId == null
+      ? null
+      : instanceSyncSourceCandidates(instances).find(
+          (instance) => instance.id === selection.sourceInstanceId,
+        ) || null;
+  if (!source) {
+    return {
+      selection: {
+        sourceInstanceId: null,
+        targetInstanceIds: [],
+        configPathKeys: [],
+        projectSelections: [],
+        sessionIds: [],
+      },
+      sourceAvailable: false,
+      sourceRemoved: selection.sourceInstanceId != null,
+      removedTargetCount: selection.targetInstanceIds.length,
+    };
+  }
+  const compatibleTargetIds = new Set(
+    availableInstanceSyncTargets(instances, source.id).map((instance) => instance.id),
+  );
+  const targetInstanceIds = selection.targetInstanceIds.filter((id) =>
+    compatibleTargetIds.has(id),
+  );
+  return {
+    selection: { ...selection, targetInstanceIds },
+    sourceAvailable: true,
+    sourceRemoved: false,
+    removedTargetCount: selection.targetInstanceIds.length - targetInstanceIds.length,
+  };
+}
+
+export function reconcileInstanceSyncPlan(
+  plan: InstanceSyncPlan,
+  instances: ManagedInstance[],
+): ReconciledInstanceSyncAvailability {
+  return reconcileInstanceSyncAvailability(instances, applyInstanceSyncPlan(plan));
 }
 
 export function configPathKey(path: string[]) {
@@ -232,6 +315,18 @@ export function applyInstanceSyncPlan(plan: InstanceSyncPlan): InstanceSyncSelec
   };
 }
 
+export function instanceSyncSelectionAfterSourceChange(
+  sourceInstanceId: number | null,
+): InstanceSyncSelection {
+  return {
+    sourceInstanceId,
+    targetInstanceIds: [],
+    configPathKeys: [],
+    projectSelections: [],
+    sessionIds: [],
+  };
+}
+
 export function validateInstanceSyncSelection(selection: InstanceSyncSelection) {
   if (!Number.isSafeInteger(selection.sourceInstanceId)) return "请选择源实例";
   if (selection.targetInstanceIds.length === 0) return "请至少选择一个目标实例";
@@ -265,4 +360,16 @@ export function instanceSyncTargetSummary(target: InstanceSyncTargetResultLike) 
 function instanceDefaultName(path: string) {
   const segments = path.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean);
   return segments[segments.length - 1] || path;
+}
+
+function normalizeWslArchitecture(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "amd64") return "x86_64";
+  if (normalized === "arm64") return "aarch64";
+  return normalized;
+}
+
+function normalizeLinuxCodexHome(value: string) {
+  const normalized = value.replace(/\/+$/, "");
+  return normalized || "/";
 }

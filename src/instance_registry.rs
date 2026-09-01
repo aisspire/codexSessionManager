@@ -105,6 +105,73 @@ pub struct InstanceSyncPlanDraft {
     pub project_selections: Vec<Option<String>>,
 }
 
+pub fn validate_instance_sync_compatibility(
+    source: &ManagedInstance,
+    target: &ManagedInstance,
+) -> Result<()> {
+    match (&source.runtime, &target.runtime) {
+        (InstanceRuntime::Native, InstanceRuntime::Native) => {
+            if unresolved_wsl_path(&source.path) {
+                bail!(
+                    "managed instance {} is a WSL path without runtime metadata; discover or register it again",
+                    source.id
+                );
+            }
+            if unresolved_wsl_path(&target.path) {
+                bail!(
+                    "managed instance {} is a WSL path without runtime metadata; discover or register it again",
+                    target.id
+                );
+            }
+            Ok(())
+        }
+        (
+            InstanceRuntime::Wsl {
+                distribution: source_distribution,
+                user: source_user,
+                architecture: source_architecture,
+                codex_home: source_codex_home,
+                ..
+            },
+            InstanceRuntime::Wsl {
+                distribution: target_distribution,
+                user: target_user,
+                architecture: target_architecture,
+                codex_home: target_codex_home,
+                ..
+            },
+        ) => {
+            if !source_distribution.eq_ignore_ascii_case(target_distribution) {
+                bail!("WSL instance sync requires the same distribution");
+            }
+            if source_user != target_user {
+                bail!("WSL instance sync requires the same Linux user");
+            }
+            if normalize_architecture(source_architecture)?
+                != normalize_architecture(target_architecture)?
+            {
+                bail!("WSL instance sync requires the same helper architecture");
+            }
+            if normalize_linux_codex_home(source_codex_home)
+                == normalize_linux_codex_home(target_codex_home)
+            {
+                bail!("instance sync source cannot resolve to the same Codex home as a target");
+            }
+            Ok(())
+        }
+        _ => bail!("Windows and WSL instances cannot be synchronized with each other"),
+    }
+}
+
+fn normalize_linux_codex_home(value: &str) -> String {
+    let normalized = value.trim_end_matches('/');
+    if normalized.is_empty() {
+        "/".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
 #[derive(Debug)]
 struct StoredManagedInstance {
     id: i64,
@@ -809,27 +876,24 @@ fn ensure_sync_plan_instances_available(
     source_instance_id: i64,
     target_instance_ids: &[i64],
 ) -> Result<()> {
-    for instance_id in
-        std::iter::once(source_instance_id).chain(target_instance_ids.iter().copied())
+    let source = read_instance(connection, source_instance_id)?;
+    ensure_sync_plan_instance_usable(&source)?;
+    for target_instance_id in target_instance_ids {
+        let target = read_instance(connection, *target_instance_id)?;
+        ensure_sync_plan_instance_usable(&target)?;
+        validate_instance_sync_compatibility(&source, &target)?;
+    }
+    Ok(())
+}
+
+fn ensure_sync_plan_instance_usable(instance: &ManagedInstance) -> Result<()> {
+    if instance.availability == InstanceAvailability::Unavailable {
+        bail!("managed instance {} is not available", instance.id);
+    }
+    if matches!(instance.runtime, InstanceRuntime::Native)
+        && instance.availability != InstanceAvailability::Available
     {
-        let (path, runtime_kind) = connection
-            .query_row(
-                r#"
-                SELECT path, runtime_kind
-                FROM managed_instances
-                WHERE id = ?1 AND deleted_at_unix IS NULL AND ignored_at_unix IS NULL
-                "#,
-                [instance_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?
-            .ok_or_else(|| anyhow::anyhow!("managed instance {instance_id} does not exist"))?;
-        if runtime_kind != "native" || unresolved_wsl_path(&path) {
-            bail!("WSL instances cannot be used in multi-instance synchronization");
-        }
-        if !instance_is_available(Path::new(&path)) {
-            bail!("managed instance {instance_id} is not available");
-        }
+        bail!("managed instance {} is not available", instance.id);
     }
     Ok(())
 }

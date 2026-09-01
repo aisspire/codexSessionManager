@@ -20,7 +20,6 @@ import {
   type PathPickerTarget,
 } from "./pathPicker";
 import {
-  applyInstanceSyncPlan,
   automaticNonRootDiffConfigPathKeys,
   automaticNonRootDiffPlanExecutionBlockMessage,
   automaticNonRootDiffPlanId,
@@ -34,12 +33,17 @@ import {
   instanceDisplayName,
   instanceRuntimeLabel,
   instanceScanSummary,
+  instanceSyncInstanceLabel,
+  instanceSyncSelectionAfterSourceChange,
+  instanceSyncSourceCandidates,
+  instanceSyncTargetFilterDescription,
   instanceSyncTargetSummary,
   manualCodexHomeUpdate,
   isUnsupportedManualCodexHome,
   managedInstanceDeleteConfirmation,
   managedInstanceIgnoreConfirmation,
-  nativeSyncInstances,
+  reconcileInstanceSyncAvailability,
+  reconcileInstanceSyncPlan,
   validateInstanceSyncSelection,
   type InstanceScanReport,
   type ManagedInstance,
@@ -293,6 +297,14 @@ interface InstanceSyncSourceData {
   config_paths: ConfigPathNode[];
 }
 
+interface InstanceSyncRequest {
+  source_instance_id: number;
+  target_instance_ids: number[];
+  session_ids: string[];
+  project_selections: Array<string | null>;
+  config_paths: string[][];
+}
+
 interface InstanceSyncConfigDiffTarget {
   target_instance_id: number;
   target_path: string;
@@ -497,6 +509,8 @@ const state = {
   instanceSyncPlanName: "",
   instanceSyncStep: 1 as InstanceSyncStep,
   instanceSyncSourceId: null as number | null,
+  instanceSyncSourceLoading: false,
+  instanceSyncPlanNotice: "",
   instanceSyncTargetIds: new Set<number>(),
   instanceSyncSessions: [] as InstanceSyncSourceSession[],
   instanceSyncExpandedProjectKeys: new Set<string>(),
@@ -1110,11 +1124,20 @@ function instanceTable() {
 }
 
 function instanceSyncWorkspace() {
-  const availableInstances = nativeSyncInstances(state.managedInstances);
+  const availableInstances = instanceSyncSourceCandidates(state.managedInstances);
+  const sourceInstance =
+    state.managedInstances.find((instance) => instance.id === state.instanceSyncSourceId) || null;
   const targetInstances = availableInstanceSyncTargets(
     state.managedInstances,
     state.instanceSyncSourceId,
   );
+  const hiddenTargetCount = sourceInstance
+    ? Math.max(
+        0,
+        state.managedInstances.filter((instance) => instance.id !== sourceInstance.id).length -
+          targetInstances.length,
+      )
+    : 0;
   const visibleSessionGroups = filteredInstanceSyncSessionGroups();
   const visibleSessionCount = visibleSessionGroups.reduce(
     (count, group) => count + group.visibleSessions.length,
@@ -1138,7 +1161,7 @@ function instanceSyncWorkspace() {
       <div class="instance-sync-heading">
         <div>
           <h2>本机同步工作区</h2>
-          <p>项目全选会保存为方案条件，并在预览和执行时按当前源会话动态展开；WSL 实例不参与多实例同步。配置方案不保存配置值。</p>
+          <p>Windows 实例可与其他 Windows 实例同步；WSL 仅可与同发行版、同 Linux 用户的其他主目录同步。配置方案不保存配置值。</p>
         </div>
         <span class="instance-sync-selection" aria-live="polite">会话 ${selectedSessions} · 项目 ${selectedProjects} · ${configSelectionStatus}</span>
       </div>
@@ -1152,6 +1175,7 @@ function instanceSyncWorkspace() {
       <div class="instance-sync-step-panels">
         <section class="instance-sync-panel instance-sync-step-panel ${state.instanceSyncStep === 1 ? "is-active" : ""}" id="instance-sync-step-1" role="tabpanel" aria-hidden="${state.instanceSyncStep !== 1}">
           <h3>① 源实例与方案</h3>
+          ${state.instanceSyncPlanNotice ? `<p class="instance-sync-notice" role="status">${escapeHtml(state.instanceSyncPlanNotice)}</p>` : ""}
           <div class="instance-sync-plan-row">
             <label>同步方案
               <select id="instance-sync-plan" ${disabledWhenBusy()}>
@@ -1179,13 +1203,14 @@ function instanceSyncWorkspace() {
               ${availableInstances
                 .map(
                   (instance) =>
-                    `<option value="${instance.id}" ${instance.id === state.instanceSyncSourceId ? "selected" : ""}>${escapeHtml(instanceDisplayName(instance))}</option>`,
+                    `<option value="${instance.id}" ${instance.id === state.instanceSyncSourceId ? "selected" : ""}>${escapeHtml(instanceSyncInstanceLabel(instance))}</option>`,
                 )
                 .join("")}
             </select>
           </label>
           <div class="instance-sync-targets" data-instance-sync-scroll="targets" role="group" aria-label="目标实例（可多选）">
             <span>目标实例（可多选）</span>
+            <span class="instance-sync-filter-summary">${escapeHtml(instanceSyncTargetFilterDescription(sourceInstance))} · 已隐藏 ${hiddenTargetCount} 个</span>
             ${
               targetInstances.length
                 ? targetInstances
@@ -1193,11 +1218,15 @@ function instanceSyncWorkspace() {
                       (instance) => `
                         <label class="check-row">
                           <input type="checkbox" data-instance-sync-target="${instance.id}" ${state.instanceSyncTargetIds.has(instance.id) ? "checked" : ""} ${disabledWhenBusy()} />
-                          <span>${escapeHtml(instanceDisplayName(instance))}</span>
+                          <span>${escapeHtml(instanceSyncInstanceLabel(instance))}</span>
                         </label>`,
                     )
                     .join("")
-                : `<span class="instance-sync-muted">先选择可用源实例后再选择目标。</span>`
+                : sourceInstance?.runtime.kind === "wsl"
+                  ? `<span class="instance-sync-muted">没有兼容目标。请先登记同发行版、同 Linux 用户的另一个 Codex 主目录。</span>`
+                  : sourceInstance
+                    ? `<span class="instance-sync-muted">没有其他可用的 Windows 原生目标实例。</span>`
+                    : `<span class="instance-sync-muted">先选择可用源实例后再选择目标。</span>`
             }
           </div>
         </section>
@@ -1215,7 +1244,9 @@ function instanceSyncWorkspace() {
           </label>
           <div class="instance-sync-list" data-instance-sync-scroll="sessions" role="group" aria-label="源会话">
             ${
-              state.instanceSyncSourceId == null
+              state.instanceSyncSourceLoading
+                ? `<span class="instance-sync-muted" role="status">正在异步加载新源的会话…</span>`
+                : state.instanceSyncSourceId == null
                 ? `<span class="instance-sync-muted">请选择源实例以加载会话。</span>`
                 : visibleSessionGroups.length
                   ? visibleSessionGroups
@@ -1232,7 +1263,9 @@ function instanceSyncWorkspace() {
           ${instanceSyncConfigDifferenceSummaryNoticeMarkup()}
           <div class="instance-sync-config-tree" data-instance-sync-scroll="config" role="group" aria-label="可同步配置路径">
             ${
-              state.instanceSyncSourceId == null
+              state.instanceSyncSourceLoading
+                ? `<span class="instance-sync-muted" role="status">正在异步加载新源的配置路径…</span>`
+                : state.instanceSyncSourceId == null
                 ? `<span class="instance-sync-muted">请选择源实例以读取配置路径。</span>`
                 : state.instanceSyncConfigPaths.length
                   ? instanceSyncConfigTree(state.instanceSyncConfigPaths)
@@ -2898,26 +2931,25 @@ async function scanManagedInstances() {
 function reconcileInstanceSyncInstances(refreshConfigDifferenceSummary = true) {
   clearInstanceSyncConfigDiffCache();
   invalidateInstanceSyncConfigDifferenceSummary();
-  const availableIds = new Set(
-    nativeSyncInstances(state.managedInstances).map((instance) => instance.id),
+  const reconciled = reconcileInstanceSyncAvailability(
+    state.managedInstances,
+    instanceSyncSelection(),
   );
-  if (
-    state.instanceSyncSourceId != null &&
-    !availableIds.has(state.instanceSyncSourceId)
-  ) {
-    state.instanceSyncSourceId = null;
+  state.instanceSyncSourceId = reconciled.selection.sourceInstanceId;
+  state.instanceSyncTargetIds = new Set(reconciled.selection.targetInstanceIds);
+  state.instanceSyncProjectSelections = new Set(reconciled.selection.projectSelections);
+  state.instanceSyncSessionIds = new Set(reconciled.selection.sessionIds);
+  state.instanceSyncConfigPathKeys = new Set(reconciled.selection.configPathKeys);
+  if (reconciled.sourceRemoved) {
     state.instanceSyncSessions = [];
-    state.instanceSyncProjectSelections.clear();
-    state.instanceSyncSessionIds.clear();
+    state.instanceSyncExpandedProjectKeys.clear();
     state.instanceSyncConfigPaths = [];
-    state.instanceSyncConfigPathKeys.clear();
+    state.instanceSyncSourceLoading = false;
     clearInstanceSyncOutcome();
+    state.instanceSyncPlanNotice = "源实例已失效，已清空源与目标，请重新选择。";
+  } else if (reconciled.removedTargetCount > 0) {
+    state.instanceSyncPlanNotice = `已移除 ${reconciled.removedTargetCount} 个失效或不兼容的目标实例。`;
   }
-  state.instanceSyncTargetIds = new Set(
-    [...state.instanceSyncTargetIds].filter(
-      (id) => availableIds.has(id) && id !== state.instanceSyncSourceId,
-    ),
-  );
   if (refreshConfigDifferenceSummary) {
     void refreshInstanceSyncConfigDifferenceSummary();
   }
@@ -3084,6 +3116,7 @@ async function selectInstanceSyncPlan(planId: number | null) {
   invalidateInstanceSyncConfigDifferenceSummary();
   invalidateAutomaticNonRootDiffConfigSelection();
   state.instanceSyncPlanId = planId;
+  state.instanceSyncPlanNotice = "";
   if (isAutomaticNonRootDiffPlan(planId)) {
     state.instanceSyncPlanName = "";
     state.instanceSyncConfigPathKeys.clear();
@@ -3100,17 +3133,29 @@ async function selectInstanceSyncPlan(planId: number | null) {
     return;
   }
 
-  const selection = applyInstanceSyncPlan(plan);
+  const reconciledPlan = reconcileInstanceSyncPlan(plan, state.managedInstances);
+  const selection = reconciledPlan.selection;
   state.instanceSyncPlanName = plan.name;
   state.instanceSyncSourceId = selection.sourceInstanceId;
   state.instanceSyncTargetIds = new Set(selection.targetInstanceIds);
   state.instanceSyncProjectSelections = new Set(selection.projectSelections);
   state.instanceSyncSessionIds.clear();
   state.instanceSyncConfigPathKeys = new Set(selection.configPathKeys);
-  reconcileInstanceSyncInstances(false);
   clearInstanceSyncOutcome();
-  await loadInstanceSyncSourceData(state.instanceSyncSourceId, false);
-  state.status = `已加载方案“${plan.name}”；已恢复项目选择，可调整本次会话`;
+  if (reconciledPlan.sourceAvailable) {
+    await loadInstanceSyncSourceData(state.instanceSyncSourceId, false);
+  } else {
+    await loadInstanceSyncSourceData(null, true);
+  }
+  if (!reconciledPlan.sourceAvailable) {
+    state.instanceSyncPlanNotice = `方案“${plan.name}”的源实例已失效，已清空源与目标，请重新选择。`;
+    state.status = state.instanceSyncPlanNotice;
+  } else if (reconciledPlan.removedTargetCount > 0) {
+    state.instanceSyncPlanNotice = `方案“${plan.name}”已剔除 ${reconciledPlan.removedTargetCount} 个失效或不兼容目标。`;
+    state.status = `${state.instanceSyncPlanNotice} 已恢复仍有效的项目与配置选择。`;
+  } else {
+    state.status = `已加载方案“${plan.name}”；已恢复项目选择，可调整本次会话`;
+  }
   render({ preserveTableScroll: true });
 }
 
@@ -3119,16 +3164,20 @@ async function selectInstanceSyncSource(sourceInstanceId: number | null, clearCo
   clearInstanceSyncConfigDiffCache();
   invalidateInstanceSyncConfigDifferenceSummary();
   invalidateAutomaticNonRootDiffConfigSelection();
-  state.instanceSyncSourceId = sourceInstanceId;
-  if (sourceInstanceId != null) {
-    state.instanceSyncTargetIds.delete(sourceInstanceId);
-  }
-  state.instanceSyncProjectSelections.clear();
-  state.instanceSyncSessionIds.clear();
+  const resetSelection = instanceSyncSelectionAfterSourceChange(sourceInstanceId);
+  state.instanceSyncSourceId = resetSelection.sourceInstanceId;
+  state.instanceSyncTargetIds = new Set(resetSelection.targetInstanceIds);
+  state.instanceSyncPlanNotice = "";
+  state.instanceSyncProjectSelections = new Set(resetSelection.projectSelections);
+  state.instanceSyncSessionIds = new Set(resetSelection.sessionIds);
+  state.instanceSyncSessions = [];
+  state.instanceSyncExpandedProjectKeys.clear();
+  state.instanceSyncConfigPaths = [];
   if (clearConfigSelections) {
-    state.instanceSyncConfigPathKeys.clear();
+    state.instanceSyncConfigPathKeys = new Set(resetSelection.configPathKeys);
   }
   clearInstanceSyncOutcome();
+  render({ preserveTableScroll: true });
   await loadInstanceSyncSourceData(sourceInstanceId, clearConfigSelections);
   if (isAutomaticNonRootDiffPlan(state.instanceSyncPlanId)) {
     void refreshAutomaticNonRootDiffConfigSelection();
@@ -3144,10 +3193,12 @@ async function loadInstanceSyncSourceData(
   state.instanceSyncSessions = [];
   state.instanceSyncExpandedProjectKeys.clear();
   state.instanceSyncConfigPaths = [];
+  state.instanceSyncSourceLoading = sourceInstanceId != null;
   if (sourceInstanceId == null) {
     state.instanceSyncProjectSelections.clear();
     state.instanceSyncSessionIds.clear();
     if (clearOnMissing) state.instanceSyncConfigPathKeys.clear();
+    state.instanceSyncSourceLoading = false;
     render({ preserveTableScroll: true });
     return;
   }
@@ -3179,6 +3230,10 @@ async function loadInstanceSyncSourceData(
   } catch (error) {
     if (state.instanceSyncSourceId !== sourceInstanceId) return;
     state.status = `无法读取源实例数据：${String(error)}`;
+  } finally {
+    if (state.instanceSyncSourceId === sourceInstanceId) {
+      state.instanceSyncSourceLoading = false;
+    }
   }
   render({ preserveTableScroll: true });
 }
@@ -3424,7 +3479,7 @@ async function executeInstanceSync() {
     render({ preserveTableScroll: true });
     return;
   }
-  if (!(await ensureCodexStoppedBefore("执行本机多实例同步"))) return;
+  if (!(await ensureInstanceSyncCodexStoppedBefore(request))) return;
   const accepted = window.confirm(
     "将把所选会话和配置项同步到目标实例。会话冲突会保留目标内容，已选配置将以源值覆盖目标值。每个目标会先创建元数据备份。是否继续？",
   );
@@ -4361,6 +4416,23 @@ async function ensureCodexStoppedBefore(action: string) {
     return false;
   } catch (error) {
     state.status = `无法检测 Codex 运行状态：${String(error)}`;
+    render({ preserveTableScroll: true });
+    return false;
+  }
+}
+
+async function ensureInstanceSyncCodexStoppedBefore(request: InstanceSyncRequest) {
+  try {
+    const running = await invoke<boolean>("detect_instance_sync_codex_running", {
+      sourceInstanceId: request.source_instance_id,
+      targetInstanceIds: request.target_instance_ids,
+    });
+    if (!running) return true;
+    state.dialog = codexRunningDialogState("执行本机多实例同步");
+    render({ preserveTableScroll: true });
+    return false;
+  } catch (error) {
+    state.status = `无法检测同步实例组的 Codex 运行状态：${String(error)}`;
     render({ preserveTableScroll: true });
     return false;
   }

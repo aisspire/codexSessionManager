@@ -8,6 +8,11 @@ import {
   isAutomaticNonRootDiffPlan,
   isCurrentAutomaticNonRootDiffContext,
   instanceAvailability,
+  instanceSyncInstanceLabel,
+  instanceSyncInstancesCompatible,
+  instanceSyncSelectionAfterSourceChange,
+  instanceSyncSourceCandidates,
+  instanceSyncTargetFilterDescription,
   instanceSyncTargetSummary,
   managedInstanceDeleteConfirmation,
   managedInstanceIgnoreConfirmation,
@@ -16,6 +21,8 @@ import {
   instanceScanSummary,
   isUnsupportedManualCodexHome,
   manualCodexHomeUpdate,
+  reconcileInstanceSyncAvailability,
+  reconcileInstanceSyncPlan,
   validateInstanceSyncSelection,
 } from "./instanceManagement.js";
 import {
@@ -43,8 +50,22 @@ import {
 } from "./instanceSyncSelection.js";
 
 function expectEqual<T>(actual: T, expected: T, message: string) {
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(`${message}\nactual: ${JSON.stringify(actual)}\nexpected: ${JSON.stringify(expected)}`);
+  // 对象键序不参与相等性判断，仅数组保留顺序语义。
+  const stable = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, nested]) => [key, stable(nested)]),
+      );
+    }
+    return value;
+  };
+  const actualJson = JSON.stringify(stable(actual));
+  const expectedJson = JSON.stringify(stable(expected));
+  if (actualJson !== expectedJson) {
+    throw new Error(`${message}\nactual: ${actualJson}\nexpected: ${expectedJson}`);
   }
 }
 
@@ -122,6 +143,11 @@ const wslInstance = {
 expectEqual(instanceDisplayName(wslInstance), "Ubuntu · dev", "uses WSL identity as the default name");
 expectEqual(instanceRuntimeLabel(wslInstance), "WSL · Ubuntu", "labels the WSL runtime explicitly");
 expectEqual(
+  instanceSyncInstanceLabel(wslInstance),
+  "Ubuntu · dev · WSL · Ubuntu · dev · /home/dev/.codex",
+  "shows runtime identity and the full Linux Codex home in sync selectors",
+);
+expectEqual(
   instanceScanSummary({ added: 2, reactivated: 0, ignored: 0, already_managed: 3, skipped: 1 }),
   "最近扫描：新增 2 个 · 已存在 3 个 · 跳过 1 个",
   "summarizes scan results for the management page",
@@ -167,7 +193,72 @@ expectEqual(
     (instance) => instance.id,
   ),
   [secondAvailableInstance.id],
-  "excludes WSL instances from multi-instance synchronization",
+  "keeps Windows and WSL instances in separate synchronization groups",
+);
+const sameWslGroupTarget = {
+  ...wslInstance,
+  id: 10,
+  path: "\\\\wsl.localhost\\ubuntu\\home\\dev\\.codex-work",
+  runtime: {
+    ...wslInstance.runtime,
+    distribution: "ubuntu",
+    codex_home: "/home/dev/.codex-work",
+    host_path: "\\\\wsl.localhost\\ubuntu\\home\\dev\\.codex-work",
+    architecture: "amd64",
+  },
+};
+const otherWslUser = {
+  ...sameWslGroupTarget,
+  id: 11,
+  runtime: { ...sameWslGroupTarget.runtime, user: "Dev" },
+};
+const otherWslDistribution = {
+  ...sameWslGroupTarget,
+  id: 12,
+  runtime: { ...sameWslGroupTarget.runtime, distribution: "Debian" },
+};
+expectEqual(
+  availableInstanceSyncTargets(
+    [wslInstance, sameWslGroupTarget, otherWslUser, otherWslDistribution, availableInstance],
+    wslInstance.id,
+  ).map((instance) => instance.id),
+  [sameWslGroupTarget.id],
+  "matches WSL distributions case-insensitively while requiring an exact Linux user",
+);
+expectEqual(
+  [
+    instanceSyncInstancesCompatible(wslInstance, sameWslGroupTarget),
+    instanceSyncInstancesCompatible(wslInstance, otherWslUser),
+    instanceSyncInstancesCompatible(wslInstance, otherWslDistribution),
+  ],
+  [true, false, false],
+  "applies the complete WSL compatibility matrix",
+);
+expectEqual(
+  instanceSyncSourceCandidates([availableInstance, wslInstance]).map((instance) => instance.id),
+  [availableInstance.id, wslInstance.id],
+  "offers both Windows and WSL instances as synchronization sources",
+);
+expectEqual(
+  instanceSyncSourceCandidates([{ ...wslInstance, availability: "unknown" }]).length,
+  0,
+  "keeps unprobed WSL instances out of synchronization selectors until they are available",
+);
+expectEqual(
+  instanceSyncTargetFilterDescription(wslInstance),
+  "仅显示 Ubuntu / dev 的其他 WSL 实例",
+  "describes the active WSL target filter",
+);
+expectEqual(
+  instanceSyncSelectionAfterSourceChange(wslInstance.id),
+  {
+    sourceInstanceId: wslInstance.id,
+    targetInstanceIds: [],
+    configPathKeys: [],
+    projectSelections: [],
+    sessionIds: [],
+  },
+  "switching the source immediately clears old targets, sessions, projects, and config selections",
 );
 expectEqual(
   applyInstanceSyncPlan({
@@ -188,6 +279,116 @@ expectEqual(
     sessionIds: [],
   },
   "loading a sync plan restores project selections but never prior single-session choices",
+);
+expectEqual(
+  reconcileInstanceSyncPlan(
+    {
+      id: 5,
+      name: "旧 WSL 方案",
+      source_instance_id: wslInstance.id,
+      target_instance_ids: [sameWslGroupTarget.id, otherWslUser.id, 999],
+      config_paths: [["model"]],
+      project_selections: [],
+      created_at_unix: 1,
+      updated_at_unix: 2,
+    },
+    [wslInstance, sameWslGroupTarget, otherWslUser],
+  ),
+  {
+    selection: {
+      sourceInstanceId: wslInstance.id,
+      targetInstanceIds: [sameWslGroupTarget.id],
+      configPathKeys: [configPathKey(["model"])],
+      projectSelections: [],
+      sessionIds: [],
+    },
+    removedTargetCount: 2,
+    sourceAvailable: true,
+    sourceRemoved: false,
+  },
+  "loading a saved WSL plan removes missing or incompatible targets and reports their count",
+);
+expectEqual(
+  reconcileInstanceSyncPlan(
+    {
+      id: 6,
+      name: "失效源方案",
+      source_instance_id: 42,
+      target_instance_ids: [availableInstance.id, secondAvailableInstance.id],
+      config_paths: [["model"], ["features", "enabled"]],
+      project_selections: ["e:/work/office", null],
+      created_at_unix: 1,
+      updated_at_unix: 2,
+    },
+    [availableInstance, secondAvailableInstance],
+  ),
+  {
+    selection: {
+      sourceInstanceId: null,
+      targetInstanceIds: [],
+      configPathKeys: [],
+      projectSelections: [],
+      sessionIds: [],
+    },
+    removedTargetCount: 2,
+    sourceAvailable: false,
+    sourceRemoved: true,
+  },
+  "a plan whose source disappeared loads with every source-dependent choice cleared",
+);
+expectEqual(
+  reconcileInstanceSyncAvailability(
+    [
+      availableInstance,
+      secondAvailableInstance,
+      { ...availableInstance, id: 3, availability: "unavailable" },
+    ],
+    {
+      sourceInstanceId: availableInstance.id,
+      targetInstanceIds: [secondAvailableInstance.id, 3, 999],
+      configPathKeys: [configPathKey(["model"])],
+      projectSelections: ["e:/work/office", null],
+      sessionIds: ["session-1"],
+    },
+  ),
+  {
+    selection: {
+      sourceInstanceId: availableInstance.id,
+      targetInstanceIds: [secondAvailableInstance.id],
+      configPathKeys: [configPathKey(["model"])],
+      projectSelections: ["e:/work/office", null],
+      sessionIds: ["session-1"],
+    },
+    removedTargetCount: 2,
+    sourceAvailable: true,
+    sourceRemoved: false,
+  },
+  "an available source keeps project, session, and config choices while dropping failed targets",
+);
+expectEqual(
+  reconcileInstanceSyncAvailability(
+    [availableInstance],
+    {
+      sourceInstanceId: null,
+      targetInstanceIds: [],
+      configPathKeys: [],
+      projectSelections: [],
+      sessionIds: [],
+    },
+  ),
+  {
+    selection: {
+      sourceInstanceId: null,
+      targetInstanceIds: [],
+      configPathKeys: [],
+      projectSelections: [],
+      sessionIds: [],
+    },
+    removedTargetCount: 0,
+    sourceAvailable: false,
+    sourceRemoved: false,
+  },
+  "an untouched empty selection is not reported as a removed source",
 );
 expectEqual(
   isAutomaticNonRootDiffPlan(automaticNonRootDiffPlanId),

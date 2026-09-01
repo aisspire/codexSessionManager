@@ -2,6 +2,7 @@
 
 mod wsl;
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,16 +20,15 @@ use codex_session_manager::instance_registry::{
     InstanceSyncPlanDraft, ManagedInstance, WslInstanceRegistration,
 };
 use codex_session_manager::instance_sync::{
-    self, InstanceSyncConfigDiff, InstanceSyncConfigDiffRequest,
-    InstanceSyncConfigDifferenceSummary, InstanceSyncConfigDifferenceSummaryRequest,
-    InstanceSyncExecutionReport, InstanceSyncNonRootConfigDifferenceRequest,
-    InstanceSyncNonRootConfigDifferenceSelection, InstanceSyncPreview, InstanceSyncRequest,
-    InstanceSyncSourceData,
+    InstanceSyncConfigDiff, InstanceSyncConfigDiffRequest, InstanceSyncConfigDifferenceSummary,
+    InstanceSyncConfigDifferenceSummaryRequest, InstanceSyncExecutionReport,
+    InstanceSyncNonRootConfigDifferenceRequest, InstanceSyncNonRootConfigDifferenceSelection,
+    InstanceSyncPreview, InstanceSyncRequest, InstanceSyncSourceData, ResolvedInstanceSyncProfile,
 };
 use codex_session_manager::migrate::{self, SessionEdit};
 use codex_session_manager::profile_operation::{
-    decode_operation_result, execute_profile_operation, BridgeRequest, ProfileOperation,
-    ProfileSpec,
+    decode_operation_result, execute_profile_operation, BridgeRequest, InstanceSyncBridgeAction,
+    InstanceSyncBridgeTarget, ProfileOperation, ProfileSpec,
 };
 use codex_session_manager::restore::{RestorePreview, RestoreReport, RestoreSessionOptions};
 use codex_session_manager::safety;
@@ -612,6 +612,13 @@ async fn save_instance_sync_plan(
     app: tauri::AppHandle,
     draft: InstanceSyncPlanDraft,
 ) -> Result<InstanceSyncPlan, String> {
+    resolve_instance_sync_group(
+        &app,
+        draft.source_instance_id,
+        &draft.target_instance_ids,
+        true,
+    )
+    .await?;
     let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
     tauri::async_runtime::spawn_blocking(move || {
         instance_registry::save_instance_sync_plan(&database_path, &draft).map_err(format_error)
@@ -633,83 +640,135 @@ async fn delete_instance_sync_plan(app: tauri::AppHandle, plan_id: i64) -> Resul
 #[tauri::command]
 async fn list_instance_sync_source_data(
     app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     source_instance_id: i64,
 ) -> Result<InstanceSyncSourceData, String> {
-    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        instance_sync::list_instance_sync_source_data(&database_path, source_instance_id)
-            .map_err(format_error)
-    })
+    run_instance_sync_action(
+        &app,
+        &bridge,
+        source_instance_id,
+        &[],
+        InstanceSyncBridgeAction::SourceData,
+    )
     .await
-    .map_err(|error| format!("instance sync source data task failed: {error}"))?
 }
 
 #[tauri::command]
 async fn preview_instance_sync_config_diff(
     app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     request: InstanceSyncConfigDiffRequest,
 ) -> Result<InstanceSyncConfigDiff, String> {
-    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        instance_sync::preview_instance_sync_config_diff(&database_path, &request)
-            .map_err(format_error)
-    })
+    let source_instance_id = request.source_instance_id;
+    let target_instance_ids = request.target_instance_ids.clone();
+    run_instance_sync_action(
+        &app,
+        &bridge,
+        source_instance_id,
+        &target_instance_ids,
+        InstanceSyncBridgeAction::ConfigDiff { request },
+    )
     .await
-    .map_err(|error| format!("instance sync config diff task failed: {error}"))?
 }
 
 #[tauri::command]
 async fn summarize_instance_sync_config_differences(
     app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     request: InstanceSyncConfigDifferenceSummaryRequest,
 ) -> Result<InstanceSyncConfigDifferenceSummary, String> {
-    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        instance_sync::summarize_instance_sync_config_differences(&database_path, &request)
-            .map_err(format_error)
-    })
+    let source_instance_id = request.source_instance_id;
+    let target_instance_ids = request.target_instance_ids.clone();
+    run_instance_sync_action(
+        &app,
+        &bridge,
+        source_instance_id,
+        &target_instance_ids,
+        InstanceSyncBridgeAction::ConfigDifferenceSummary { request },
+    )
     .await
-    .map_err(|error| format!("instance sync config difference summary task failed: {error}"))?
 }
 
 #[tauri::command]
 async fn select_instance_sync_non_root_config_differences(
     app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     request: InstanceSyncNonRootConfigDifferenceRequest,
 ) -> Result<InstanceSyncNonRootConfigDifferenceSelection, String> {
-    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        instance_sync::select_instance_sync_non_root_config_differences(&database_path, &request)
-            .map_err(format_error)
-    })
+    let source_instance_id = request.source_instance_id;
+    let target_instance_ids = request.target_instance_ids.clone();
+    run_instance_sync_action(
+        &app,
+        &bridge,
+        source_instance_id,
+        &target_instance_ids,
+        InstanceSyncBridgeAction::NonRootConfigDifferenceSelection { request },
+    )
     .await
-    .map_err(|error| format!("instance sync non-root config selection task failed: {error}"))?
 }
 
 #[tauri::command]
 async fn preview_instance_sync(
     app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     request: InstanceSyncRequest,
 ) -> Result<InstanceSyncPreview, String> {
-    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        instance_sync::preview_instance_sync(&database_path, &request).map_err(format_error)
-    })
+    let source_instance_id = request.source_instance_id;
+    let target_instance_ids = request.target_instance_ids.clone();
+    run_instance_sync_action(
+        &app,
+        &bridge,
+        source_instance_id,
+        &target_instance_ids,
+        InstanceSyncBridgeAction::Preview { request },
+    )
     .await
-    .map_err(|error| format!("instance sync preview task failed: {error}"))?
 }
 
 #[tauri::command]
 async fn execute_instance_sync(
     app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
     request: InstanceSyncRequest,
 ) -> Result<InstanceSyncExecutionReport, String> {
-    let database_path = managed_instance_registry_database(&app).map_err(format_error)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        instance_sync::execute_instance_sync(&database_path, &request).map_err(format_error)
+    let source_instance_id = request.source_instance_id;
+    let target_instance_ids = request.target_instance_ids.clone();
+    run_instance_sync_action(
+        &app,
+        &bridge,
+        source_instance_id,
+        &target_instance_ids,
+        InstanceSyncBridgeAction::Execute { request },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn detect_instance_sync_codex_running(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, WslBridgeManager>,
+    source_instance_id: i64,
+    target_instance_ids: Vec<i64>,
+) -> Result<bool, String> {
+    let group =
+        resolve_instance_sync_group(&app, source_instance_id, &target_instance_ids, true).await?;
+    let shared_wsl_home = group.has_wsl_mounted_home();
+    let running = run_resolved_instance_sync_action::<bool>(
+        &app,
+        &bridge,
+        group,
+        InstanceSyncBridgeAction::DetectCodexRunning,
+    )
+    .await?;
+    merge_codex_running_with_windows(running, shared_wsl_home, || async {
+        tauri::async_runtime::spawn_blocking(|| {
+            safety::detect_codex_processes().map(|processes| !processes.is_empty())
+        })
+        .await
+        .map_err(|error| format!("Codex process detection task failed: {error}"))?
+        .map_err(format_error)
     })
     .await
-    .map_err(|error| format!("instance sync execution task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -730,6 +789,241 @@ enum ResolvedProfileTarget {
         user: String,
         architecture: String,
     },
+}
+
+enum ResolvedInstanceSyncGroup {
+    Native {
+        source: ResolvedInstanceSyncProfile,
+        targets: Vec<ResolvedInstanceSyncProfile>,
+    },
+    Wsl {
+        source: ResolvedInstanceSyncProfile,
+        targets: Vec<ResolvedInstanceSyncProfile>,
+        distribution: String,
+        user: String,
+        architecture: String,
+    },
+}
+
+impl ResolvedInstanceSyncGroup {
+    fn has_wsl_mounted_home(&self) -> bool {
+        match self {
+            Self::Native { .. } => false,
+            Self::Wsl {
+                source, targets, ..
+            } => {
+                is_wsl_mounted_path(&source.codex_home.to_string_lossy())
+                    || targets
+                        .iter()
+                        .any(|target| is_wsl_mounted_path(&target.codex_home.to_string_lossy()))
+            }
+        }
+    }
+}
+
+async fn resolve_instance_sync_group(
+    app: &tauri::AppHandle,
+    source_instance_id: i64,
+    target_instance_ids: &[i64],
+    require_targets: bool,
+) -> Result<ResolvedInstanceSyncGroup, String> {
+    if source_instance_id <= 0 {
+        return Err("instance sync source must be a registered instance".to_string());
+    }
+    if require_targets && target_instance_ids.is_empty() {
+        return Err("instance sync request must include at least one target instance".to_string());
+    }
+    let mut seen = HashSet::new();
+    for target_instance_id in target_instance_ids {
+        if *target_instance_id <= 0 {
+            return Err("instance sync target must be a registered instance".to_string());
+        }
+        if *target_instance_id == source_instance_id {
+            return Err("instance sync source cannot also be a target".to_string());
+        }
+        if !seen.insert(*target_instance_id) {
+            return Err("instance sync targets cannot contain duplicates".to_string());
+        }
+    }
+
+    let database_path = managed_instance_registry_database(app).map_err(format_error)?;
+    let requested_target_ids = target_instance_ids.to_vec();
+    let (source, targets) = tauri::async_runtime::spawn_blocking(move || {
+        let source = instance_registry::managed_instance(&database_path, source_instance_id)?;
+        let targets = requested_target_ids
+            .into_iter()
+            .map(|target_id| instance_registry::managed_instance(&database_path, target_id))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok::<_, anyhow::Error>((source, targets))
+    })
+    .await
+    .map_err(|error| format!("instance sync registry resolution task failed: {error}"))?
+    .map_err(format_error)?;
+
+    if source.availability == InstanceAvailability::Unavailable {
+        return Err(source.availability_error.unwrap_or_else(|| {
+            format!("managed source instance {source_instance_id} is not available")
+        }));
+    }
+    for target in &targets {
+        instance_registry::validate_instance_sync_compatibility(&source, target)
+            .map_err(format_error)?;
+    }
+
+    match source.runtime {
+        InstanceRuntime::Native => {
+            if source.availability != InstanceAvailability::Available {
+                return Err(format!(
+                    "managed source instance {source_instance_id} is not available"
+                ));
+            }
+            let source =
+                ResolvedInstanceSyncProfile::new(source.id, source.path).map_err(format_error)?;
+            let targets = targets
+                .into_iter()
+                .map(|target| ResolvedInstanceSyncProfile::new(target.id, target.path))
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map_err(format_error)?;
+            Ok(ResolvedInstanceSyncGroup::Native { source, targets })
+        }
+        InstanceRuntime::Wsl {
+            distribution,
+            user,
+            codex_home,
+            architecture,
+            ..
+        } => {
+            let probe = wsl::probe(&distribution, Some(&user), Some(&codex_home))
+                .await
+                .map_err(|error| {
+                    format!(
+                        "WSL instance sync source is unavailable for {distribution}/{user}: {error:?}"
+                    )
+                })?;
+            if !probe.available {
+                return Err(probe.error.unwrap_or_else(|| {
+                    format!("WSL instance sync source is unavailable for {distribution}/{user}")
+                }));
+            }
+            if probe.user != user || probe.codex_home != codex_home {
+                return Err(format!(
+                    "WSL instance sync source identity changed for {distribution}/{user}"
+                ));
+            }
+            let registered_architecture =
+                codex_session_manager::wsl::normalize_architecture(&architecture)
+                    .map_err(format_error)?;
+            if probe.architecture != registered_architecture {
+                return Err(format!(
+                    "WSL architecture changed for {distribution}/{user}: registered {}, detected {}",
+                    registered_architecture, probe.architecture
+                ));
+            }
+            let source = ResolvedInstanceSyncProfile::new(source.id, probe.codex_home)
+                .map_err(format_error)?;
+            let targets = targets
+                .into_iter()
+                .map(|target| match target.runtime {
+                    InstanceRuntime::Wsl { codex_home, .. } => {
+                        ResolvedInstanceSyncProfile::new(target.id, codex_home)
+                    }
+                    InstanceRuntime::Native => unreachable!(
+                        "runtime compatibility was validated before WSL group construction"
+                    ),
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map_err(format_error)?;
+            Ok(ResolvedInstanceSyncGroup::Wsl {
+                source,
+                targets,
+                distribution,
+                user,
+                architecture: probe.architecture,
+            })
+        }
+    }
+}
+
+async fn run_instance_sync_action<T: DeserializeOwned>(
+    app: &tauri::AppHandle,
+    bridge: &WslBridgeManager,
+    source_instance_id: i64,
+    target_instance_ids: &[i64],
+    action: InstanceSyncBridgeAction,
+) -> Result<T, String> {
+    let require_targets = !matches!(&action, InstanceSyncBridgeAction::SourceData);
+    let group = resolve_instance_sync_group(
+        app,
+        source_instance_id,
+        target_instance_ids,
+        require_targets,
+    )
+    .await?;
+    run_resolved_instance_sync_action(app, bridge, group, action).await
+}
+
+async fn run_resolved_instance_sync_action<T: DeserializeOwned>(
+    app: &tauri::AppHandle,
+    bridge: &WslBridgeManager,
+    group: ResolvedInstanceSyncGroup,
+    action: InstanceSyncBridgeAction,
+) -> Result<T, String> {
+    let (source, targets, wsl_runtime) = match group {
+        ResolvedInstanceSyncGroup::Native { source, targets } => (source, targets, None),
+        ResolvedInstanceSyncGroup::Wsl {
+            source,
+            targets,
+            distribution,
+            user,
+            architecture,
+        } => (source, targets, Some((distribution, user, architecture))),
+    };
+    let source_instance_id = source.instance_id;
+    let profile = ProfileSpec {
+        name: format!("managed-instance-{source_instance_id}"),
+        codex_home: source.codex_home.to_string_lossy().into_owned(),
+        provider: None,
+        model: None,
+        path_maps: Vec::new(),
+    };
+    let shared_wsl_home = wsl_runtime.is_some()
+        && (is_wsl_mounted_path(&profile.codex_home)
+            || targets
+                .iter()
+                .any(|target| is_wsl_mounted_path(&target.codex_home.to_string_lossy())));
+    let targets = targets
+        .into_iter()
+        .map(|target| InstanceSyncBridgeTarget {
+            instance_id: target.instance_id,
+            codex_home: target.codex_home.to_string_lossy().into_owned(),
+        })
+        .collect::<Vec<_>>();
+    let operation = ProfileOperation::InstanceSync {
+        source_instance_id,
+        targets,
+        action,
+    };
+    let requires_codex_stopped = operation.requires_codex_stopped();
+    let value = if let Some((distribution, user, architecture)) = wsl_runtime {
+        if requires_codex_stopped && shared_wsl_home {
+            ensure_windows_codex_stopped_for_shared_wsl_home().await?;
+        }
+        let request = BridgeRequest::new(profile, operation);
+        bridge
+            .invoke(app, &distribution, &user, &architecture, &request)
+            .await
+            .map_err(format_error)?
+    } else {
+        if requires_codex_stopped {
+            ensure_codex_stopped_for_native_profile().await?;
+        }
+        let request = BridgeRequest::new(profile, operation);
+        tauri::async_runtime::spawn_blocking(move || execute_profile_operation(&request))
+            .await
+            .map_err(|error| format!("native instance sync task failed: {error}"))?
+            .map_err(format_error)?
+    };
+    decode_operation_result(value).map_err(format_error)
 }
 
 async fn detect_codex_running_with<
@@ -759,10 +1053,22 @@ where
             if is_wsl_mounted_path(&profile.codex_home)
     );
     let running = execute(target).await?;
-    if !shared_wsl_home {
+    merge_codex_running_with_windows(running, shared_wsl_home, detect_windows).await
+}
+
+async fn merge_codex_running_with_windows<Windows, WindowsFuture>(
+    running: bool,
+    shared_wsl_home: bool,
+    detect_windows: Windows,
+) -> Result<bool, String>
+where
+    Windows: FnOnce() -> WindowsFuture,
+    WindowsFuture: Future<Output = Result<bool, String>>,
+{
+    if !shared_wsl_home || running {
         return Ok(running);
     }
-    Ok(running || detect_windows().await?)
+    detect_windows().await
 }
 
 async fn run_profile_operation<T: DeserializeOwned>(
@@ -1120,6 +1426,7 @@ fn main() {
             select_instance_sync_non_root_config_differences,
             preview_instance_sync,
             execute_instance_sync,
+            detect_instance_sync_codex_running,
             open_external_url
         ])
         .run(tauri::generate_context!())
@@ -1188,6 +1495,30 @@ mod tests {
         assert_eq!(result.unwrap(), true);
         assert_eq!(resolve_calls.get(), 1);
         assert_eq!(windows_check_calls.get(), 1);
+    }
+
+    #[test]
+    fn skips_windows_detection_when_runtime_detection_already_confirmed_running() {
+        let windows_check_calls = Cell::new(0);
+        let failing_windows_check = || {
+            windows_check_calls.set(windows_check_calls.get() + 1);
+            async { Err::<bool, String>("windows detection failed".to_string()) }
+        };
+
+        let shared_and_running = tauri::async_runtime::block_on(merge_codex_running_with_windows(
+            true,
+            true,
+            failing_windows_check,
+        ));
+        let without_shared_home = tauri::async_runtime::block_on(merge_codex_running_with_windows(
+            false,
+            false,
+            failing_windows_check,
+        ));
+
+        assert_eq!(shared_and_running.unwrap(), true);
+        assert_eq!(without_shared_home.unwrap(), false);
+        assert_eq!(windows_check_calls.get(), 0);
     }
 
     #[test]

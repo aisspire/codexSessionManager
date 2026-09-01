@@ -1067,6 +1067,17 @@ select {
   background: #ffffff;
 }
 
+.instance-sync-notice {
+  margin: 0;
+  border: 1px solid #e6c76a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #6d5000;
+  background: #fff8dc;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .instance-sync-plan-actions,
 .instance-sync-actions .action-buttons {
   display: flex;
@@ -1156,6 +1167,13 @@ select {
   border-radius: 5px;
   color: #34465a;
   background: #f8fafc;
+}
+
+.instance-sync-filter-summary {
+  color: #6b7d8d;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.4;
 }
 
 .instance-sync-list,

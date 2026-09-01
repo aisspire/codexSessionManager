@@ -1040,12 +1040,12 @@ mod tests {
     #[test]
     fn response_marker_ignores_login_shell_noise() {
         let stdout = format!(
-            "welcome\n{}{{\"protocol_version\":1,\"ok\":true,\"result\":true}}\n",
+            "welcome\n{}{{\"protocol_version\":2,\"ok\":true,\"result\":true}}\n",
             WSL_BRIDGE_RESPONSE_MARKER
         );
         assert_eq!(
             marked_line(&stdout, WSL_BRIDGE_RESPONSE_MARKER),
-            Some("{\"protocol_version\":1,\"ok\":true,\"result\":true}")
+            Some("{\"protocol_version\":2,\"ok\":true,\"result\":true}")
         );
     }
 
@@ -1054,7 +1054,7 @@ mod tests {
         let cases = [
             (
                 format!(
-                    "{}{{\"protocol_version\":1,\"ok\":false,\"error\":\"failed\"}}",
+                    "{}{{\"protocol_version\":2,\"ok\":false,\"error\":\"failed\"}}",
                     WSL_BRIDGE_RESPONSE_MARKER
                 ),
                 true,
